@@ -1242,6 +1242,10 @@ async def _post_process_meeting_summary(job_id, content: str, meta: dict | None 
     """
     meta = meta or {}
     transcript_id = meta.get("meeting_transcript_id")
+    try:
+        transcript_uuid = uuid.UUID(transcript_id) if transcript_id else None
+    except ValueError:
+        transcript_uuid = None
 
     action_items: list[dict] = []
     protocol_md = (content or "").strip()
@@ -1272,6 +1276,7 @@ async def _post_process_meeting_summary(job_id, content: str, meta: dict | None 
                 description=(desc or "Aus Meeting-Protokoll.") + source_block,
                 suggested_project=item.get("suggested_project"),
                 deadline=item.get("deadline"),
+                meeting_transcript_id=transcript_uuid,
             )
             if task is not None:
                 created_count += 1
@@ -2267,6 +2272,7 @@ async def _create_review_task(
     suggested_project: str | None,
     deadline: str | None,
     email_conversation_id: str | None = None,
+    meeting_transcript_id: uuid.UUID | None = None,
 ) -> Task | None:
     """Gemeinsamer Kern: legt einen Task-Vorschlag (``needs_review=True``) an.
 
@@ -2330,6 +2336,7 @@ async def _create_review_task(
         pipeline_column_id=pipeline_col_id,
         due_date=due_date,
         email_conversation_id=email_conversation_id,
+        meeting_transcript_id=meeting_transcript_id,
         needs_review=True,
         assignee="me",
     )

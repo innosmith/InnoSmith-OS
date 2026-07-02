@@ -17,6 +17,7 @@ from app.routers import (
     analysis,
     auth,
     bexio,
+    briefings,
     calendar,
     capacity,
     chat,
@@ -247,6 +248,7 @@ app.include_router(content.router)
 app.include_router(onedrive.router)
 app.include_router(teams.router)
 app.include_router(meetings.router)
+app.include_router(briefings.router)
 app.include_router(planner.router)
 app.include_router(web_search.router)
 app.include_router(notifications.router)

@@ -16,9 +16,12 @@ Erkannte Muster:
 - **Draft-Edits pro Absender**: Antworten an denselben Kontakt werden wiederholt
   stilistisch angepasst -> Regel, den Stil-Anker konsequenter zu uebernehmen.
 
-Idempotenz: Ein Vorschlag wird nur erzeugt, wenn noch keine Regel mit identischem
-``rule_text`` existiert (auch ``rejected`` zaehlt -> kein erneutes Vorschlagen
-verworfener Regeln).
+Idempotenz: Ein Vorschlag wird nur erzeugt, wenn noch keine Regel mit gleicher
+**semantischer Signatur** (``evidence['key']``, z. B. ``triage:absender:A->B``)
+existiert -- ueber ALLE Status, auch ``rejected``. Da der Schluessel den
+veraenderlichen Zaehler NICHT enthaelt, wird eine bereits verworfene Regel auch
+bei steigendem Zaehler nicht erneut vorgeschlagen. Fuer Altdaten ohne Schluessel
+gilt weiterhin der exakte ``rule_text`` als Fallback-Signatur.
 """
 
 from __future__ import annotations
@@ -38,9 +41,23 @@ from app.models import AgentFeedback, LearnedRule
 logger = logging.getLogger("taskpilot.reflection")
 
 
-async def _existing_rule_texts(db: AsyncSession) -> set[str]:
-    rows = await db.execute(select(LearnedRule.rule_text))
-    return {r for (r,) in rows.all()}
+async def _existing_rule_signatures(db: AsyncSession) -> set[str]:
+    """Signaturen bereits vorhandener Regeln (ueber ALLE Status).
+
+    Bevorzugt der semantische ``evidence['key']`` (stabil gegen Zaehler-
+    Aenderungen); fuer Altdaten ohne Key faellt es auf den exakten ``rule_text``
+    zurueck. So wird eine bereits verworfene Regel nicht erneut vorgeschlagen,
+    auch wenn der Beleg-Zaehler inzwischen gestiegen ist.
+    """
+    rows = await db.execute(select(LearnedRule.rule_text, LearnedRule.evidence))
+    signatures: set[str] = set()
+    for rule_text, evidence in rows.all():
+        key = evidence.get("key") if isinstance(evidence, dict) else None
+        if key:
+            signatures.add(key)
+        if rule_text:
+            signatures.add(rule_text)
+    return signatures
 
 
 def _build_proposals(
@@ -75,7 +92,13 @@ def _build_proposals(
             (
                 "triage",
                 rule_text,
-                {"sender": sender, "from_class": old, "to_class": new, "count": count},
+                {
+                    "sender": sender,
+                    "from_class": old,
+                    "to_class": new,
+                    "count": count,
+                    "key": f"triage:{sender}:{old or '*'}->{new}",
+                },
                 "L1",
             )
         )
@@ -102,7 +125,12 @@ def _build_proposals(
             (
                 "triage",
                 rule_text,
-                {"sender": sender, "signal": "discarded_suggestions", "count": count},
+                {
+                    "sender": sender,
+                    "signal": "discarded_suggestions",
+                    "count": count,
+                    "key": f"triage:{sender}:discard",
+                },
                 "L1",
             )
         )
@@ -122,7 +150,12 @@ def _build_proposals(
             f"erfasst."
         )
         proposals.append(
-            ("draft", rule_text, {"sender": sender, "count": count}, "L1")
+            (
+                "draft",
+                rule_text,
+                {"sender": sender, "count": count, "key": f"draft:{sender}:style"},
+                "L1",
+            )
         )
 
     return proposals
@@ -151,10 +184,11 @@ async def run_reflection(
         if not proposals:
             return 0
 
-        existing = await _existing_rule_texts(db)
+        existing = await _existing_rule_signatures(db)
         created = 0
         for scope, rule_text, evidence, hint in proposals:
-            if rule_text in existing:
+            key = evidence.get("key")
+            if (key and key in existing) or rule_text in existing:
                 continue
             db.add(
                 LearnedRule(
@@ -165,6 +199,8 @@ async def run_reflection(
                     autonomy_hint=hint,
                 )
             )
+            if key:
+                existing.add(key)
             existing.add(rule_text)
             created += 1
         if created:

@@ -29,6 +29,10 @@ export function useSSE(onEvent: SSEHandler) {
       handlerRef.current('notifications_changed', e.data);
     });
 
+    es.addEventListener('learned_rules_changed', (e) => {
+      handlerRef.current('learned_rules_changed', e.data);
+    });
+
     es.onerror = () => {
       es.close();
       setTimeout(() => connect(), 3000);

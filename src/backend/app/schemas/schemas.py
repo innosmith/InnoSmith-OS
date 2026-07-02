@@ -170,6 +170,7 @@ class TaskOut(TaskBase):
     calendar_event_id: str | None = None
     calendar_duration_minutes: int | None = None
     calendar_preferred_time: str | None = None
+    meeting_transcript_id: uuid.UUID | None = None
     needs_review: bool = False
     template_id: uuid.UUID | None = None
     recurrence_end_date: date | None = None
@@ -179,6 +180,7 @@ class TaskOut(TaskBase):
     assignee_user: AssigneeUser | None = None
     source_email_subject: str | None = None
     source_email_from: str | None = None
+    meeting_subject: str | None = None
     created_at: datetime
     updated_at: datetime
     tags: list[TagOut] = []

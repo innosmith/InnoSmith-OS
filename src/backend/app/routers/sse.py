@@ -13,7 +13,7 @@ from app.models import User
 
 router = APIRouter(prefix="/api/sse", tags=["sse"])
 
-OWNER_ONLY_EVENTS = {"agent_jobs_changed", "email_triage_changed", "chat_triage_changed", "mindmaps_changed"}
+OWNER_ONLY_EVENTS = {"agent_jobs_changed", "email_triage_changed", "chat_triage_changed", "mindmaps_changed", "learned_rules_changed"}
 MEMBER_EVENTS = {"tasks_changed", "notifications_changed"}
 
 

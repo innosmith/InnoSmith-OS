@@ -14,6 +14,7 @@ bringen keinen Nutzen mehr.
 import asyncio
 import calendar as cal_mod
 import logging
+import uuid
 from datetime import date, datetime, time as dtime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -132,8 +133,20 @@ async def _get_owner(db) -> User | None:
     return result.scalar_one_or_none()
 
 
-async def _create_briefing_job(briefing_type: str, owner: User, scheduled: datetime) -> None:
-    """Sammelt den Datenkontext und erzeugt den Briefing-Job (queued)."""
+async def create_briefing_job(
+    briefing_type: str,
+    owner: User,
+    scheduled: datetime,
+    *,
+    manual: bool = False,
+) -> uuid.UUID:
+    """Sammelt den Datenkontext und erzeugt den Briefing-Job (queued).
+
+    Wird sowohl vom Scheduler (``check_briefings_due``) als auch vom manuellen
+    Trigger (``POST /api/briefings/generate``) genutzt. Bei ``manual=True`` wird
+    ``metadata_json["manual_trigger"]`` gesetzt; Dedupe/Karenz greifen bewusst
+    nicht (der Aufrufer entscheidet). Gibt die erzeugte Job-ID zurück.
+    """
     from app.services.briefing_data import BUILDERS
 
     # Frische Toggl-Daten für Weekly/Monthly (Lücke 3: 24h-Cache).
@@ -148,7 +161,7 @@ async def _create_briefing_job(briefing_type: str, owner: User, scheduled: datet
     context = await BUILDERS[briefing_type](owner)
 
     async with async_session() as db:
-        db.add(AgentJob(
+        job = AgentJob(
             job_type=briefing_type,
             status="queued",
             metadata_json={
@@ -158,10 +171,20 @@ async def _create_briefing_job(briefing_type: str, owner: User, scheduled: datet
                 "sources": context["sources"],
                 "autonomy_level": "L2",
                 "description": f"{_TYPE_LABELS[briefing_type]} erstellen",
+                "manual_trigger": manual,
             },
-        ))
+        )
+        db.add(job)
+        await db.flush()
+        job_id = job.id
         await db.commit()
-    logger.info("%s-Job erzeugt (Soll-Zeitpunkt %s)", _TYPE_LABELS[briefing_type], scheduled.isoformat())
+    logger.info(
+        "%s-Job erzeugt (%s, Soll-Zeitpunkt %s)",
+        _TYPE_LABELS[briefing_type],
+        "manuell" if manual else "geplant",
+        scheduled.isoformat(),
+    )
+    return job_id
 
 
 async def check_briefings_due() -> int:
@@ -188,7 +211,7 @@ async def check_briefings_due() -> int:
 
     for briefing_type, scheduled in due:
         try:
-            await _create_briefing_job(briefing_type, owner, scheduled)
+            await create_briefing_job(briefing_type, owner, scheduled)
             created += 1
         except Exception:
             logger.exception("Briefing-Job (%s) konnte nicht erzeugt werden", briefing_type)

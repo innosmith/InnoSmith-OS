@@ -263,10 +263,11 @@ async def record_chat_teach(
             reason=content[:500],
             original={"conversation_id": conversation_id} if conversation_id else None,
         )
+        # Idempotenz ueber ALLE Status (auch ``rejected``): eine einmal verworfene
+        # Chat-Lektion wird nicht erneut vorgeschlagen (analog Reflexion).
         existing = await db.execute(
             select(LearnedRule.id).where(
                 LearnedRule.rule_text == content[:2000],
-                LearnedRule.status != "rejected",
             )
         )
         if existing.first() is None:

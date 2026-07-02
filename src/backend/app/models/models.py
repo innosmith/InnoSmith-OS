@@ -112,6 +112,9 @@ class Task(Base):
     calendar_event_id: Mapped[str | None] = mapped_column(Text)
     calendar_duration_minutes: Mapped[int | None] = mapped_column(Integer)
     calendar_preferred_time: Mapped[str | None] = mapped_column(Text)
+    meeting_transcript_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("meeting_transcripts.id", ondelete="SET NULL")
+    )
     needs_review: Mapped[bool] = mapped_column(Boolean, server_default="false")
     pipedrive_deal_id: Mapped[int | None] = mapped_column(Integer)
     pipedrive_person_id: Mapped[int | None] = mapped_column(Integer)
@@ -284,7 +287,8 @@ class FollowupSuggestion(Base):
     """Follow-up-Erkennung: eine Zeile pro geprüfter Sent-Konversation.
 
     Dient als Dedupe-Anker (auch nach Verwerfen des Task-Vorschlags) und als
-    Datenquelle für die Inbox-Statistik. ``status``: suggested | answered.
+    Datenquelle für die Inbox-Statistik. ``status``: suggested | answered |
+    skipped (LLM-Gate hat bewusst kein Nachfassen empfohlen).
     """
 
     __tablename__ = "followup_suggestions"

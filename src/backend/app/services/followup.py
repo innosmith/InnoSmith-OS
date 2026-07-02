@@ -10,6 +10,7 @@ Kein LLM — reiner ``conversationId``-Abgleich. Dedupe über die Tabelle
 ``followup_suggestions`` (überlebt das Verwerfen des Task-Vorschlags).
 """
 
+import json as json_mod
 import logging
 import os
 import re
@@ -17,6 +18,7 @@ import sys
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
+import httpx
 from sqlalchemy import select
 
 from app.config import get_settings
@@ -93,6 +95,73 @@ def _has_reply(messages: list[dict], own_email: str, sent_at: datetime) -> bool:
     return False
 
 
+_GATE_SYSTEM_PROMPT = (
+    "Du beurteilst, ob bei einer von MIR (Anthony) gesendeten E-Mail ein Nachfassen "
+    "sinnvoll ist, weil noch keine Antwort kam.\n\n"
+    "Ein Nachfassen ist NUR sinnvoll, wenn die E-Mail eine OFFENE Frage, eine Bitte, "
+    "ein Angebot oder einen zu treffenden Entscheid enthält, die eine ANTWORT oder "
+    "HANDLUNG des Empfängers erwartet.\n\n"
+    "NICHT sinnvoll (dann false) bei:\n"
+    "- reinen Informationen/FYI, Weiterleitungen ohne Frage\n"
+    "- Dankes-, Bestätigungs- oder Abschluss-Nachrichten ('passt so', 'erledigt', 'danke')\n"
+    "- Termin-Zusagen/-Absagen und automatischen Kalendermeldungen "
+    "('Angenommen:', 'Abgelehnt:', 'Abgesagt:', 'Aktualisiert:')\n"
+    "- Newslettern, automatischen Status- oder Report-Mails\n"
+    "- meinen eigenen Antworten, die eine Frage des Gegenübers beantworten, "
+    "ohne selbst einen neuen offenen Punkt zu öffnen\n\n"
+    "Beispiele:\n"
+    "- Betreff 'Angebot Projektphase 2' / Text 'Bitte gib mir bis Ende Woche Bescheid, "
+    "ob das passt.' -> true\n"
+    "- Betreff 'Angenommen: Weekly' -> false\n"
+    "- Betreff 'AW: Deine Frage zur Rechnung' / Text 'Ja, der Betrag stimmt so.' -> false\n\n"
+    "Antworte AUSSCHLIESSLICH mit JSON: "
+    '{"erwartet_antwort": true|false, "grund": "kurze Begründung"}. /no_think'
+)
+
+
+async def _expects_reply_llm(subject: str, body_preview: str, recipient: str) -> tuple[bool | None, str]:
+    """Lokaler LLM-Gate: Erwartet die gesendete Mail eine Antwort (offene Frage/Bitte)?
+
+    Direkter Ollama-Call (Muster wie ``meetings._extract_names_llm``). Rückgabe:
+    - ``(True, grund)``  -> offene Frage/Bitte, Nachfassen sinnvoll
+    - ``(False, grund)`` -> bewusst kein Nachfassen (dauerhaft als 'skipped' merken)
+    - ``(None, "unklar")`` -> transienter Fehler / LLM nicht erreichbar (nicht
+      persistieren, nächster Lauf versucht erneut)
+    """
+    cfg = get_settings()
+    model = cfg.triage_model.removeprefix("ollama/")
+    url = f"{cfg.ollama_base_url.rstrip('/')}/v1/chat/completions"
+
+    user_content = (
+        f"Empfänger: {recipient}\n"
+        f"Betreff: {subject or '(ohne Betreff)'}\n"
+        f"Auszug: {(body_preview or '').strip()[:800]}"
+    )
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": _GATE_SYSTEM_PROMPT},
+            {"role": "user", "content": user_content},
+        ],
+        "temperature": 0,
+        "stream": False,
+        "response_format": {"type": "json_object"},
+    }
+    try:
+        async with httpx.AsyncClient(timeout=120) as client:
+            resp = await client.post(url, json=payload, headers={"Authorization": "Bearer ollama"})
+            resp.raise_for_status()
+            data = resp.json()
+        content = (((data.get("choices") or [{}])[0]).get("message") or {}).get("content") or ""
+        parsed = json_mod.loads(content)
+        expects = bool(parsed.get("erwartet_antwort"))
+        reason = str(parsed.get("grund") or "").strip()[:300]
+        return expects, reason
+    except Exception as e:  # noqa: BLE001 - transienter Fehler -> nicht persistieren
+        logger.warning("Follow-up-Gate (LLM) fehlgeschlagen: %s", e)
+        return None, "unklar"
+
+
 async def check_followups_due() -> int:
     """Ein Follow-up-Lauf. Gibt die Anzahl neu erstellter Vorschläge zurück."""
     cfg = get_settings()
@@ -162,7 +231,29 @@ async def check_followups_due() -> int:
         if not recipient or recipient == own_email or _NOREPLY_RE.search(recipient):
             continue
         subject = (msg.get("subject") or "").strip()
-        if _NOREPLY_RE.search(subject):
+
+        # LLM-Gate: Enthält die gesendete Mail eine offene Frage/Bitte, die eine
+        # Antwort erwartet? Alleiniger inhaltlicher Entscheider (keine fixen Regeln).
+        decision, gate_reason = await _expects_reply_llm(
+            subject, msg.get("bodyPreview") or "", recipient
+        )
+        if decision is None:
+            # Transienter Fehler / LLM nicht erreichbar -> nicht persistieren,
+            # nächster Lauf versucht dieselbe Konversation erneut.
+            continue
+        if decision is False:
+            # Bewusst kein Nachfassen -> dauerhaft als 'skipped' merken.
+            async with async_session() as db:
+                db.add(FollowupSuggestion(
+                    conversation_id=conv,
+                    subject=subject,
+                    recipient=recipient,
+                    sent_at=sent_at,
+                    status="skipped",
+                ))
+                await db.commit()
+            known_convs.add(conv)
+            logger.info("Follow-up übersprungen (%s): %s", gate_reason or "kein offener Punkt", subject[:80])
             continue
 
         try:
@@ -192,7 +283,8 @@ async def check_followups_due() -> int:
         description = (
             f"Am {sent_str} gesendete E-Mail an {recipient} ist seit über "
             f"{wait_days} Arbeitstagen unbeantwortet.\n\n"
-            f"---\n**Quelle:** Follow-up-Erkennung (Betreff: {subject or '—'})"
+            + (f"**Offener Punkt:** {gate_reason}\n\n" if gate_reason else "")
+            + f"---\n**Quelle:** Follow-up-Erkennung (Betreff: {subject or '—'})"
         )
 
         async with async_session() as db:

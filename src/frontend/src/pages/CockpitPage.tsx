@@ -7,6 +7,7 @@ import { DraftEditor } from '../components/DraftEditor';
 import { FormattedOutput } from '../components/FormattedOutput';
 import { TaskDetailDialog } from '../components/TaskDetailDialog';
 import { EmailThreadPanel } from '../components/EmailThreadPanel';
+import { MeetingSourcePanel } from '../components/MeetingSourcePanel';
 import { EmailBody } from '../components/EmailBody';
 import { TracePanel } from '../components/TracePanel';
 import { AgentRationale } from '../components/agent/AgentRationale';
@@ -52,7 +53,9 @@ interface PendingReviewTask {
   source_email_subject: string | null;
   source_email_from: string | null;
   email_conversation_id: string | null;
-  source: string | null; // 'followup' | null
+  meeting_transcript_id: string | null;
+  meeting_subject: string | null;
+  source: string | null; // 'followup' | 'meeting' | null
   needs_review: boolean;
 }
 
@@ -991,11 +994,23 @@ export function CockpitPage() {
                               Follow-up
                             </span>
                           )}
+                          {task.source === 'meeting' && (
+                            <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-semibold ${
+                              hasBg ? 'bg-violet-500/30 text-violet-200' : 'bg-violet-100 text-violet-700 dark:bg-violet-900/40 dark:text-violet-300'
+                            }`}>
+                              Meeting
+                            </span>
+                          )}
                         </div>
                         {task.source_email_subject && (
                           <div className={`text-xs truncate ${textMuted}`}>
                             Aus E-Mail: {task.source_email_subject}
                             {task.source_email_from && ` von ${task.source_email_from}`}
+                          </div>
+                        )}
+                        {task.meeting_transcript_id && (
+                          <div className={`text-xs truncate ${textMuted}`}>
+                            Aus Meeting: {task.meeting_subject || 'Meeting'}
                           </div>
                         )}
                       </div>
@@ -1019,6 +1034,13 @@ export function CockpitPage() {
                         conversationId={task.email_conversation_id}
                         glassBg={hasBg}
                         compact
+                      />
+                    )}
+                    {task.meeting_transcript_id && (
+                      <MeetingSourcePanel
+                        transcriptId={task.meeting_transcript_id}
+                        subject={task.meeting_subject}
+                        glassBg={hasBg}
                       />
                     )}
                   </div>
@@ -1207,7 +1229,7 @@ export function CockpitPage() {
         <TaskDetailDialog
           taskId={selectedTaskId}
           onClose={() => { setSelectedTaskId(null); setReviewTaskId(null); }}
-          onUpdated={() => { setSelectedTaskId(null); setReviewTaskId(null); fetchAppData(); }}
+          onUpdated={fetchAppData}
           onOpenTask={setSelectedTaskId}
           reviewMode={selectedTaskId === reviewTaskId && reviewTaskId !== null}
           onReviewConfirm={handleReviewConfirm}

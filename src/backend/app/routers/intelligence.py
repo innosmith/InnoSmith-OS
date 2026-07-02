@@ -217,6 +217,7 @@ async def get_learning_overview(
 
     recent_q = await db.execute(
         select(AgentFeedback)
+        .where(AgentFeedback.created_at >= cutoff)
         .order_by(AgentFeedback.created_at.desc())
         .limit(recent_limit)
     )

@@ -1,4 +1,5 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import {
   Video,
   ChevronDown,
@@ -13,7 +14,7 @@ import {
 } from 'lucide-react';
 import { api, getToken } from '../../api/client';
 import { ExportDialog } from '../ExportDialog';
-import { FormattedOutput } from '../FormattedOutput';
+import { MarkdownView } from '../MarkdownView';
 import { useSSE } from '../../hooks/useSSE';
 
 interface MeetingListItem {
@@ -80,6 +81,9 @@ export function MeetingsPanel() {
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [details, setDetails] = useState<Record<string, MeetingDetail>>({});
   const [error, setError] = useState<string | null>(null);
+  const [searchParams] = useSearchParams();
+  const cardRefs = useRef<Record<string, HTMLDivElement | null>>({});
+  const handledDeepLink = useRef<string | null>(null);
 
   const fetchMeetings = useCallback(async () => {
     try {
@@ -100,6 +104,19 @@ export function MeetingsPanel() {
       setError('Meeting-Details konnten nicht geladen werden');
     }
   }, []);
+
+  // Deep-Link (?meeting=<id>): betreffendes Meeting automatisch aufklappen + fokussieren.
+  useEffect(() => {
+    const target = searchParams.get('meeting');
+    if (!target || loading || handledDeepLink.current === target) return;
+    if (!meetings.some(m => m.id === target)) return;
+    handledDeepLink.current = target;
+    setExpandedId(target);
+    loadDetail(target);
+    requestAnimationFrame(() => {
+      cardRefs.current[target]?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
+  }, [searchParams, loading, meetings, loadDetail]);
 
   const toggleExpand = (id: string) => {
     setExpandedId(prev => (prev === id ? null : id));
@@ -143,7 +160,8 @@ export function MeetingsPanel() {
         return (
           <div
             key={m.id}
-            className="rounded-xl border border-white/60 bg-white/70 p-4 shadow-sm backdrop-blur-sm transition-shadow hover:shadow-md dark:border-gray-800 dark:bg-gray-900/70"
+            ref={el => { cardRefs.current[m.id] = el; }}
+            className="scroll-mt-4 rounded-xl border border-white/60 bg-white/70 p-4 shadow-sm backdrop-blur-sm transition-shadow hover:shadow-md dark:border-gray-800 dark:bg-gray-900/70"
           >
             <button
               type="button"
@@ -372,9 +390,7 @@ function MeetingDetailView({
       {/* Inhalt */}
       {currentText ? (
         <div className="max-h-[32rem] overflow-y-auto rounded-lg bg-gray-50 p-4 text-sm text-gray-800 dark:bg-gray-800/60 dark:text-gray-200">
-          {view === 'protokoll'
-            ? <FormattedOutput output={currentText} />
-            : <pre className="whitespace-pre-wrap font-sans text-[13px] leading-relaxed">{currentText}</pre>}
+          <MarkdownView text={currentText} />
         </div>
       ) : (
         <p className="py-4 text-center text-xs italic text-gray-400 dark:text-gray-500">

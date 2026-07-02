@@ -1,8 +1,10 @@
 import { useRef, useState, useMemo, useCallback, useEffect, lazy, Suspense } from 'react';
 import { useNavigate } from 'react-router-dom';
 import type { TaskDetail, Tag, TaskUpdatePayload, PipelineColumn, Project, BoardColumn, AgentJob } from '../../types';
+import { FileText } from 'lucide-react';
 import { api } from '../../api/client';
 import { EmailThreadPanel } from '../EmailThreadPanel';
+import { MeetingSourcePanel } from '../MeetingSourcePanel';
 
 const CalendarSlotPickerLazy = lazy(() => import('./CalendarSlotPicker'));
 import {
@@ -295,6 +297,19 @@ export default function TaskDetailSidebar({
       {task.calendar_event_id && !task.email_message_id && (
         <div className="mb-3 flex items-center gap-1.5 rounded-lg bg-violet-50 px-2.5 py-1.5 text-[11px] font-medium text-violet-600 dark:bg-violet-950/40 dark:text-violet-400">
           <CalendarIcon className="h-3 w-3" /> Verknüpft mit Kalender
+        </div>
+      )}
+      {task.meeting_transcript_id && (
+        <div className="mb-3 rounded-lg bg-violet-50 px-2.5 py-1.5 dark:bg-violet-950/40">
+          <div className="flex items-center gap-1.5 text-[11px] font-medium text-violet-600 dark:text-violet-400">
+            <FileText className="h-3 w-3 shrink-0" /> Aus Meeting-Transkript
+          </div>
+          {task.meeting_subject && (
+            <div className="mt-1 truncate text-[11px] text-violet-700/80 dark:text-violet-300/70">
+              {task.meeting_subject}
+            </div>
+          )}
+          <MeetingSourcePanel transcriptId={task.meeting_transcript_id} subject={task.meeting_subject} />
         </div>
       )}
 

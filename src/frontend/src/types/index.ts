@@ -66,11 +66,13 @@ export interface TaskDetail {
   calendar_event_id: string | null;
   calendar_duration_minutes: number | null;
   calendar_preferred_time: string | null;
+  meeting_transcript_id: string | null;
   needs_review: boolean;
   pipedrive_deal_id: number | null;
   pipedrive_person_id: number | null;
   source_email_subject: string | null;
   source_email_from: string | null;
+  meeting_subject: string | null;
   tags: Tag[];
   checklist_items: ChecklistItem[];
   created_at: string;

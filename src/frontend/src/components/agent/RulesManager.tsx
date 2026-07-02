@@ -5,6 +5,7 @@ import {
   Power, PowerOff, ArrowRight,
 } from 'lucide-react';
 import { api } from '../../api/client';
+import { useSSE } from '../../hooks/useSSE';
 
 type RuleType = 'llm' | 'deterministic';
 
@@ -91,6 +92,7 @@ export function RulesManager() {
   }, []);
 
   useEffect(() => { load(); }, [load]);
+  useSSE((event) => { if (event === 'learned_rules_changed') load(); });
 
   const filtered = useMemo(() => rules.filter((r) => {
     if (typeFilter !== 'all' && r.rule_type !== typeFilter) return false;

@@ -106,6 +106,8 @@ export function SettingsPage() {
   const [triageMsg, setTriageMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
   const [triageTestResults, setTriageTestResults] = useState<TriageTestResult[] | null>(null);
   const [triageTesting, setTriageTesting] = useState(false);
+  const [briefingBusy, setBriefingBusy] = useState<string | null>(null);
+  const [briefingMsg, setBriefingMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
   const [hiddenFolders, setHiddenFolders] = useState<string[]>(['ArchivSorted', 'Conversation History', 'Outbox']);
   const [hiddenFolderInput, setHiddenFolderInput] = useState('');
   const [integrationsActiveEnv, setIntegrationsActiveEnv] = useState(true);
@@ -356,6 +358,25 @@ export function SettingsPage() {
       setTriageMsg({ type: 'err', text: 'Test-Triage fehlgeschlagen' });
     } finally {
       setTriageTesting(false);
+    }
+  };
+
+  const generateBriefing = async (type: 'daily_briefing' | 'weekly_briefing' | 'monthly_briefing') => {
+    setBriefingBusy(type);
+    setBriefingMsg(null);
+    const labels: Record<string, string> = {
+      daily_briefing: 'Tagesbriefing',
+      weekly_briefing: 'Wochenbriefing',
+      monthly_briefing: 'Monatsbriefing',
+    };
+    try {
+      await api.post('/api/briefings/generate', { type });
+      setBriefingMsg({ type: 'ok', text: `${labels[type]} wird erstellt — erscheint gleich im Cockpit` });
+      setTimeout(() => setBriefingMsg(null), 6000);
+    } catch {
+      setBriefingMsg({ type: 'err', text: `${labels[type]} konnte nicht ausgelöst werden` });
+    } finally {
+      setBriefingBusy(null);
     }
   };
 
@@ -1042,6 +1063,13 @@ export function SettingsPage() {
                         disabled={!(settings.briefing_daily_enabled ?? true)}
                         className="rounded-lg border border-gray-300 bg-white px-2 py-1.5 text-sm text-gray-900 focus:border-indigo-500 focus:outline-none disabled:opacity-40 dark:border-gray-600 dark:bg-gray-700 dark:text-white"
                       />
+                      <button
+                        onClick={() => generateBriefing('daily_briefing')}
+                        disabled={briefingBusy !== null}
+                        className="shrink-0 rounded-lg border border-sky-300 bg-white px-3 py-1.5 text-sm font-medium text-sky-700 transition-colors hover:bg-sky-50 disabled:opacity-40 dark:border-sky-700 dark:bg-transparent dark:text-sky-300 dark:hover:bg-sky-950/40"
+                      >
+                        {briefingBusy === 'daily_briefing' ? 'Erstelle…' : 'Jetzt generieren'}
+                      </button>
                     </div>
                     {/* Weekly */}
                     <div className="flex flex-wrap items-center gap-3 rounded-lg border border-gray-200 bg-white p-3 dark:border-gray-700 dark:bg-gray-800/60">
@@ -1072,6 +1100,13 @@ export function SettingsPage() {
                         disabled={!(settings.briefing_weekly_enabled ?? true)}
                         className="rounded-lg border border-gray-300 bg-white px-2 py-1.5 text-sm text-gray-900 focus:border-indigo-500 focus:outline-none disabled:opacity-40 dark:border-gray-600 dark:bg-gray-700 dark:text-white"
                       />
+                      <button
+                        onClick={() => generateBriefing('weekly_briefing')}
+                        disabled={briefingBusy !== null}
+                        className="shrink-0 rounded-lg border border-sky-300 bg-white px-3 py-1.5 text-sm font-medium text-sky-700 transition-colors hover:bg-sky-50 disabled:opacity-40 dark:border-sky-700 dark:bg-transparent dark:text-sky-300 dark:hover:bg-sky-950/40"
+                      >
+                        {briefingBusy === 'weekly_briefing' ? 'Erstelle…' : 'Jetzt generieren'}
+                      </button>
                     </div>
                     {/* Monthly */}
                     <div className="flex flex-wrap items-center gap-3 rounded-lg border border-gray-200 bg-white p-3 dark:border-gray-700 dark:bg-gray-800/60">
@@ -1092,8 +1127,28 @@ export function SettingsPage() {
                         disabled={!(settings.briefing_monthly_enabled ?? true)}
                         className="rounded-lg border border-gray-300 bg-white px-2 py-1.5 text-sm text-gray-900 focus:border-indigo-500 focus:outline-none disabled:opacity-40 dark:border-gray-600 dark:bg-gray-700 dark:text-white"
                       />
+                      <button
+                        onClick={() => generateBriefing('monthly_briefing')}
+                        disabled={briefingBusy !== null}
+                        className="shrink-0 rounded-lg border border-sky-300 bg-white px-3 py-1.5 text-sm font-medium text-sky-700 transition-colors hover:bg-sky-50 disabled:opacity-40 dark:border-sky-700 dark:bg-transparent dark:text-sky-300 dark:hover:bg-sky-950/40"
+                      >
+                        {briefingBusy === 'monthly_briefing' ? 'Erstelle…' : 'Jetzt generieren'}
+                      </button>
                     </div>
                   </div>
+                  {briefingMsg && (
+                    <div className={`mt-3 flex flex-wrap items-center gap-2 text-sm ${briefingMsg.type === 'ok' ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'}`}>
+                      <span>{briefingMsg.text}</span>
+                      {briefingMsg.type === 'ok' && (
+                        <Link to="/agenten?type=briefing" className="font-medium text-sky-700 underline hover:text-sky-800 dark:text-sky-300">
+                          Im Archiv ansehen
+                        </Link>
+                      )}
+                    </div>
+                  )}
+                  <p className="mt-2 text-xs text-gray-400 dark:text-gray-500">
+                    «Jetzt generieren» erstellt sofort ein Briefing (unabhängig vom Zeitplan) — ideal zum Testen der Inhalte.
+                  </p>
                 </div>
 
                 {/* ── Follow-up-Erkennung ── */}

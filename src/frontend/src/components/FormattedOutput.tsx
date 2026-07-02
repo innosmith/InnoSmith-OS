@@ -1,6 +1,5 @@
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
 import { EmailBody } from './EmailBody';
+import { MarkdownView } from './MarkdownView';
 
 const TRIAGE_LABEL_MAP: Record<string, string> = {
   triage_class: 'Klasse',
@@ -60,15 +59,6 @@ function TriageFields({ data }: { data: Record<string, unknown> }) {
   );
 }
 
-function MarkdownBlock({ text }: { text: string }) {
-  if (!text) return null;
-  return (
-    <div className="prose prose-sm max-w-none dark:prose-invert">
-      <ReactMarkdown remarkPlugins={[remarkGfm]}>{text}</ReactMarkdown>
-    </div>
-  );
-}
-
 export function FormattedOutput({ output }: { output: string }) {
   if (!output) return null;
 
@@ -76,9 +66,9 @@ export function FormattedOutput({ output }: { output: string }) {
   if (fenced) {
     return (
       <div className="space-y-3">
-        {fenced.before && <MarkdownBlock text={fenced.before} />}
+        {fenced.before && <MarkdownView text={fenced.before} />}
         <TriageFields data={fenced.json} />
-        {fenced.after && <MarkdownBlock text={fenced.after} />}
+        {fenced.after && <MarkdownView text={fenced.after} />}
       </div>
     );
   }
@@ -102,5 +92,5 @@ export function FormattedOutput({ output }: { output: string }) {
     // not pure JSON
   }
 
-  return <p className="whitespace-pre-wrap">{output}</p>;
+  return <MarkdownView text={output} />;
 }

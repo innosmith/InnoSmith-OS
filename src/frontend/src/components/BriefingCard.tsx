@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Newspaper, ChevronDown, ChevronUp, Copy, Check } from 'lucide-react';
 import { api } from '../api/client';
-import { FormattedOutput } from './FormattedOutput';
+import { MarkdownView } from './MarkdownView';
 import { useSSE } from '../hooks/useSSE';
 import type { AgentJob } from '../types';
 
@@ -170,7 +170,7 @@ export function BriefingCard({ cardClass, textPrimary, textSecondary, textMuted,
         <div className={`mt-3 max-h-[28rem] overflow-y-auto rounded-lg p-3 text-sm ${
           hasBg ? 'bg-white/5' : 'bg-gray-50/70 dark:bg-gray-800/40'
         } ${textPrimary}`}>
-          <FormattedOutput output={current.output || ''} />
+          <MarkdownView text={current.output || ''} />
         </div>
       )}
     </section>

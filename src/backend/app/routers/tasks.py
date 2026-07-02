@@ -17,7 +17,7 @@ from sqlalchemy.orm import selectinload
 from app.auth.deps import MEMBER_RESTRICTED_TASK_FIELDS, check_project_access, get_current_user, require_role
 from app.routers.uploads import _scan_with_clamav
 from app.database import get_db
-from app.models import ActivityLog, AgentJob, Attachment, BoardColumn, BoardMember, ChecklistItem, EmailTriage, FollowupSuggestion, Project, Task, User
+from app.models import ActivityLog, AgentJob, Attachment, BoardColumn, BoardMember, ChecklistItem, EmailTriage, FollowupSuggestion, MeetingTranscript, Project, Task, User
 from app.services.notification import notify_mentions, notify_task_assigned
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "..", "email-graph"))
@@ -255,7 +255,9 @@ class PendingReviewOut(BaseModel):
     email_conversation_id: str | None = None
     source_email_subject: str | None = None
     source_email_from: str | None = None
-    source: str | None = None  # 'followup' | None (Herkunfts-Badge im Cockpit)
+    meeting_transcript_id: uuid.UUID | None = None
+    meeting_subject: str | None = None
+    source: str | None = None  # 'followup' | 'meeting' | None (Herkunfts-Badge im Cockpit)
     created_at: str
 
 
@@ -328,14 +330,24 @@ async def list_pending_review(
             Task, Project.name,
             EmailTriage.subject, EmailTriage.from_name, EmailTriage.from_address,
             FollowupSuggestion.id,
+            MeetingTranscript.subject,
         )
         .join(Project, Task.project_id == Project.id)
         .outerjoin(EmailTriage, Task.email_message_id == EmailTriage.message_id)
         .outerjoin(FollowupSuggestion, FollowupSuggestion.task_id == Task.id)
+        .outerjoin(MeetingTranscript, Task.meeting_transcript_id == MeetingTranscript.id)
         .where(Task.needs_review == True)  # noqa: E712
         .order_by(Task.created_at.desc())
     )
     rows = result.all()
+
+    def _source(followup_id, transcript_subject, transcript_id) -> str | None:
+        if followup_id:
+            return "followup"
+        if transcript_id is not None:
+            return "meeting"
+        return None
+
     return [
         PendingReviewOut(
             id=task.id,
@@ -350,10 +362,12 @@ async def list_pending_review(
             email_conversation_id=task.email_conversation_id,
             source_email_subject=email_subject,
             source_email_from=email_from_name or email_from_addr,
-            source="followup" if followup_id else None,
+            meeting_transcript_id=task.meeting_transcript_id,
+            meeting_subject=meeting_subject,
+            source=_source(followup_id, meeting_subject, task.meeting_transcript_id),
             created_at=task.created_at.isoformat(),
         )
-        for task, proj_name, email_subject, email_from_name, email_from_addr, followup_id in rows
+        for task, proj_name, email_subject, email_from_name, email_from_addr, followup_id, meeting_subject in rows
     ]
 
 
@@ -384,6 +398,11 @@ async def get_task(
         if et_row:
             task_out.source_email_subject = et_row.subject
             task_out.source_email_from = et_row.from_name or et_row.from_address
+    if task.meeting_transcript_id:
+        mt_subject = await db.scalar(
+            select(MeetingTranscript.subject).where(MeetingTranscript.id == task.meeting_transcript_id)
+        )
+        task_out.meeting_subject = mt_subject
     return task_out
 
 

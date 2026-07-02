@@ -31,8 +31,7 @@ from graph_client import GraphClient, GraphConfig  # noqa: E402
 logger = logging.getLogger("taskpilot.meetings")
 
 POLL_INTERVAL_SECONDS = 900          # 15 Minuten
-MEETING_LOOKBACK_HOURS = 24          # Fenster für "kürzlich beendete" Meetings
-MEETING_ENDED_GRACE_MINUTES = 5      # Transkript braucht nach Meeting-Ende kurz
+MEETING_LOOKBACK_HOURS = 24          # Fenster (Transkript-Erstellung) für "kürzlich"
 
 
 def _get_graph_client() -> GraphClient | None:
@@ -125,94 +124,105 @@ def _parse_graph_dt(value: str | None) -> datetime | None:
         return None
 
 
-async def poll_meeting_transcripts() -> int:
-    """Ein Poller-Durchlauf: neue Transkripte beendeter Meetings abholen.
+def _organizer_from_transcript(tr: dict) -> str | None:
+    """Extrahiert den Organisator-Anzeigenamen aus einem getAllTranscripts-Eintrag."""
+    org = ((tr.get("meetingOrganizer") or {}).get("user") or {})
+    return org.get("displayName") or None
 
-    Gibt die Anzahl neu gespeicherter Transkripte zurück. Best-effort: Fehler
-    einzelner Meetings (z. B. 403 vor dem Admin-Setup) blockieren den Rest nicht.
+
+async def poll_meeting_transcripts() -> int:
+    """Ein Poller-Durchlauf: neue Meeting-Transkripte abholen.
+
+    Nutzt ``getAllTranscripts`` (nur vom konfigurierten User organisierte
+    Meetings, GUID-basiert). Gibt die Anzahl neu gespeicherter Transkripte
+    zurück. Best-effort: Fehler einzelner Transkripte (z. B. 403 vor dem
+    Admin-Setup) blockieren den Rest nicht.
     """
     client = _get_graph_client()
     if client is None:
         return 0
 
     now = datetime.now(timezone.utc)
-    since = (now - timedelta(hours=MEETING_LOOKBACK_HOURS)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    start = (now - timedelta(hours=MEETING_LOOKBACK_HOURS)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    end = now.strftime("%Y-%m-%dT%H:%M:%SZ")
     try:
-        meetings = await client.list_recent_meetings(since=since, top=20)
+        transcripts = await client.list_recent_transcripts(start, end)
     except Exception as e:  # noqa: BLE001 - inkl. 403 vor Admin-Freigabe
-        logger.warning("Meeting-Poller: Meetings nicht abrufbar: %s", e)
+        logger.warning("Meeting-Poller: Transkripte nicht abrufbar: %s", e)
         return 0
 
-    stored = 0
     async with async_session() as db:
         known = {
             row[0]
             for row in (await db.execute(select(MeetingTranscript.transcript_id))).all()
         }
 
-    for meeting in meetings:
-        meeting_id = meeting.get("id")
-        end_dt = _parse_graph_dt(meeting.get("endDateTime"))
-        if not meeting_id:
+    stored = 0
+    meeting_cache: dict[str, dict] = {}
+    for tr in transcripts:
+        transcript_id = tr.get("id")
+        meeting_id = tr.get("meetingId")
+        content_url = tr.get("transcriptContentUrl")
+        if not transcript_id or not meeting_id or transcript_id in known or not content_url:
             continue
-        # Nur beendete Meetings (+ Karenz, damit das Transkript fertig ist)
-        if end_dt is None or now < end_dt + timedelta(minutes=MEETING_ENDED_GRACE_MINUTES):
-            continue
+
         try:
-            transcripts = await client.list_meeting_transcripts(meeting_id)
+            raw_vtt = await client.get_transcript_content(content_url)
         except Exception as e:  # noqa: BLE001
-            logger.warning("Meeting-Poller: Transkripte für %s nicht abrufbar: %s", meeting_id, e)
+            logger.warning("Meeting-Poller: VTT %s nicht ladbar: %s", transcript_id, e)
             continue
 
-        for tr in transcripts:
-            transcript_id = tr.get("id")
-            if not transcript_id or transcript_id in known:
-                continue
+        # Meeting-Metadaten (Betreff/Zeiten) best-effort nachladen und cachen
+        meeting = meeting_cache.get(meeting_id)
+        if meeting is None:
             try:
-                raw_vtt = await client.get_meeting_transcript_content(meeting_id, transcript_id)
+                meeting = await client.get_online_meeting(meeting_id)
             except Exception as e:  # noqa: BLE001
-                logger.warning("Meeting-Poller: VTT %s nicht ladbar: %s", transcript_id, e)
-                continue
+                logger.warning("Meeting-Poller: Meeting-Details %s nicht ladbar: %s", meeting_id, e)
+                meeting = {}
+            meeting_cache[meeting_id] = meeting
 
-            parsed = parse_vtt(raw_vtt)
-            subject = meeting.get("subject") or "(ohne Betreff)"
-            organizer = (
-                ((meeting.get("participants") or {}).get("organizer") or {})
-                .get("upn")
-            ) or None
+        parsed = parse_vtt(raw_vtt)
+        subject = meeting.get("subject") or "(ohne Betreff)"
+        organizer = (
+            ((meeting.get("participants") or {}).get("organizer") or {}).get("upn")
+            or _organizer_from_transcript(tr)
+        )
+        started_at = _parse_graph_dt(meeting.get("startDateTime"))
+        ended_at = _parse_graph_dt(meeting.get("endDateTime")) or _parse_graph_dt(tr.get("createdDateTime"))
 
-            async with async_session() as db:
-                record = MeetingTranscript(
-                    meeting_id=meeting_id,
-                    transcript_id=transcript_id,
-                    subject=subject,
-                    organizer=organizer,
-                    started_at=_parse_graph_dt(meeting.get("startDateTime")),
-                    ended_at=end_dt,
-                    raw_vtt=raw_vtt,
-                    transcript_text=parsed,
-                    status="processing",
-                )
-                db.add(record)
-                await db.flush()
-                job = AgentJob(
-                    job_type="meeting_summary",
-                    status="queued",
-                    metadata_json={
-                        "meeting_transcript_id": str(record.id),
-                        "subject": subject,
-                        "description": f"Meeting-Protokoll: {subject}",
-                        "autonomy_level": "L2",
-                    },
-                )
-                db.add(job)
-                await db.flush()
-                record.agent_job_id = job.id
-                await db.commit()
+        async with async_session() as db:
+            record = MeetingTranscript(
+                meeting_id=meeting_id,
+                transcript_id=transcript_id,
+                subject=subject,
+                organizer=organizer,
+                started_at=started_at,
+                ended_at=ended_at,
+                raw_vtt=raw_vtt,
+                transcript_text=parsed,
+                status="processing",
+            )
+            db.add(record)
+            await db.flush()
+            job = AgentJob(
+                job_type="meeting_summary",
+                status="queued",
+                metadata_json={
+                    "meeting_transcript_id": str(record.id),
+                    "subject": subject,
+                    "description": f"Meeting-Protokoll: {subject}",
+                    "autonomy_level": "L2",
+                },
+            )
+            db.add(job)
+            await db.flush()
+            record.agent_job_id = job.id
+            await db.commit()
 
-            known.add(transcript_id)
-            stored += 1
-            logger.info("Transkript gespeichert (%s) + AgentJob meeting_summary erzeugt", subject)
+        known.add(transcript_id)
+        stored += 1
+        logger.info("Transkript gespeichert (%s) + AgentJob meeting_summary erzeugt", subject)
 
     return stored
 

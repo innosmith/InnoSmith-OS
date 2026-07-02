@@ -86,6 +86,7 @@ CREATE TABLE tasks (
     calendar_event_id TEXT,
     calendar_duration_minutes INT,
     calendar_preferred_time TEXT,
+    meeting_transcript_id UUID,  -- FK auf meeting_transcripts, weiter unten gesetzt (Definitionsreihenfolge)
     needs_review    BOOLEAN DEFAULT false,
     pipedrive_deal_id   INT,
     pipedrive_person_id INT,
@@ -400,7 +401,7 @@ CREATE TABLE followup_suggestions (
     recipient       TEXT,
     sent_at         TIMESTAMPTZ,
     status          TEXT DEFAULT 'suggested'
-        CHECK (status IN ('suggested', 'answered')),
+        CHECK (status IN ('suggested', 'answered', 'skipped')),
     created_at      TIMESTAMPTZ DEFAULT now()
 );
 
@@ -431,6 +432,12 @@ CREATE TABLE meeting_transcripts (
 
 CREATE INDEX idx_meeting_transcripts_status ON meeting_transcripts(status);
 CREATE INDEX idx_meeting_transcripts_started ON meeting_transcripts(started_at DESC);
+
+-- FK tasks.meeting_transcript_id (hier gesetzt, da meeting_transcripts erst hier existiert)
+ALTER TABLE tasks
+    ADD CONSTRAINT tasks_meeting_transcript_id_fkey
+    FOREIGN KEY (meeting_transcript_id) REFERENCES meeting_transcripts(id) ON DELETE SET NULL;
+CREATE INDEX idx_tasks_meeting_transcript ON tasks(meeting_transcript_id);
 
 -- Notifications
 CREATE TABLE notifications (

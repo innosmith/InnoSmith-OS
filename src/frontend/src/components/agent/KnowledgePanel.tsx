@@ -1,7 +1,8 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import type { ReactNode } from 'react';
 import { Pencil } from 'lucide-react';
 import { api } from '../../api/client';
+import { useSSE } from '../../hooks/useSSE';
 import { Collapsible } from './Collapsible';
 import { MemoryEditor } from './MemoryEditor';
 
@@ -81,6 +82,13 @@ export function KnowledgePanel() {
 
   const reloadMemory = () =>
     api.get<MemoryFile[]>('/api/memory').then((mf) => setMemFiles(mf ?? [])).catch(() => {});
+
+  const reloadLearning = useCallback(() => {
+    api.get<LearningOverview>('/api/intelligence/learning?days=7')
+      .then((lo) => setLearning(lo))
+      .catch(() => {});
+  }, []);
+  useSSE((event) => { if (event === 'learned_rules_changed') reloadLearning(); });
 
   useEffect(() => {
     Promise.all([

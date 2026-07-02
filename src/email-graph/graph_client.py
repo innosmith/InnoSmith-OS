@@ -14,6 +14,7 @@ GRAPH_CLIENT_SECRET, GRAPH_USER_EMAIL.
 
 import logging
 import os
+import re
 import time
 from dataclasses import dataclass, field
 
@@ -63,6 +64,9 @@ class GraphClient:
         self.config = config or GraphConfig.from_env()
         self._token = _TokenCache()
         self._http: httpx.AsyncClient | None = None
+        # Objekt-ID (GUID) des konfigurierten Users; für Meeting-Endpunkte nötig,
+        # die den UPN nicht akzeptieren. Wird einmalig aufgelöst und gecacht.
+        self._user_id: str = ""
 
     async def _ensure_client(self) -> httpx.AsyncClient:
         if self._http is None or self._http.is_closed:
@@ -185,6 +189,24 @@ class GraphClient:
     @property
     def _user_path(self) -> str:
         return f"/users/{self.config.user_email}"
+
+    async def _get_user_id(self) -> str:
+        """Löst die Objekt-ID (GUID) des konfigurierten Users auf und cached sie.
+
+        Die Online-Meeting-/Transkript-Endpunkte von Graph akzeptieren
+        ausschliesslich die GUID, nicht den UPN (``anthony@…``). Braucht die
+        Application-Permission ``User.Read.All``. Ist ``user_email`` bereits eine
+        GUID, wird sie direkt übernommen.
+        """
+        if self._user_id:
+            return self._user_id
+        email = self.config.user_email or ""
+        if re.fullmatch(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", email):
+            self._user_id = email
+            return self._user_id
+        data = await self._get(f"/users/{email}", {"$select": "id"})
+        self._user_id = data.get("id") or email
+        return self._user_id
 
     # ── E-Mail CRUD ──────────────────────────────────────────────
 
@@ -839,34 +861,68 @@ class GraphClient:
 
     # ── Online Meetings / Transkripte ────────────────────────────
 
-    async def list_recent_meetings(self, since: str, top: int = 10) -> list[dict]:
-        """Kürzliche Online-Meetings seit einem ISO-8601-Zeitpunkt."""
-        data = await self._get(
-            f"{self._user_path}/onlineMeetings",
-            {
-                "$filter": f"startDateTime ge {since}",
-                "$top": str(top),
-                "$orderby": "startDateTime desc",
-            },
+    async def list_recent_transcripts(self, start: str, end: str) -> list[dict]:
+        """Alle Meeting-Transkripte, bei denen der konfigurierte User Organisator ist.
+
+        Nutzt die ``getAllTranscripts``-Funktion (tenant-weit, GUID-basiert).
+        ``start``/``end`` sind ISO-8601-Zeitpunkte und filtern auf den
+        Erstellungszeitpunkt des Transkript-Artefakts. Jeder Eintrag enthält
+        u. a. ``id``, ``meetingId``, ``meetingOrganizer``, ``createdDateTime``
+        und die absolute ``transcriptContentUrl``.
+        """
+        uid = await self._get_user_id()
+        fn = (
+            f"/users/{uid}/onlineMeetings/getAllTranscripts("
+            f"meetingOrganizerUserId='{uid}',startDateTime={start},endDateTime={end})"
         )
+        data = await self._get(fn)
         return data.get("value", [])
 
+    async def get_online_meeting(self, meeting_id: str) -> dict:
+        """Metadaten eines Online-Meetings (Betreff, Start/Ende, Teilnehmer)."""
+        uid = await self._get_user_id()
+        return await self._get(f"/users/{uid}/onlineMeetings/{meeting_id}")
+
     async def list_meeting_transcripts(self, meeting_id: str) -> list[dict]:
-        """Transkripte eines Online-Meetings auflisten."""
+        """Transkripte eines Online-Meetings auflisten (GUID-basiert)."""
+        uid = await self._get_user_id()
         data = await self._get(
-            f"{self._user_path}/onlineMeetings/{meeting_id}/transcripts",
+            f"/users/{uid}/onlineMeetings/{meeting_id}/transcripts",
         )
         return data.get("value", [])
 
     async def get_meeting_transcript_content(
         self, meeting_id: str, transcript_id: str
     ) -> str:
-        """Transkript-Inhalt als VTT-Text laden."""
+        """Transkript-Inhalt als VTT-Text laden (GUID-basiert)."""
+        uid = await self._get_user_id()
         return await self._get_text(
-            f"{self._user_path}/onlineMeetings/{meeting_id}"
+            f"/users/{uid}/onlineMeetings/{meeting_id}"
             f"/transcripts/{transcript_id}/content",
             {"$format": "text/vtt"},
         )
+
+    async def get_transcript_content(self, content_url: str) -> str:
+        """Transkript-Inhalt über die absolute ``transcriptContentUrl`` laden.
+
+        Fällt bei deaktivierter Speaker-Attribution automatisch auf das
+        unattribuierte Textformat zurück (``SpeakerAttributionNotAllowed``).
+        """
+        client = await self._ensure_client()
+        headers = await self._headers()
+        url = content_url if content_url.startswith("http") else f"{GRAPH_BASE}{content_url}"
+        resp = await client.get(
+            url, headers=headers, params={"$format": "text/vtt"},
+            follow_redirects=True, timeout=120.0,
+        )
+        if resp.status_code == 403:
+            resp = await client.get(
+                url, headers=headers,
+                params={"$format": "application/vnd.microsoft.graph.transcript+text"},
+                follow_redirects=True, timeout=120.0,
+            )
+        resp.raise_for_status()
+        return resp.text
 
     # ── OneDrive / SharePoint Files ──────────────────────────────
 

@@ -145,28 +145,41 @@ async def list_recent_meetings(
     hours: int = Query(default=48, ge=1, le=168, description="Meetings der letzten N Stunden"),
     user: User = Depends(get_current_user),
 ):
-    """Kürzliche Online-Meetings mit Transkript-Verfügbarkeit."""
+    """Kürzliche Online-Meetings mit Transkript-Verfügbarkeit.
+
+    Basiert auf ``getAllTranscripts`` (nur vom User organisierte Meetings) und
+    gruppiert die Transkripte pro Meeting.
+    """
     _require_owner(user)
     _check_configured()
     client = _get_graph_client()
     try:
         from datetime import datetime, timedelta, timezone
-        since = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
-        meetings = await client.list_recent_meetings(since=since, top=10)
+        now = datetime.now(timezone.utc)
+        start = (now - timedelta(hours=hours)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        end = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+        transcripts = await client.list_recent_transcripts(start, end)
+
+        by_meeting: dict[str, int] = {}
+        for tr in transcripts:
+            mid = tr.get("meetingId")
+            if mid:
+                by_meeting[mid] = by_meeting.get(mid, 0) + 1
+
         result = []
-        for m in meetings:
-            transcripts = []
+        for meeting_id, count in by_meeting.items():
+            meeting: dict = {}
             try:
-                transcripts = await client.list_meeting_transcripts(m["id"])
+                meeting = await client.get_online_meeting(meeting_id)
             except Exception:
                 pass
             result.append({
-                "id": m.get("id"),
-                "subject": m.get("subject"),
-                "startDateTime": m.get("startDateTime"),
-                "endDateTime": m.get("endDateTime"),
-                "hasTranscript": len(transcripts) > 0,
-                "transcriptCount": len(transcripts),
+                "id": meeting_id,
+                "subject": meeting.get("subject"),
+                "startDateTime": meeting.get("startDateTime"),
+                "endDateTime": meeting.get("endDateTime"),
+                "hasTranscript": True,
+                "transcriptCount": count,
             })
         return result
     except PermissionError as e:
