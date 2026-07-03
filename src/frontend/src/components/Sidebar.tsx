@@ -217,6 +217,16 @@ export function Sidebar({
                   <NavLink to="/agenten/chat" className={collapsedLinkClasses} onClick={onClose} title="Chat">
                     <ChatIcon className="h-5 w-5" />
                   </NavLink>
+                  <NavLink to="/agenten" className={collapsedLinkClasses} onClick={onClose} title="Agenten">
+                    <span className="relative">
+                      <AgentIcon className="h-5 w-5" />
+                      {activeJobCount > 0 && (
+                        <span className="absolute -top-1 -right-1 flex h-3.5 w-3.5 items-center justify-center rounded-full bg-indigo-500 text-[9px] font-bold text-white">
+                          {activeJobCount}
+                        </span>
+                      )}
+                    </span>
+                  </NavLink>
 
                   <div className="my-2 border-t border-gray-200 dark:border-gray-800" />
                 </>
@@ -279,16 +289,6 @@ export function Sidebar({
                   <NavLink to="/debitoren" className={collapsedLinkClasses} onClick={onClose} title="Debitoren">
                     <DebtorsIcon className="h-5 w-5" />
                   </NavLink>
-                  <NavLink to="/agenten" className={collapsedLinkClasses} onClick={onClose} title="Agenten">
-                    <span className="relative">
-                      <AgentIcon className="h-5 w-5" />
-                      {activeJobCount > 0 && (
-                        <span className="absolute -top-1 -right-1 flex h-3.5 w-3.5 items-center justify-center rounded-full bg-indigo-500 text-[9px] font-bold text-white">
-                          {activeJobCount}
-                        </span>
-                      )}
-                    </span>
-                  </NavLink>
                 </>
               )}
             </>
@@ -319,6 +319,17 @@ export function Sidebar({
                   <NavLink to="/agenten/chat" className={linkClasses} onClick={onClose}>
                     <ChatIcon className="h-5 w-5" />
                     <span className="flex-1">Chat</span>
+                  </NavLink>
+
+                  <NavLink to="/agenten" className={linkClasses} onClick={onClose}>
+                    <AgentIcon className="h-5 w-5" />
+                    <span className="flex-1">Agenten</span>
+                    {activeJobCount > 0 && (
+                      <span className="flex items-center gap-1 rounded-full bg-indigo-100 px-2 py-0.5 text-xs font-medium text-indigo-700 dark:bg-indigo-900/40 dark:text-indigo-300">
+                        <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-indigo-500" />
+                        {activeJobCount}
+                      </span>
+                    )}
                   </NavLink>
                 </>
               )}
@@ -390,17 +401,6 @@ export function Sidebar({
                   <NavLink to="/debitoren" className={linkClasses} onClick={onClose}>
                     <DebtorsIcon className="h-5 w-5" />
                     <span className="flex-1">Debitoren</span>
-                  </NavLink>
-
-                  <NavLink to="/agenten" className={linkClasses} onClick={onClose}>
-                    <AgentIcon className="h-5 w-5" />
-                    <span className="flex-1">Agenten</span>
-                    {activeJobCount > 0 && (
-                      <span className="flex items-center gap-1 rounded-full bg-indigo-100 px-2 py-0.5 text-xs font-medium text-indigo-700 dark:bg-indigo-900/40 dark:text-indigo-300">
-                        <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-indigo-500" />
-                        {activeJobCount}
-                      </span>
-                    )}
                   </NavLink>
                 </>
               )}

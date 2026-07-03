@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import {
   Plus, Trash2, ArrowRightLeft, Pencil,
   ChevronLeft, ChevronRight, ChevronDown, Calendar, X, GripVertical, Palmtree, Unlink,
-  Check, AlertTriangle, EyeOff,
+  Check, AlertTriangle, EyeOff, Link2Off,
 } from 'lucide-react';
 import { DndContext, closestCenter, PointerSensor, useSensor, useSensors, type DragEndEvent, useDroppable, useDraggable } from '@dnd-kit/core';
 import { SortableContext, verticalListSortingStrategy, useSortable, arrayMove } from '@dnd-kit/sortable';
@@ -396,6 +396,11 @@ function SortableProjectRow({
         {!project.toggl_project_id && !project.toggl_client_id && (
           <span title="Kein Toggl-Projekt verknüpft — Ist-Vergleich nicht möglich" className="text-gray-400 dark:text-gray-500">
             <Unlink className="h-3 w-3" />
+          </span>
+        )}
+        {!project.project_id && (
+          <span title="Kein TaskPilot-Board verknüpft — Planungs-Check im Briefing nicht möglich" className="text-amber-400 dark:text-amber-500">
+            <Link2Off className="h-3 w-3" />
           </span>
         )}
         <button {...attributes} {...listeners} className="cursor-grab text-gray-400 hover:text-gray-600 dark:hover:text-gray-300" data-testid="capacity-project-drag">
@@ -1127,6 +1132,7 @@ function ProjectDialog({
   const [loadingAvail, setLoadingAvail] = useState(false);
   const [defaultRate, setDefaultRate] = useState<number | null>(null);
   const [togglClients, setTogglClients] = useState<{ id: number; name: string }[]>([]);
+  const [boards, setBoards] = useState<{ id: string; name: string }[]>([]);
   const [filter, setFilter] = useState('');
   const [showPicker, setShowPicker] = useState(!initial);
   const [iconPickerOpen, setIconPickerOpen] = useState(false);
@@ -1170,6 +1176,15 @@ function ProjectDialog({
     if (open && togglClients.length === 0) {
       api.get<{ id: number; name: string }[]>('/api/capacity/toggl-clients')
         .then(setTogglClients)
+        .catch(() => {});
+    }
+  }, [open]);
+
+  // TaskPilot-Boards für die Verknüpfung laden (Basis für Planungs-Check im Briefing).
+  useEffect(() => {
+    if (open && boards.length === 0) {
+      api.get<{ id: string; name: string }[]>('/api/projects')
+        .then((ps) => setBoards(ps.map((p) => ({ id: p.id, name: p.name }))))
         .catch(() => {});
     }
   }, [open]);
@@ -1446,6 +1461,25 @@ function ProjectDialog({
               )}
             </div>
           )}
+
+          <div>
+            <label className="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-300">TaskPilot-Board</label>
+            <select
+              value={projectId ?? ''}
+              onChange={e => setProjectId(e.target.value || null)}
+              className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm dark:border-gray-600 dark:bg-gray-800 dark:text-gray-200"
+              data-testid="capacity-project-board"
+            >
+              <option value="">— Kein Board verknüpft —</option>
+              {boards.map(b => (
+                <option key={b.id} value={b.id}>{b.name}</option>
+              ))}
+            </select>
+            <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+              Verknüpft die Kapazitätsplanung mit dem Task-Board — Grundlage für den
+              Planungs-Check in den Briefings (geplante Stunden vs. offene Aufgaben).
+            </p>
+          </div>
 
           <div>
             <label className="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-300">Notizen</label>

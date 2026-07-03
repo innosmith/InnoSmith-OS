@@ -10,7 +10,7 @@ import bleach
 from croniter import croniter
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, status
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -279,6 +279,8 @@ async def list_due_today(
             Task.is_completed.is_(False),
             Task.due_date.isnot(None),
             Task.due_date <= today,
+            # Wiederkehrende Vorlagen ausschliessen — Fälligkeit gilt nur für Instanzen.
+            ~and_(Task.recurrence_rule.isnot(None), Task.template_id.is_(None)),
         )
         .options(selectinload(Task.tags))
         .order_by(Task.due_date)
@@ -443,6 +445,30 @@ async def update_task(
         update_data["title"] = _sanitize_text(update_data["title"]) or update_data["title"]
     if "description" in update_data:
         update_data["description"] = _sanitize_text(update_data["description"])
+
+    # Wiederkehrende Vorlagen: is_completed und due_date sind auf Vorlagen
+    # bedeutungslos (der Scheduler steuert alles über Cron-Regel + Instanzen)
+    # und stiften nur Verwirrung (falsches «überfällig» im Board/Briefing).
+    is_template = bool(task.recurrence_rule) and task.template_id is None
+    if is_template and update_data.get("is_completed"):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Wiederkehrende Vorlagen können nicht als erledigt markiert "
+                "werden — erledige stattdessen die aktuelle Instanz."
+            ),
+        )
+    becomes_template = (
+        bool(update_data.get("recurrence_rule", task.recurrence_rule))
+        and task.template_id is None
+    )
+    if becomes_template:
+        if update_data.get("recurrence_rule"):
+            # Task wird (neu) zur Vorlage oder Regel ändert: Fälligkeit neutralisieren.
+            update_data["due_date"] = None
+        else:
+            # Bestehende Vorlage: due_date-Änderungen ignorieren.
+            update_data.pop("due_date", None)
 
     # Eiserne Regel: E-Mail-stämmige Tasks sind externe Kommunikation und bleiben
     # serverseitig immer auf Freigabe (L1) -- höhere Autonomie wird hart gekappt.

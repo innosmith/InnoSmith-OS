@@ -200,6 +200,8 @@ export function TaskDetailDialog({ taskId, onClose, onUpdated, onOpenTask, revie
     const handleKeyShortcut = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key === 'Enter' && task) {
         e.preventDefault();
+        // Wiederkehrende Vorlagen können nicht erledigt werden.
+        if (task.recurrence_rule && !task.template_id) return;
         updateTask({ is_completed: !task.is_completed });
       }
     };
@@ -246,17 +248,26 @@ export function TaskDetailDialog({ taskId, onClose, onUpdated, onOpenTask, revie
         {/* ─── Header ─── */}
         <div className="flex items-center justify-between border-b border-gray-100 bg-gray-50/60 px-5 py-2.5 dark:border-gray-800 dark:bg-gray-900/40">
           <div className="flex items-center gap-3">
-            <label className="flex cursor-pointer items-center gap-2" title="Cmd/Ctrl+Enter">
-              <input
-                type="checkbox"
-                checked={task?.is_completed ?? false}
-                onChange={() => task && updateTask({ is_completed: !task.is_completed })}
-                className="h-4 w-4 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500 dark:border-gray-600"
-              />
-              <span className={`text-sm font-medium ${task?.is_completed ? 'text-green-600 dark:text-green-400' : 'text-gray-500 dark:text-gray-400'}`}>
-                {task?.is_completed ? 'Erledigt' : 'Offen'}
+            {task?.recurrence_rule && !task?.template_id ? (
+              <span
+                className="inline-flex items-center gap-1.5 rounded-md bg-indigo-50/80 px-2 py-0.5 text-[11px] font-semibold text-indigo-600 ring-1 ring-indigo-200/60 dark:bg-indigo-950/40 dark:text-indigo-300 dark:ring-indigo-800/40"
+                title="Wiederkehrende Vorlage — Instanzen werden automatisch erzeugt und einzeln erledigt"
+              >
+                Wiederkehrende Vorlage
               </span>
-            </label>
+            ) : (
+              <label className="flex cursor-pointer items-center gap-2" title="Cmd/Ctrl+Enter">
+                <input
+                  type="checkbox"
+                  checked={task?.is_completed ?? false}
+                  onChange={() => task && updateTask({ is_completed: !task.is_completed })}
+                  className="h-4 w-4 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500 dark:border-gray-600"
+                />
+                <span className={`text-sm font-medium ${task?.is_completed ? 'text-green-600 dark:text-green-400' : 'text-gray-500 dark:text-gray-400'}`}>
+                  {task?.is_completed ? 'Erledigt' : 'Offen'}
+                </span>
+              </label>
+            )}
             {currentProject && (
               <span className="rounded-md bg-white/80 px-2 py-0.5 text-[11px] font-medium text-gray-500 shadow-sm ring-1 ring-gray-200/60 dark:bg-gray-800 dark:text-gray-400 dark:ring-gray-700">
                 {currentProject.name}

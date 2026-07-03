@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
-  FileText, Save, AlertCircle, Check, ChevronLeft, RotateCcw, Wrench,
+  FileText, Save, AlertCircle, Check, ChevronLeft, RotateCcw, Wrench, Eye, Pencil,
 } from 'lucide-react';
 import { api } from '../../api/client';
+import { MarkdownView } from '../MarkdownView';
 
 interface AgentSkill {
   name: string;
@@ -16,6 +17,13 @@ interface SkillUsageItem {
   name: string;
   view_count: number;
   last_used_at: string | null;
+}
+
+/** Blendet den führenden YAML-Frontmatter-Block (--- … ---) nur für die
+ *  Vorschau aus, damit er nicht als Trennlinie plus Fliesstext erscheint.
+ *  Der Bearbeiten-Modus bleibt vollständig (inkl. Frontmatter). */
+function skillBody(md: string): string {
+  return md.replace(/^\uFEFF?---\r?\n[\s\S]*?\r?\n---\r?\n?/, '').trimStart();
 }
 
 function errMsg(e: unknown): string {
@@ -39,6 +47,7 @@ export function SkillsPanel() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [savedNote, setSavedNote] = useState<string | null>(null);
+  const [mode, setMode] = useState<'preview' | 'edit'>('preview');
 
   const load = useCallback(async () => {
     try {
@@ -69,6 +78,7 @@ export function SkillsPanel() {
     if (current) setDraft(current.content);
     setSavedNote(null);
     setError(null);
+    setMode('preview');
   }, [current]);
 
   const selectSkill = (name: string) => {
@@ -172,6 +182,24 @@ export function SkillsPanel() {
                     {dirty && <span className="h-2 w-2 shrink-0 rounded-full bg-amber-500" title="Ungespeicherte Änderungen" />}
                   </div>
                   <div className="flex items-center gap-1.5">
+                    <div className="mr-1 flex rounded-lg border border-gray-200 p-0.5 dark:border-gray-700">
+                      {([
+                        ['preview', 'Vorschau', Eye],
+                        ['edit', 'Bearbeiten', Pencil],
+                      ] as const).map(([m, label, Icon]) => (
+                        <button
+                          key={m}
+                          onClick={() => setMode(m)}
+                          className={`inline-flex items-center gap-1 rounded-md px-2.5 py-1 text-xs font-medium transition-colors ${
+                            mode === m
+                              ? 'bg-indigo-600 text-white'
+                              : 'text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800'
+                          }`}
+                        >
+                          <Icon className="h-3.5 w-3.5" /> {label}
+                        </button>
+                      ))}
+                    </div>
                     {dirty && (
                       <button
                         onClick={() => setDraft(current.content)}
@@ -202,12 +230,18 @@ export function SkillsPanel() {
                   </div>
                 )}
 
-                <textarea
-                  value={draft}
-                  onChange={(e) => setDraft(e.target.value)}
-                  spellCheck={false}
-                  className="min-h-[420px] w-full flex-1 resize-y rounded-xl border border-gray-300 bg-gray-50 p-4 font-mono text-[13px] leading-relaxed text-gray-800 focus:border-indigo-500 focus:bg-white focus:outline-none dark:border-gray-700 dark:bg-gray-800 dark:text-gray-100 dark:focus:bg-gray-800"
-                />
+                {mode === 'preview' ? (
+                  <div className="min-h-[420px] flex-1 overflow-y-auto rounded-xl border border-gray-200 bg-gray-50 p-4 text-gray-800 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-100">
+                    <MarkdownView text={skillBody(draft)} />
+                  </div>
+                ) : (
+                  <textarea
+                    value={draft}
+                    onChange={(e) => setDraft(e.target.value)}
+                    spellCheck={false}
+                    className="min-h-[420px] w-full flex-1 resize-y rounded-xl border border-gray-300 bg-gray-50 p-4 font-mono text-[13px] leading-relaxed text-gray-800 focus:border-indigo-500 focus:bg-white focus:outline-none dark:border-gray-700 dark:bg-gray-800 dark:text-gray-100 dark:focus:bg-gray-800"
+                  />
+                )}
 
                 <div className="mt-2 flex min-h-[20px] items-center justify-between text-xs">
                   <span className="text-gray-400 dark:text-gray-500">{draft.length.toLocaleString('de-CH')} Zeichen · Markdown</span>

@@ -3,7 +3,7 @@ from datetime import date, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
-from sqlalchemy import func, select, update
+from sqlalchemy import and_, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -310,6 +310,8 @@ async def project_metrics(
 
     result = []
     today = date.today()
+    # Wiederkehrende Vorlagen zählen nicht als Aufgaben — nur ihre Instanzen.
+    not_template = ~and_(Task.recurrence_rule.isnot(None), Task.template_id.is_(None))
     for p in projects:
         counts = await db.execute(
             select(
@@ -321,7 +323,7 @@ async def project_metrics(
                     Task.due_date != None,
                     Task.due_date < today,
                 ).label("overdue"),
-            ).where(Task.project_id == p.id)
+            ).where(Task.project_id == p.id, not_template)
         )
         row = counts.one()
         total = row.total or 0

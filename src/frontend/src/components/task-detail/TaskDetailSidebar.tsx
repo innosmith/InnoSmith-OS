@@ -332,38 +332,41 @@ export default function TaskDetailSidebar({
         </AttrRow>
       )}
 
-      <AttrRow icon={CalendarIcon} label="Fällig am">
-        <input
-          ref={dateInputRef}
-          type="date"
-          value={task.due_date ?? ''}
-          onChange={(e) => updateTask({ due_date: e.target.value || null })}
-          className="sr-only"
-        />
-        <button
-          onClick={() => dateInputRef.current?.showPicker()}
-          className={`flex w-full items-center gap-2 rounded-lg border px-2.5 py-1.5 text-xs transition-colors ${dueDateClasses}`}
-        >
-          <CalendarIcon className="h-3.5 w-3.5 shrink-0 opacity-50" />
-          {task.due_date ? (
-            <span>
-              {isDueToday && <span className="font-semibold">Heute, </span>}
-              {isDueOverdue && <span className="font-semibold">Überfällig · </span>}
-              {formatDateDE(task.due_date)}
-            </span>
-          ) : (
-            <span className="text-gray-400 dark:text-gray-500">Kein Datum</span>
-          )}
-          {task.due_date && (
-            <button
-              onClick={(e) => { e.stopPropagation(); updateTask({ due_date: null }); }}
-              className="ml-auto rounded p-0.5 hover:bg-black/5 dark:hover:bg-white/10"
-            >
-              <CloseIcon className="h-3 w-3" />
-            </button>
-          )}
-        </button>
-      </AttrRow>
+      {/* Vorlagen haben kein Fälligkeitsdatum — die Cron-Regel bestimmt die Instanzen. */}
+      {!isTemplate && (
+        <AttrRow icon={CalendarIcon} label="Fällig am">
+          <input
+            ref={dateInputRef}
+            type="date"
+            value={task.due_date ?? ''}
+            onChange={(e) => updateTask({ due_date: e.target.value || null })}
+            className="sr-only"
+          />
+          <button
+            onClick={() => dateInputRef.current?.showPicker()}
+            className={`flex w-full items-center gap-2 rounded-lg border px-2.5 py-1.5 text-xs transition-colors ${dueDateClasses}`}
+          >
+            <CalendarIcon className="h-3.5 w-3.5 shrink-0 opacity-50" />
+            {task.due_date ? (
+              <span>
+                {isDueToday && <span className="font-semibold">Heute, </span>}
+                {isDueOverdue && <span className="font-semibold">Überfällig · </span>}
+                {formatDateDE(task.due_date)}
+              </span>
+            ) : (
+              <span className="text-gray-400 dark:text-gray-500">Kein Datum</span>
+            )}
+            {task.due_date && (
+              <button
+                onClick={(e) => { e.stopPropagation(); updateTask({ due_date: null }); }}
+                className="ml-auto rounded p-0.5 hover:bg-black/5 dark:hover:bg-white/10"
+              >
+                <CloseIcon className="h-3 w-3" />
+              </button>
+            )}
+          </button>
+        </AttrRow>
+      )}
 
       <AttrRow icon={FolderIcon} label="Projekt">
         <CustomSelect

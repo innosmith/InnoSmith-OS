@@ -1515,36 +1515,47 @@ Führe den Auftrag aus und gib dein **vollständiges** Ergebnis direkt als final
 
 _BRIEFING_INSTRUCTIONS: dict[str, str] = {
     "daily_briefing": (
-        "Erstelle ein kompaktes **Tagesbriefing** für heute:\n"
-        "1. **Tagesüberblick** (2-3 Sätze): Was prägt den heutigen Tag?\n"
-        "2. **Termine**: Chronologisch, mit kurzen Vorbereitungshinweisen wo sinnvoll "
-        "(z. B. 'Unterlagen zu X bereitlegen'). Terminkonflikte explizit benennen.\n"
-        "3. **Top-Prioritäten** (max. 3): Welche Aufgaben heute zuerst? Begründe kurz "
-        "anhand Fälligkeit und Fokus-Spalte.\n"
-        "4. **Entscheidungen fällig**: Wartende Freigaben und Task-Vorschläge in einem Satz.\n"
-        "5. **Sonstiges**: Nur wenn relevant (Triage-Auffälligkeiten, Signale, Warnungen)."
+        "Erstelle das **Tagesbriefing** — eine knappe Entscheidungshilfe, KEIN Dashboard. "
+        "Die Terminliste, Freigaben und die Inbox sieht Anthony bereits im Cockpit; "
+        "wiederhole sie NICHT. Maximal ~250 Wörter.\n"
+        "1. **Top-3 heute**: Die drei Aufgaben, mit denen der Tag beginnen sollte — je mit "
+        "kurzer Begründung (Fälligkeit, Blockade, verfügbare Restzeit). Fokusarbeit gehört "
+        "in den Vormittag.\n"
+        "2. **Loose Ends**: Überfälliges und Liegengebliebenes — je mit dem konkreten "
+        "nächsten Schritt (nicht nur auflisten).\n"
+        "3. **Termin-Auffälligkeiten**: NUR falls vorhanden — Konflikte, fehlende Puffer, "
+        "Vorbereitungsbedarf. Sonst Sektion weglassen."
     ),
     "weekly_briefing": (
-        "Erstelle ein **Wochenbriefing** zur Ressourcenplanung der kommenden Woche:\n"
-        "1. **Rückblick** (3-4 Sätze): Plan vs. effektiv geleistete Zeit pro Projekt -- wo "
-        "gab es Abweichungen? Nenne nur die relevanten.\n"
-        "2. **Kommende Woche**: Kapazitätslage (geplante Auslastung, Termine, Abwesenheiten). "
-        "Wie viel Zeit bleibt realistisch für Aufgabenarbeit?\n"
-        "3. **Projekt-Lage**: Wo brennen offene/überfällige Aufgaben? Priorisiere über Projekte.\n"
-        "4. **Planungsempfehlung** (max. 5 Punkte): Welche Aufgaben in die verfügbare Zeit "
-        "einplanen, was verschieben, was delegieren?\n"
-        "5. **Risiken**: Überbuchung, Deadline-Kollisionen, offene Entscheidungen."
+        "Erstelle das **Wochenbriefing** — ein Planungsinstrument für die kommende Woche, "
+        "kein Statusreport. Maximal ~450 Wörter.\n"
+        "1. **Liegengeblieben**: Was letzte Woche fällig war und offen ist — je mit "
+        "konkretem nächstem Schritt. Plan-vs-Ist-Stunden nur erwähnen, wenn die Abweichung "
+        "über 30% liegt (1-2 Sätze, mit Konsequenz).\n"
+        "2. **Planungs-Check**: Wo sind Stunden geplant, aber keine oder zu wenige Aufgaben "
+        "erfasst? Benenne jede Lücke direkt — dort fehlt die Planung, nicht die Zeit.\n"
+        "3. **Slot-Vorschläge**: Ordne den freien Kalenderfenstern der kommenden Woche "
+        "konkrete Aufgaben zu (Fälligkeit und Vorbereitungsbedarf zuerst). Prüfe auch die "
+        "übernächste Woche: Was dort ansteht und Vorlauf braucht, gehört in die Fenster "
+        "DIESER Woche. Kennzeichne alles klar als Vorschlag — Anthony entscheidet und bucht.\n"
+        "4. **Top-3 der Woche** + was bewusst NICHT diese Woche passiert.\n"
+        "5. **Risiken**: Überbuchung, Deadline-Kollisionen — nur echte, keine hypothetischen."
     ),
     "monthly_briefing": (
-        "Erstelle ein **Monatsbriefing** mit Blick auf die nächsten zwei Monate:\n"
-        "1. **Monatsrückblick** (3-4 Sätze): Soll/Ist pro Projekt, wesentliche Abweichungen.\n"
-        "2. **Vorschau nächster Monat**: Termine, geplante Kapazität, Umsatzprognose, "
-        "Abwesenheiten -- was prägt den Monat?\n"
-        "3. **Vorschau übernächster Monat**: Was zeichnet sich ab, was muss JETZT geplant "
-        "werden, damit es rechtzeitig bereit ist (Vorlaufzeiten!)?\n"
-        "4. **Empfehlungen** (max. 5 Punkte): Aufgaben rechtzeitig einplanen, Engpässe "
-        "entschärfen, Kapazität anpassen.\n"
-        "5. **Finanzen/Administratives**: Nur wenn aus den Daten relevant (Renewals, Warnungen)."
+        "Erstelle das **Monatsbriefing** — Geschäftssteuerung mit Blick auf zwei Monate. "
+        "Maximal ~450 Wörter.\n"
+        "1. **Monatsbilanz** (3-4 Sätze): Umsatz Soll vs. fakturiert (CHF). Keine "
+        "Stunden-Details pro Projekt — die prüft Anthony bei der Verrechnung selbst.\n"
+        "2. **Pipeline-Deckung**: Reicht die offene Pipeline (Deal-Wert), um die "
+        "Umsatzlücken der nächsten zwei Monate zu füllen? Rechne NICHT selbst — nutze die "
+        "Zahlen aus der Datenlage.\n"
+        "3. **Vorlauf-Radar**: Projekte mit eingeplanter Kapazität im nächsten/übernächsten "
+        "Monat, aber ohne (genügend) erfasste Aufgaben — dort muss die Planung JETZT "
+        "beginnen. Benenne jedes einzeln mit Datum der ersten Allokation.\n"
+        "4. **Kapazität & Abwesenheiten**: Was prägt die nächsten zwei Monate (Ferien, "
+        "Spitzenwochen)?\n"
+        "5. **Empfehlungen** (max. 5): jede mit konkretem Datum, bis wann sie angegangen "
+        "sein muss. Renewals/Kündigungsfristen hier einordnen, falls in der Datenlage."
     ),
 }
 
@@ -1577,11 +1588,24 @@ Du bist Anthonys persönlicher Assistent und erstellst sein Briefing.
 ## VERBINDLICHE REGELN
 
 - Verwende AUSSCHLIESSLICH Zahlen und Fakten aus der obigen Datenlage. Erfinde NICHTS.
+- Übernimm Zahlen WÖRTLICH (1:1) aus der Datenlage — rechne NIE um, aggregiere NIE
+  selbst, bilde keine eigenen Summen oder Differenzen.
+- Behaupte KEINE Zeiträume oder Verläufe, die nicht explizit in der Datenlage stehen
+  (z. B. NICHT «liegt seit einer Woche», wenn dort nur «offen» steht).
+- Sektionen ohne Inhalt komplett weglassen — schreibe NICHT «keine Auffälligkeiten».
+- KEINE Markdown-Tabellen — kurze Listen und **Fettdruck** für das Wichtigste.
+- Profilwissen über Anthony (Gewohnheiten, bevorzugte Tagesstruktur) dient NUR als
+  Kontext für Empfehlungen (z. B. Fokusarbeit morgens einplanen). Behaupte NIE
+  Tagesabläufe oder Routinen als Fakt — für den konkreten Tag zählt ausschliesslich
+  der Kalender in der Datenlage.
+- Sei direkt und benenne unbequeme Muster beim Namen (z. B. wiederholte Ausfälle
+  desselben Projekts, wachsender Rückstand, unrealistische Planung) — faktenbasiert,
+  ohne Dramatisierung.
 - Sektionen ohne Daten lässt du weg. Als «Quelle nicht konfiguriert» oder «nicht
   erreichbar» markierte Quellen erwähnst du gesammelt in EINEM Satz am Ende.
 - Schreibe auf Deutsch (Schweizer Rechtschreibung: ss statt ß), direkt und knapp.
   Keine Floskeln, keine Einleitung wie «Gerne erstelle ich...».
-- Nutze Markdown: `##`-Überschriften pro Sektion, kurze Listen, **Fett** für das Wichtigste.
+- Nutze Markdown: `##`-Überschriften pro Sektion, kurze Listen.
 - Du brauchst KEINE Tools aufzurufen -- alle Daten stehen oben. Gib das fertige
   Briefing direkt als finale Antwort aus.
 """
@@ -3485,12 +3509,29 @@ async def _process_job(agent, job_id, job_type: str, prompt: str, meta: dict) ->
     _job_tool_names.clear()
     disable_thinking = _thinking_disabled(job_type, meta.get("skill"))
 
+    # Briefings sind reine Prosa-Synthese (alle Daten stehen im Prompt): sie laufen
+    # mit Prosa-Sampling (temp 0.7 etc.) und ohne Thinking — identisch zum
+    # Draft-Schreib-Pass. Das Default-Sampling produzierte nachweislich
+    # verstümmelte Zahlen und schwachen Stil.
+    is_briefing_job = job_type in ("daily_briefing", "weekly_briefing", "monthly_briefing")
+    if is_briefing_job:
+        disable_thinking = True
+
     # Pro-Task-LLM-Override (lokal): Modellwechsel fuer diesen Job via
     # request_overrides (Leitprinzip 3: LLM-Kontrolle pro Task). Cloud-Overrides
     # laufen ueber einen eigenen Agenten (siehe _worker_loop/_build_cloud_job_agent).
     overrides = _local_override_request(meta, getattr(agent, "model", None), disable_thinking)
     if overrides:
         logger.info("Job %s: LLM-Override aktiv -> %s", job_id, overrides.get("model"))
+
+    if is_briefing_job:
+        prose = _draft_sampling_overrides(True)
+        if overrides:
+            # Modell-Override behalten, Prosa-Sampling ergänzen (extra_body mergen).
+            merged_extra = {**prose.get("extra_body", {}), **(overrides.get("extra_body") or {})}
+            overrides = {**prose, **overrides, "extra_body": merged_extra}
+        else:
+            overrides = prose
 
     # Token-Verbrauch pro Job messen: der persistente Agent zaehlt kumulativ
     # (session_total_tokens) -- die Differenz vor/nach dem Lauf ist der Verbrauch

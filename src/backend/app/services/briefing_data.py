@@ -16,10 +16,19 @@ from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from fastapi import HTTPException
-from sqlalchemy import select
+from sqlalchemy import and_, func, select
 
 from app.database import async_session
-from app.models import AgentJob, CapacityProject, CapacityTimeOff, EmailTriage, Task, User
+from app.models import (
+    AgentJob,
+    CapacityAllocation,
+    CapacityProject,
+    CapacityTimeOff,
+    EmailTriage,
+    Project,
+    Task,
+    User,
+)
 
 logger = logging.getLogger("taskpilot.briefing_data")
 
@@ -112,6 +121,112 @@ async def _sec_calendar_today(owner: User) -> str:
     day_end = day_start + timedelta(days=1)
     events = await _load_events(owner, day_start.isoformat(), day_end.isoformat())
     return "\n".join(_fmt_event(ev) for ev in events[:_MAX_EVENTS])
+
+
+def _parse_event_local(dt_str: str) -> datetime:
+    """Graph-Zeitstempel (lokal via Prefer-Header) minutengenau parsen."""
+    return datetime.strptime(dt_str[:16], "%Y-%m-%dT%H:%M")
+
+
+async def _sec_calendar_anomalies(owner: User) -> str:
+    """NUR Termin-Auffälligkeiten des Tages: Überlappungen und fehlende Puffer.
+
+    Die vollständige Terminliste steht im Cockpit — das Briefing nennt nur,
+    was Aufmerksamkeit braucht. Leer = keine Auffälligkeiten (Sektion entfällt).
+    """
+    now = datetime.now(_TZ)
+    day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    events = await _load_events(owner, day_start.isoformat(), (day_start + timedelta(days=1)).isoformat())
+
+    timed = []
+    for ev in events:
+        if ev.is_all_day or not ev.start or not ev.end:
+            continue
+        try:
+            timed.append((_parse_event_local(ev.start), _parse_event_local(ev.end), ev))
+        except ValueError:
+            continue
+    timed.sort(key=lambda t: t[0])
+
+    lines = []
+    for (_s1, e1, a), (s2, _e2, b) in zip(timed, timed[1:]):
+        gap_min = (s2 - e1).total_seconds() / 60
+        if gap_min < 0:
+            lines.append(
+                f"- **Konflikt**: «{a.subject}» (bis {e1.strftime('%H:%M')}) überlappt "
+                f"mit «{b.subject}» (ab {s2.strftime('%H:%M')})"
+            )
+        elif gap_min < 15:
+            lines.append(
+                f"- Ohne Puffer: «{a.subject}» endet {e1.strftime('%H:%M')}, "
+                f"«{b.subject}» beginnt {s2.strftime('%H:%M')}"
+            )
+    return "\n".join(lines)
+
+
+_WEEKDAYS_DE = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"]
+_WEEKDAYS_DE_FULL = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"]
+_MONTHS_DE = [
+    "Januar", "Februar", "März", "April", "Mai", "Juni",
+    "Juli", "August", "September", "Oktober", "November", "Dezember",
+]
+
+
+def _month_de(d: date) -> str:
+    return f"{_MONTHS_DE[d.month - 1]} {d.year}"
+
+
+async def _sec_free_slots(owner: User, week_start: date) -> str:
+    """Freie Kalenderfenster (≥45 Min, 08:00–18:00) Mo–Fr der Woche ab ``week_start``.
+
+    Deterministische Grundlage für die Slot-Vorschläge im Wochenbriefing — das
+    LLM ordnet den Fenstern nur noch Aufgaben zu, berechnet aber nichts selbst.
+    """
+    min_window = timedelta(minutes=45)
+    lines = []
+    for i in range(5):
+        day = week_start + timedelta(days=i)
+        start_local = datetime.combine(day, datetime.min.time()).replace(hour=8)
+        end_local = start_local.replace(hour=18)
+        start_dt = start_local.replace(tzinfo=_TZ)
+        end_dt = end_local.replace(tzinfo=_TZ)
+        events = await _load_events(owner, start_dt.isoformat(), end_dt.isoformat())
+
+        blocked_all_day = False
+        intervals: list[tuple[datetime, datetime]] = []
+        for ev in events:
+            if ev.is_all_day:
+                blocked_all_day = True
+                break
+            try:
+                s = _parse_event_local(ev.start)
+                e = _parse_event_local(ev.end)
+            except (ValueError, TypeError):
+                continue
+            intervals.append((max(s, start_local), min(e, end_local)))
+        if blocked_all_day:
+            lines.append(f"- {_WEEKDAYS_DE[i]} {day.strftime('%d.%m.')}: ganztägig belegt")
+            continue
+
+        intervals.sort()
+        windows: list[tuple[datetime, datetime]] = []
+        cursor = start_local
+        for s, e in intervals:
+            if s - cursor >= min_window:
+                windows.append((cursor, s))
+            cursor = max(cursor, e)
+        if end_local - cursor >= min_window:
+            windows.append((cursor, end_local))
+
+        if windows:
+            wins = ", ".join(
+                f"{a.strftime('%H:%M')}–{b.strftime('%H:%M')} ({_fmt_min((b - a).total_seconds() / 60)})"
+                for a, b in windows
+            )
+            lines.append(f"- {_WEEKDAYS_DE[i]} {day.strftime('%d.%m.')}: {wins}")
+        else:
+            lines.append(f"- {_WEEKDAYS_DE[i]} {day.strftime('%d.%m.')}: kein freies Fenster")
+    return "\n".join(lines)
 
 
 async def _sec_calendar_range(owner: User, start: datetime, end: datetime, cap: int = _MAX_EVENTS) -> str:
@@ -286,6 +401,138 @@ async def _sec_project_metrics(owner: User) -> str:
     return "\n".join(lines)
 
 
+# Filter: wiederkehrende Vorlagen sind keine echten Aufgaben (nur ihre Instanzen).
+_NOT_TEMPLATE = ~and_(Task.recurrence_rule.isnot(None), Task.template_id.is_(None))
+
+
+async def _sec_overdue_open(owner: User) -> str:
+    """Liegengebliebenes: offene Aufgaben mit überschrittener Fälligkeit (ohne Vorlagen)."""
+    today = date.today()
+    async with async_session() as db:
+        rows = (
+            await db.execute(
+                select(Task.title, Task.due_date, Project.name)
+                .outerjoin(Project, Task.project_id == Project.id)
+                .where(
+                    Task.is_completed.is_(False),
+                    Task.due_date.isnot(None),
+                    Task.due_date < today,
+                    _NOT_TEMPLATE,
+                )
+                .order_by(Task.due_date)
+                .limit(_MAX_TASKS)
+            )
+        ).all()
+    return "\n".join(
+        f"- {title} [{pname or 'ohne Projekt'}], fällig {due} "
+        f"({(today - due).days} Tage überfällig)"
+        for title, due, pname in rows
+    )
+
+
+async def _sec_planning_check(owner: User, start: date, end: date) -> str:
+    """Planungs-Check: geplante Kapazität vs. erfasste Aufgaben pro verknüpftem Board.
+
+    Kernfrage: Wo sind Stunden eingeplant, aber keine (oder kaum) Aufgaben
+    erfasst? Dort fehlt die Planung. Bewusst NUR über die echte
+    ``project_id``-Verknüpfung — Kapazitätsprojekte ohne Board-Link werden
+    transparent ausgewiesen (Verknüpfung in der Kapazitätsplanung nachziehen).
+    """
+    async with async_session() as db:
+        rows = (
+            await db.execute(
+                select(
+                    CapacityProject.name,
+                    CapacityProject.project_id,
+                    func.sum(CapacityAllocation.minutes).label("minutes"),
+                    func.min(CapacityAllocation.week_start).label("first_week"),
+                )
+                .join(CapacityAllocation, CapacityAllocation.capacity_project_id == CapacityProject.id)
+                .where(
+                    CapacityAllocation.week_start >= start,
+                    CapacityAllocation.week_start < end,
+                    CapacityAllocation.minutes > 0,
+                    CapacityProject.status != "archiviert",
+                    CapacityProject.is_billable.is_(True),
+                )
+                .group_by(CapacityProject.name, CapacityProject.project_id)
+                .order_by(func.sum(CapacityAllocation.minutes).desc())
+            )
+        ).all()
+
+        lines: list[str] = []
+        unlinked: list[str] = []
+        for name, project_id, minutes, first_week in rows:
+            hours = _fmt_min(minutes)
+            if project_id is None:
+                unlinked.append(f"{name} ({hours})")
+                continue
+            open_count = await db.scalar(
+                select(func.count(Task.id)).where(
+                    Task.project_id == project_id,
+                    Task.is_completed.is_(False),
+                    _NOT_TEMPLATE,
+                )
+            ) or 0
+            if open_count == 0:
+                lines.append(
+                    f"- **{name}: {hours} geplant (ab {first_week}), aber 0 offene "
+                    f"Aufgaben auf dem Board — Aufgabenplanung fehlt**"
+                )
+            else:
+                no_due = await db.scalar(
+                    select(func.count(Task.id)).where(
+                        Task.project_id == project_id,
+                        Task.is_completed.is_(False),
+                        Task.due_date.is_(None),
+                        _NOT_TEMPLATE,
+                    )
+                ) or 0
+                suffix = f", davon {no_due} ohne Fälligkeitsdatum" if no_due else ""
+                lines.append(f"- {name}: {hours} geplant (ab {first_week}), {open_count} offene Aufgaben{suffix}")
+
+    if unlinked:
+        lines.append(
+            "- Ohne Board-Verknüpfung (Planungs-Check nicht möglich — in der "
+            "Kapazitätsplanung «TaskPilot-Board» setzen): " + ", ".join(unlinked)
+        )
+    return "\n".join(lines)
+
+
+async def _sec_week_after_next(owner: User, week_start: date) -> str:
+    """Übernächste Woche im Radar: Termine + fällige Aufgaben (Vorbereitungs-Check).
+
+    Was hier ansteht und Vorlauf braucht, muss bereits DIESE Woche in die
+    freien Fenster eingeplant werden.
+    """
+    start_dt = datetime.combine(week_start, datetime.min.time()).replace(tzinfo=_TZ)
+    cal = await _sec_calendar_range(owner, start_dt, start_dt + timedelta(days=7), cap=10)
+    async with async_session() as db:
+        rows = (
+            await db.execute(
+                select(Task.title, Task.due_date, Project.name)
+                .outerjoin(Project, Task.project_id == Project.id)
+                .where(
+                    Task.is_completed.is_(False),
+                    Task.due_date >= week_start,
+                    Task.due_date < week_start + timedelta(days=7),
+                    _NOT_TEMPLATE,
+                )
+                .order_by(Task.due_date)
+                .limit(10)
+            )
+        ).all()
+    parts = []
+    if cal:
+        parts.append("Termine:\n" + cal)
+    if rows:
+        parts.append(
+            "Fällige Aufgaben:\n"
+            + "\n".join(f"- {t} [{p or 'ohne Projekt'}], fällig {d}" for t, d, p in rows)
+        )
+    return "\n\n".join(parts)
+
+
 # ── Freigaben / Triage ───────────────────────────────────────────────────────
 
 async def _sec_pending_approvals(owner: User) -> str:
@@ -373,7 +620,11 @@ async def _sec_weekly_capacity(owner: User, week_start: date, weeks: int = 2) ->
 
 
 async def _sec_plan_vs_actual(owner: User, week_start: date) -> str:
-    """Plan vs. Toggl-Ist der Woche ab ``week_start`` (inkl. Lücken-Transparenz)."""
+    """Plan vs. Toggl-Ist der Woche ab ``week_start`` — nur relevante Abweichungen.
+
+    Bewusst gefiltert auf >30% Abweichung (oder Ist ganz ohne Plan): kleine
+    Differenzen sind Rauschen und verwässern das Briefing.
+    """
     from app.routers import capacity as capacity_router
 
     data = await capacity_router.get_plan_vs_actual(
@@ -388,6 +639,8 @@ async def _sec_plan_vs_actual(owner: User, week_start: date) -> str:
         if planned == 0 and actual == 0:
             continue
         delta = actual - planned
+        if planned > 0 and abs(delta) / planned <= 0.3:
+            continue
         delta_str = f"+{_fmt_min(delta)}" if delta >= 0 else f"-{_fmt_min(abs(delta))}"
         lines.append(
             f"- {proj['name']}: geplant {_fmt_min(planned)}, effektiv {_fmt_min(actual)} ({delta_str})"
@@ -441,6 +694,73 @@ async def _sec_forecast_revenue(owner: User, d_from: date, d_to: date) -> str:
     )
 
 
+def _chf(value: float) -> str:
+    return f"CHF {value:,.0f}".replace(",", "'")
+
+
+async def _sec_revenue_soll_ist(owner: User, month: str) -> str:
+    """Umsatz Soll (Kapazitätsprognose) vs. Ist (fakturiert, Bexio) für einen Monat."""
+    from app.routers import capacity as capacity_router
+    from app.routers import debtors as debtors_router
+
+    y, m = (int(x) for x in month.split("-"))
+    m_start = date(y, m, 1)
+    m_end = date(y, m, cal_mod.monthrange(y, m)[1])
+
+    soll = 0.0
+    for it in await capacity_router.get_forecast_revenue(
+        from_date=m_start.isoformat(), to_date=m_end.isoformat(), user=owner,
+    ):
+        if it.month == month:
+            soll = float(it.revenue)
+
+    deb = await debtors_router.get_debtors(user=owner)
+    ist = sum(float((rt.months or {}).get(month, 0)) for rt in deb.revenue_trend)
+    delta = ist - soll
+    delta_str = f"+{_chf(delta)}" if delta >= 0 else f"-{_chf(abs(delta))}"
+    lines = [
+        f"- Soll (Kapazitätsplanung × Stundensatz): {_chf(soll)}",
+        f"- Ist (fakturiert, Bexio): {_chf(ist)}",
+        f"- Differenz: {delta_str}",
+    ]
+    if deb.total_open:
+        lines.append(f"- Offene Debitoren gesamt: {_chf(deb.total_open)}")
+    return "\n".join(lines)
+
+
+async def _sec_pipeline_coverage(owner: User, d_from: date, d_to: date) -> str:
+    """Pipeline-Deckung: offener Deal-Wert (Pipedrive) vs. geplanter Umsatz."""
+    from app.routers import capacity as capacity_router
+    from app.routers import pipedrive as pipedrive_router
+
+    summary = await pipedrive_router.get_pipeline_summary(pipeline_id=None, user=owner)
+    total_value = 0.0
+    total_deals = 0
+    stage_lines: list[str] = []
+    for pl in summary or []:
+        for st in pl.get("stages", []):
+            if not st.get("deal_count"):
+                continue
+            total_deals += int(st["deal_count"])
+            total_value += float(st.get("total_value") or 0)
+            stage_lines.append(
+                f"  - {st.get('name')}: {st['deal_count']} Deal(s), {_chf(float(st.get('total_value') or 0))}"
+            )
+
+    planned = sum(
+        float(it.revenue)
+        for it in await capacity_router.get_forecast_revenue(
+            from_date=d_from.isoformat(), to_date=d_to.isoformat(), user=owner,
+        )
+    )
+    lines = [
+        f"- Offene Pipeline (Pipedrive): {total_deals} Deal(s), {_chf(total_value)} gesamt",
+        f"- Bereits eingeplanter Umsatz {d_from.strftime('%m/%Y')}–{d_to.strftime('%m/%Y')}: {_chf(planned)}",
+    ]
+    lines.extend(stage_lines)
+    return "\n".join(lines)
+
+
 async def _sec_time_off(start: date, end: date) -> str:
     async with async_session() as db:
         rows = (
@@ -481,8 +801,10 @@ async def _sec_creditor_warnings(owner: User) -> str:
     lines = []
     for group, label in (("critical", "Kritisch"), ("warning", "Warnung")):
         for item in (anomalies.get(group) or [])[:4] if isinstance(anomalies, dict) else []:
-            desc = item.get("description") or item.get("Kreditor") or str(item)
-            lines.append(f"- Anomalie ({label}): {str(desc)[:100]}")
+            vendor = item.get("kreditor") or item.get("Kreditor") or ""
+            title = item.get("title") or item.get("description") or ""
+            desc = f"{vendor}: {title}" if vendor and title else (vendor or title or str(item))
+            lines.append(f"- Anomalie ({label}): {str(desc)[:120]}")
         for item in (renewals.get(group) or [])[:4] if isinstance(renewals, dict) else []:
             desc = item.get("vendor") or item.get("Kreditor") or str(item)
             days = item.get("days_until") or item.get("Tage")
@@ -514,20 +836,22 @@ def _render(sections: list[Section], header: str) -> dict:
 
 
 async def build_daily_context(owner: User) -> dict:
-    """Kontext für das Tagesbriefing (heutige Ereignisse im Detail)."""
+    """Kontext für das Tagesbriefing — Entscheidungshilfe, kein Cockpit-Duplikat.
+
+    Bewusst schlank: Terminliste, Freigaben, Triage und Warnungen stehen bereits
+    im Cockpit. Hier nur, was für die Top-3-Priorisierung nötig ist.
+    """
     now = datetime.now(_TZ)
-    yesterday = now - timedelta(days=1)
     sections = [
-        await _safe_section("termine", "Heutige Termine", lambda: _sec_calendar_today(owner)),
+        await _safe_section(
+            "termin_auffaellig", "Termin-Auffälligkeiten heute (Konflikte, fehlende Puffer)",
+            lambda: _sec_calendar_anomalies(owner),
+        ),
         await _safe_section("faellig", "Heute fällige und überfällige Aufgaben", lambda: _sec_tasks_due_today(owner)),
         await _safe_section("fokus", "Fokus-Aufgaben", lambda: _sec_focus_tasks(owner)),
-        await _safe_section("freigaben", "Wartende Freigaben und Vorschläge", lambda: _sec_pending_approvals(owner)),
-        await _safe_section("triage", "E-Mail-Triage seit gestern", lambda: _sec_triage_since(owner, yesterday)),
         await _safe_section("restzeit", "Verfügbare Restzeit (Kalender)", lambda: _sec_calendar_free_capacity(owner)),
-        await _safe_section("signale", "SIGNA-Signale heute", lambda: _sec_signa(owner, "today")),
-        await _safe_section("kreditoren", "Kreditoren-Warnungen", lambda: _sec_creditor_warnings(owner)),
     ]
-    header = f"## Datenlage Tagesbriefing — {now.strftime('%A, %d.%m.%Y')}"
+    header = f"## Datenlage Tagesbriefing — {_WEEKDAYS_DE_FULL[now.weekday()]}, {now.strftime('%d.%m.%Y')}"
     return _render(sections, header)
 
 
@@ -542,17 +866,28 @@ async def build_weekly_context(owner: User) -> dict:
 
     next_week_start_dt = datetime.combine(next_monday, datetime.min.time()).replace(tzinfo=_TZ)
 
+    week_after = next_monday + timedelta(weeks=1)
+
     sections = [
         await _safe_section(
-            "rueckblick_zeit", f"Rückblick Woche ab {review_monday.strftime('%d.%m.')}: Plan vs. Ist (Toggl)",
+            "liegengeblieben", "Liegengeblieben: offene Aufgaben mit überschrittener Fälligkeit",
+            lambda: _sec_overdue_open(owner),
+        ),
+        await _safe_section(
+            "rueckblick_zeit",
+            f"Plan vs. Ist Woche ab {review_monday.strftime('%d.%m.')} (nur Abweichungen >30%)",
             lambda: _sec_plan_vs_actual(owner, review_monday),
         ),
         await _safe_section(
-            "rueckblick_kalender", "Rückblick: Kalenderauslastung",
-            lambda: _sec_calendar_week_review(owner, review_monday),
+            "planungscheck",
+            "Planungs-Check: geplante Kapazität vs. erfasste Aufgaben (kommende 2 Wochen)",
+            lambda: _sec_planning_check(owner, next_monday, next_monday + timedelta(weeks=2)),
+        ),
+        await _safe_section(
+            "slots", "Freie Kalenderfenster der kommenden Woche (für Slot-Vorschläge)",
+            lambda: _sec_free_slots(owner, next_monday),
         ),
         await _safe_section("projekte", "Offene Aufgaben pro Projekt", lambda: _sec_project_metrics(owner)),
-        await _safe_section("agenda", "Agenda-Pipeline", lambda: _sec_week_pipeline(owner)),
         await _safe_section(
             "kapazitaet", "Kapazitätsplanung kommende Wochen",
             lambda: _sec_weekly_capacity(owner, next_monday, weeks=2),
@@ -562,21 +897,34 @@ async def build_weekly_context(owner: User) -> dict:
             lambda: _sec_calendar_range(owner, next_week_start_dt, next_week_start_dt + timedelta(days=7)),
         ),
         await _safe_section(
+            "uebernaechste", f"Übernächste Woche im Radar (ab {week_after.strftime('%d.%m.')})",
+            lambda: _sec_week_after_next(owner, week_after),
+        ),
+        await _safe_section(
             "timeoff", "Abwesenheiten (14 Tage)",
             lambda: _sec_time_off(next_monday, next_monday + timedelta(days=13)),
         ),
-        await _safe_section("freigaben", "Wartende Freigaben und Vorschläge", lambda: _sec_pending_approvals(owner)),
-        await _safe_section("signale", "SIGNA-Signale der Woche", lambda: _sec_signa(owner, "week")),
     ]
     header = f"## Datenlage Wochenbriefing — KW {next_monday.isocalendar()[1]} (Woche ab {next_monday.strftime('%d.%m.%Y')})"
     return _render(sections, header)
 
 
 async def build_monthly_context(owner: User) -> dict:
-    """Kontext für das Monatsbriefing (Rückblick + Vorschau 2 Monate)."""
+    """Kontext für das Monatsbriefing (Bilanz + Vorschau 2 Monate).
+
+    Adaptiver Bilanzmonat: Der reguläre Lauf am Monatsletzten bilanziert den
+    laufenden Monat; ein manueller Trigger früh im Monat (Tag <= 7) bilanziert
+    den Vormonat — sonst entstünde eine irreführende «Bilanz» eines Monats,
+    der gerade erst begonnen hat.
+    """
     now = datetime.now(_TZ)
     today = now.date()
-    this_month = today.strftime("%Y-%m")
+    if today.day <= 7:
+        review_start = (today.replace(day=1) - timedelta(days=1)).replace(day=1)
+    else:
+        review_start = today.replace(day=1)
+    review_month = review_start.strftime("%Y-%m")
+
     next_month_start = (today.replace(day=1) + timedelta(days=32)).replace(day=1)
     after_next_start = (next_month_start + timedelta(days=32)).replace(day=1)
     after_next_end = after_next_start.replace(
@@ -586,21 +934,28 @@ async def build_monthly_context(owner: User) -> dict:
 
     sections = [
         await _safe_section(
-            "rueckblick", f"Rückblick {this_month}: Soll/Ist pro Projekt",
-            lambda: _sec_monthly_actual(owner, this_month),
+            "umsatz_sollist", f"Monatsbilanz {review_month}: Umsatz Soll vs. Ist",
+            lambda: _sec_revenue_soll_ist(owner, review_month),
         ),
         await _safe_section(
             "umsatz", "Umsatzprognose kommende Monate",
             lambda: _sec_forecast_revenue(owner, next_month_start, after_next_end),
         ),
-        await _safe_section("projekte", "Offene Aufgaben pro Projekt", lambda: _sec_project_metrics(owner)),
-        await _safe_section("vorschau", "Aufgaben-Vorschau (2 Monate)", lambda: _sec_month_pipeline(owner)),
+        await _safe_section(
+            "coverage", "Pipeline-Deckung (Pipedrive vs. eingeplanter Umsatz)",
+            lambda: _sec_pipeline_coverage(owner, next_month_start, after_next_end),
+        ),
+        await _safe_section(
+            "vorlauf",
+            "Vorlauf-Radar: geplante Kapazität vs. erfasste Aufgaben (nächste 2 Monate)",
+            lambda: _sec_planning_check(owner, next_month_start, after_next_end),
+        ),
         await _safe_section(
             "kapazitaet", "Kapazitätsplanung kommende 8 Wochen",
             lambda: _sec_weekly_capacity(owner, _monday_of(next_month_start), weeks=8),
         ),
         await _safe_section(
-            "termine", f"Termine im {next_month_start.strftime('%B %Y')}",
+            "termine", f"Termine im {_month_de(next_month_start)}",
             lambda: _sec_calendar_range(
                 owner, next_month_dt,
                 next_month_dt + timedelta(days=cal_mod.monthrange(next_month_start.year, next_month_start.month)[1]),
@@ -613,7 +968,10 @@ async def build_monthly_context(owner: User) -> dict:
         ),
         await _safe_section("kreditoren", "Kreditoren-Warnungen und Renewals", lambda: _sec_creditor_warnings(owner)),
     ]
-    header = f"## Datenlage Monatsbriefing — Vorschau {next_month_start.strftime('%B %Y')} und {after_next_start.strftime('%B %Y')}"
+    header = (
+        f"## Datenlage Monatsbriefing — Bilanzmonat {review_month}, "
+        f"Vorschau {_month_de(next_month_start)} und {_month_de(after_next_start)}"
+    )
     return _render(sections, header)
 
 

@@ -49,9 +49,12 @@ export function TaskCard({
   };
 
   const hasChecklist = task.checklist_total > 0;
+  // Wiederkehrende Vorlage: Datum/Überfällig-Markierung sind bedeutungslos —
+  // der Scheduler steuert alles über die Cron-Regel und die Instanzen.
+  const isTemplate = Boolean(task.recurrence_rule) && !task.template_id;
   const todayStr = new Date().toISOString().split('T')[0];
-  const isOverdue = task.due_date && task.due_date < todayStr && !task.is_completed;
-  const isDueToday = task.due_date === todayStr && !task.is_completed;
+  const isOverdue = !isTemplate && task.due_date && task.due_date < todayStr && !task.is_completed;
+  const isDueToday = !isTemplate && task.due_date === todayStr && !task.is_completed;
 
   const handleArchive = async (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -88,7 +91,7 @@ export function TaskCard({
         task.is_completed ? 'opacity-60' : ''
       }`}
     >
-      {onArchive && !task.is_completed && (
+      {onArchive && !task.is_completed && !isTemplate && (
         <button
           onClick={handleArchive}
           className="absolute -right-1 -top-1 flex h-6 w-6 items-center justify-center rounded-full bg-emerald-500 text-white opacity-0 shadow-sm transition-all hover:bg-emerald-600 group-hover:opacity-100"
@@ -144,7 +147,7 @@ export function TaskCard({
             {task.checklist_done}/{task.checklist_total}
           </span>
         )}
-        {task.due_date && (
+        {task.due_date && !isTemplate && (
           <span
             className={`flex items-center gap-1 ${
               isOverdue
@@ -163,11 +166,19 @@ export function TaskCard({
             <PinIcon className="h-3.5 w-3.5" />
           </span>
         )}
-        {(task.recurrence_rule || task.template_id) && (
+        {isTemplate ? (
+          <span
+            className="inline-flex items-center gap-1 rounded-full bg-indigo-100 px-1.5 py-0.5 text-[10px] font-semibold text-indigo-600 dark:bg-indigo-900/40 dark:text-indigo-300"
+            title="Wiederkehrende Vorlage — Instanzen werden automatisch erzeugt"
+          >
+            <RepeatIcon className="h-2.5 w-2.5" />
+            Wiederkehrend
+          </span>
+        ) : task.template_id ? (
           <span className="text-indigo-400" title="Wiederkehrend">
             <RepeatIcon className="h-3.5 w-3.5" />
           </span>
-        )}
+        ) : null}
         {task.needs_review && (
           <span
             className="inline-flex items-center gap-1 rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] font-semibold text-amber-700 dark:bg-amber-900/40 dark:text-amber-300"
