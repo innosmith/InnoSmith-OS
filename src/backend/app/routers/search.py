@@ -2,6 +2,7 @@ import asyncio
 import logging
 import re
 import sys
+import time
 import uuid
 from datetime import date
 from pathlib import Path
@@ -26,6 +27,11 @@ from app.routers.pipedrive import _extract_pic_url
 logger = logging.getLogger("taskpilot.search")
 
 _search_cache: TTLCache = TTLCache(maxsize=200, ttl=300)
+
+# Anzahl OneDrive-Treffer in der globalen Instant-Suche. Die Microsoft Search API
+# liefert weit mehr (Default 25/Seite, via Paging Hunderte) -- dies ist bewusst ein
+# UI-Fenster fuer das Dropdown, analog zur Task-Grenze (20).
+_ONEDRIVE_SEARCH_TOP = 20
 
 router = APIRouter(prefix="/api/search", tags=["search"])
 
@@ -312,23 +318,40 @@ def _strip_hit_highlights(summary: str | None) -> str | None:
     return s or None
 
 
-# Prozessweiter Cache der Tenant-Region (siteCollection.dataLocationCode). Wird je
-# Suche ein neuer GraphClient gebaut, würde die Region sonst bei jedem Tastendruck
-# neu aufgelöst -- ein unnötiger Graph-Call. Sentinel ``False`` = noch nicht geprüft.
-_region_cache: str | None | bool = False
+# Prozessweiter Cache der Tenant-Region (Microsoft Search API, app-only Pflicht).
+# WICHTIG fuer Determinismus: Wir cachen ausschliesslich ERFOLGE. Ein transienter
+# Timeout bei der Aufloesung (z. B. direkt nach einem Neustart unter Last) darf NICHT
+# dazu fuehren, dass fuer die gesamte Prozess-Lebensdauer keine Snippets mehr kommen.
+# Nach einem Fehlversuch wird daher (throttled) erneut aufgeloest, bis es klappt.
+_region_value: str | None = None      # aufgeloeste Region, sobald bekannt (sticky)
+_region_last_try: float = 0.0         # monotonic-Timestamp des letzten Versuchs
+_REGION_RETRY_SECONDS = 60.0          # Mindestabstand zwischen Fehlversuchen
 
 
 async def _resolve_region(client, settings) -> str | None:
-    global _region_cache
+    """Liefert die Search-API-Region -- deterministisch und selbstheilend.
+
+    Reihenfolge: explizite Config (``TP_GRAPH_SEARCH_REGION``) > bereits aufgelöster
+    Cache-Wert > Neuauflösung. Fehlversuche werden bewusst NICHT gecacht (nur
+    zeitlich gedrosselt), damit die Vorschau nach einem transienten Fehler von
+    selbst zurückkommt statt bis zum nächsten Neustart auszufallen.
+    """
+    global _region_value, _region_last_try
     if settings.graph_search_region:
         return settings.graph_search_region
-    if _region_cache is not False:
-        return _region_cache  # type: ignore[return-value]
+    if _region_value:
+        return _region_value
+    now = time.monotonic()
+    if now - _region_last_try < _REGION_RETRY_SECONDS:
+        return None  # kürzlich fehlgeschlagen -> kurz nicht erneut hämmern
+    _region_last_try = now
     try:
-        _region_cache = await asyncio.wait_for(client.get_search_region(), timeout=8.0)
+        region = await asyncio.wait_for(client.get_search_region(), timeout=15.0)
     except Exception:  # noqa: BLE001
-        _region_cache = None
-    return _region_cache  # type: ignore[return-value]
+        region = None
+    if region:
+        _region_value = region  # nur Erfolge sind sticky
+    return region
 
 
 async def _search_onedrive(term: str) -> list[FileHit]:
@@ -358,7 +381,10 @@ async def _search_onedrive(term: str) -> list[FileHit]:
             region = await _resolve_region(client, s)
             if region:
                 hits = await asyncio.wait_for(
-                    client.search_query(term, entity_types=["driveItem"], region=region, top=8),
+                    client.search_query(
+                        term, entity_types=["driveItem"], region=region,
+                        top=_ONEDRIVE_SEARCH_TOP,
+                    ),
                     timeout=8.0,
                 )
                 results: list[FileHit] = []
@@ -379,7 +405,9 @@ async def _search_onedrive(term: str) -> list[FileHit]:
                 return results
 
             # Fallback ohne Region: Namens-/Metadaten-Suche (kein Snippet).
-            items = await asyncio.wait_for(client.search_drive(term, top=8), timeout=8.0)
+            items = await asyncio.wait_for(
+                client.search_drive(term, top=_ONEDRIVE_SEARCH_TOP), timeout=8.0
+            )
             return [
                 FileHit(
                     id=item.get("id", ""),
@@ -478,7 +506,7 @@ async def semantic_search(
     sources: str | None = Query(
         None, description="Komma-Liste der Quelltypen: email,onedrive,upload,transcript"
     ),
-    limit: int = Query(20, ge=1, le=50),
+    limit: int = Query(50, ge=1, le=500),
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_role("owner")),
 ) -> SemanticSearchResults:

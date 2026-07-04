@@ -8,7 +8,7 @@ export default defineConfig({
     react(),
     tailwindcss(),
     VitePWA({
-      registerType: 'prompt',
+      registerType: 'autoUpdate',
       includeAssets: ['favicon.png'],
       devOptions: { enabled: false },
       manifest: {
@@ -30,6 +30,11 @@ export default defineConfig({
       workbox: {
         maximumFileSizeToCacheInBytes: 4 * 1024 * 1024,
         globPatterns: ['**/*.{js,css,html,svg,png,woff2}'],
+        // Neuer SW uebernimmt sofort (kein Warten auf Tab-Schliessung) und beansprucht
+        // offene Clients -- zusammen mit registerType 'autoUpdate' erreichen Deploys
+        // den Browser ohne manuellen Eingriff (kurzer Auto-Reload).
+        skipWaiting: true,
+        clientsClaim: true,
         runtimeCaching: [
           {
             // Kein Cache für Streams (SSE) — kann sonst Abort / «network error» verursachen

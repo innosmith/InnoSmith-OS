@@ -164,9 +164,12 @@ class Settings(BaseSettings):
     # Chunking (Zeichen)
     search_chunk_chars: int = 1000
     search_chunk_overlap: int = 150
-    # Retrieval
-    search_semantic_k: int = 20                 # finale Trefferzahl (UI)
-    search_candidate_k: int = 50                # Kandidaten vor Rerank/Fusion
+    # Retrieval. Grosszuegig gehalten -- die semantische Suche ist der bewusste,
+    # nicht-per-Tastendruck-Pfad; hier soll man vollstaendig finden, nicht ein
+    # kleines Fenster sehen. ANN mit LIMIT ist auch bei einigen Hundert schnell.
+    search_semantic_k: int = 50                 # finale Trefferzahl (Default)
+    search_semantic_k_max: int = 500            # harte Obergrenze fuer den Endpoint
+    search_candidate_k: int = 300               # Kandidaten vor Rerank/Fusion
     # Reranker (tiefer/agentischer Pfad) -- Cross-Encoder ueber die Kandidaten.
     # Default AUS, bis das Modell lokal vorliegt; interaktiver UI-Pfad nutzt ihn nie.
     search_reranker_enabled: bool = False

@@ -183,7 +183,7 @@ TOOLS = [
                     "items": {"type": "string", "enum": ["email", "onedrive", "upload", "transcript"]},
                     "description": "Optionaler Filter auf Quelltypen",
                 },
-                "limit": {"type": "integer", "default": 10},
+                "limit": {"type": "integer", "default": 25, "description": "Max. Treffer (bis 500)"},
             },
             "required": ["query"],
         },
@@ -487,9 +487,9 @@ async def _semantic_search_documents(p: asyncpg.Pool, arguments: dict) -> list[T
     if not query:
         return [TextContent(type="text", text=json.dumps({"results": [], "note": "leere Anfrage"}))]
     mode = arguments.get("mode", "hybrid")
-    limit = min(int(arguments.get("limit", 10)), 50)
+    limit = min(int(arguments.get("limit", 25)), 500)
     sources = arguments.get("sources") or None
-    cand = max(limit, 50)
+    cand = max(limit, 300)
 
     semantic: list[dict] = []
     keyword: list[dict] = []

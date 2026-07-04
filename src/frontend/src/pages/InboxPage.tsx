@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { api } from '../api/client';
 import { BackgroundPicker } from '../components/BackgroundPicker';
 import { EmailBody } from '../components/EmailBody';
+import { EmailThreadPanel } from '../components/EmailThreadPanel';
 import { RichTextEditor } from '../components/RichTextEditor';
 import { ConfidenceBadge } from '../components/agent/ConfidenceBadge';
 
@@ -48,6 +49,7 @@ interface EmailDetail {
   importance: string | null;
   has_attachments: boolean;
   is_read: boolean;
+  conversation_id: string | null;
 }
 
 interface FolderInfo {
@@ -187,7 +189,7 @@ export function InboxPage() {
     setSearchActive(true);
     try {
       const data = await api.get<{ results: EmailSearchHit[] }>(
-        `/api/search/semantic?q=${encodeURIComponent(q)}&mode=hybrid&sources=email&limit=25`,
+        `/api/search/semantic?q=${encodeURIComponent(q)}&mode=hybrid&sources=email&limit=100`,
       );
       setSearchHits(data.results || []);
     } catch {
@@ -295,11 +297,14 @@ export function InboxPage() {
   /* -- E-Mail per ID öffnen (aus Suchtreffer) -- */
   const openEmailById = async (messageId: string) => {
     setDetailLoading(true);
+    // Graph-Message-IDs koennen /, +, = enthalten -> Pfad-Segment kodieren
+    // (FastAPI dekodiert Pfad-Parameter automatisch wieder).
+    const encId = encodeURIComponent(messageId);
     try {
-      const detail = await api.get<EmailDetail>(`/api/emails/${messageId}`);
+      const detail = await api.get<EmailDetail>(`/api/emails/${encId}`);
       setSelectedEmail(detail);
       if (!detail.is_read) {
-        await api.patch(`/api/emails/${messageId}/read`).catch(() => {});
+        await api.patch(`/api/emails/${encId}/read`).catch(() => {});
       }
     } catch {
       /* ignore */
@@ -307,6 +312,21 @@ export function InboxPage() {
       setDetailLoading(false);
     }
   };
+
+  /* -- Deep-Link aus der globalen Suche (/inbox?email=<id>) einmalig öffnen -- */
+  const deepLinkHandled = useRef(false);
+  useEffect(() => {
+    if (deepLinkHandled.current) return;
+    const emailId = new URLSearchParams(window.location.search).get('email');
+    if (emailId) {
+      deepLinkHandled.current = true;
+      openEmailById(emailId);
+      // URL bereinigen, damit ein Reload den Treffer nicht erneut erzwingt.
+      window.history.replaceState({}, '', '/inbox');
+    }
+    // Nur beim Mount; openEmailById ist stabil genug für diesen Einmal-Effekt.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   /* -- Triage-Aktionen -- */
   const dismissTriage = async (triageId: string) => {
@@ -896,6 +916,11 @@ export function InboxPage() {
                 <p className="whitespace-pre-wrap text-sm text-gray-700 dark:text-gray-300">
                   {selectedEmail.body_preview}
                 </p>
+              )}
+
+              {/* Konversations-Thread (aufklappbar) */}
+              {selectedEmail.conversation_id && (
+                <EmailThreadPanel conversationId={selectedEmail.conversation_id} />
               )}
             </div>
           ) : (

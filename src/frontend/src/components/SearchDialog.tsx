@@ -132,6 +132,9 @@ export function SearchDialog({
 
   const flatItems = useMemo<ResultItem[]>(() => {
     const items: ResultItem[] = [];
+    // Reihenfolge identisch zu `grouped`: semantische Tiefensuche zuerst (falls
+    // ausgelöst), damit activeIndex/Tastatur-Navigation der Anzeige folgt.
+    for (const h of semHits) items.push({ kind: 'semantic', data: h });
     if (results) {
       for (const t of results.tasks) items.push({ kind: 'task', data: t });
       for (const p of results.projects) items.push({ kind: 'project', data: p });
@@ -142,7 +145,6 @@ export function SearchDialog({
       for (const s of (results.signa || [])) items.push({ kind: 'signa', data: s });
       for (const f of (results.files || [])) items.push({ kind: 'file', data: f });
     }
-    for (const h of semHits) items.push({ kind: 'semantic', data: h });
     return items;
   }, [results, semHits]);
 
@@ -153,6 +155,11 @@ export function SearchDialog({
         sections.push({ label: 'Dokumente & E-Mails', items: semHits.map((d) => ({ kind: 'semantic' as const, data: d })) });
       return sections.length ? sections : null;
     }
+    // Getriggerte Tiefensuche: bewusst GANZ OBEN, damit man nicht an allen
+    // Instant-Sektionen vorbeiscrollen muss (der Enter/⌘↵-Trigger signalisiert
+    // die eigentliche Suchabsicht). Instant-Treffer folgen darunter.
+    if (semHits.length > 0)
+      sections.push({ label: 'Dokumente & E-Mails', items: semHits.map((d) => ({ kind: 'semantic' as const, data: d })) });
     if (results.tasks.length > 0)
       sections.push({ label: 'Tasks', items: results.tasks.map((d) => ({ kind: 'task' as const, data: d })) });
     if (results.projects.length > 0)
@@ -169,8 +176,6 @@ export function SearchDialog({
       sections.push({ label: 'SIGNA Signale', items: results.signa.map((d) => ({ kind: 'signa' as const, data: d })) });
     if ((results.files || []).length > 0)
       sections.push({ label: 'OneDrive-Dateien', items: results.files.map((d) => ({ kind: 'file' as const, data: d })) });
-    if (semHits.length > 0)
-      sections.push({ label: 'Dokumente & E-Mails', items: semHits.map((d) => ({ kind: 'semantic' as const, data: d })) });
     return sections;
   }, [results, semHits]);
 
@@ -231,11 +236,15 @@ export function SearchDialog({
       setSemLoading(true);
       api
         .get<{ results: SemanticHit[] }>(
-          `/api/search/semantic?q=${encodeURIComponent(q)}&mode=${mode}&limit=20`,
+          `/api/search/semantic?q=${encodeURIComponent(q)}&mode=${mode}&limit=100`,
         )
         .then((data) => {
           setSemHits(data.results || []);
           setSemRanFor(q);
+          // Treffer stehen jetzt oben -> ersten markieren und Liste hochscrollen,
+          // damit man sofort dort ist (statt an Instant-Sektionen vorbeizuscrollen).
+          setActiveIndex(0);
+          requestAnimationFrame(() => listRef.current?.scrollTo({ top: 0 }));
         })
         .catch((err) => {
           console.error('[SearchDialog] Semantik-Fehler:', err);
@@ -252,7 +261,7 @@ export function SearchDialog({
       if (item.kind === 'semantic') {
         const h = item.data;
         if (h.source_type === 'email') {
-          window.location.href = '/inbox';
+          window.location.href = `/inbox?email=${encodeURIComponent(h.source_id)}`;
         } else if (h.url) {
           window.open(h.url, '_blank');
         }

@@ -93,6 +93,7 @@ class EmailDetail(BaseModel):
     importance: str | None = None
     has_attachments: bool = False
     is_read: bool = False
+    conversation_id: str | None = None
 
 
 class FolderInfo(BaseModel):
@@ -329,6 +330,7 @@ async def get_email(
         importance=msg.get("importance"),
         has_attachments=msg.get("hasAttachments", False),
         is_read=msg.get("isRead", False),
+        conversation_id=msg.get("conversationId"),
     )
 
 
