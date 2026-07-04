@@ -3222,18 +3222,21 @@ def build_chat_agent(
     (``ensure_runtime_ready`` muss vorher gelaufen sein).
 
     Presets:
-    - ``agent``: voller InnoPilot (MCP-Tools nach Grounding-Politik).
+    - ``agent``: voller InnoPilot (MCP-Tools nach Grounding-Politik). Deckt den
+      vereinheitlichten Agent-Modus ab (Chat, Tools, Web, Code-Sandbox).
     - ``chat``: reiner Konversationsmodus auf derselben Hermes-Runtime —
       KEINE Tools (weder Core noch MCP), aber Session-Kompression, Memory-
-      Injektion (lokal) und ``conversation_history``-Handling. Ersetzt den
-      frueheren litellm-Direktpfad des Plain-Chats.
+      Injektion (lokal) und ``conversation_history``-Handling. Wird noch vom
+      Deep-Research-Pfad (nicht-Gemini, z. B. Perplexity) genutzt.
 
     Modell-Routing: ``ollama/*`` (und Default) -> Ollama ``/v1`` lokal;
     Cloud-Modelle (``openai/*``, ``anthropic/*``, ``gemini/*``) -> LiteLLM-Proxy.
 
     Grounding-Politik (Datenschutz):
-    - Lokales Modell: voller Zugriff (alle MCP-Tools, Memory/USER-Profil,
-      Kontextdateien). Daten bleiben lokal.
+    - Lokales Modell: voller Zugriff per Default (alle MCP-Tools, Memory/USER-
+      Profil, Kontextdateien). Optional kann der Nutzer via ``enabled_servers``
+      (nicht-leere Liste) einzelne MCP-Server einschraenken; leer/None = alles.
+      Daten bleiben lokal.
     - Cloud-Modell: Default-Deny. Nur explizit per ``enabled_servers``
       freigegebene MCP-Server sind verfuegbar; Memory/USER-Profil nur bei
       ``include_memory=True``; Kontextdateien (SOUL/AGENTS) bleiben aus.
@@ -3246,8 +3249,16 @@ def build_chat_agent(
         base_url = f"{cfg.ollama_base_url.rstrip('/')}/v1"
         api_key = "ollama"
         resolved_model = sel.removeprefix("ollama/") or cfg.triage_model.removeprefix("ollama/")
-        # Lokal: voller Kontext, gehärtete Allowlist + Delegation (Research/Dokument-Subagenten).
-        enabled_toolsets = build_local_allowlist(include_delegation=True)
+        # Lokal: voller Kontext. Default = gehärtete Allowlist + Delegation. Ist im
+        # Grounding eine explizite Server-Auswahl gesetzt (nicht-leere Liste), wird
+        # sie respektiert: Core-Toolsets + nur die aktivierten MCP-Server. Leer/None
+        # bedeutet voller Zugriff (Default) — Daten bleiben ohnehin lokal.
+        if enabled_servers:
+            configured = set(get_configured_server_keys() or _KNOWN_MCP_SERVERS)
+            servers = [s for s in enabled_servers if s in configured]
+            enabled_toolsets = [*LOCAL_CORE_TOOLSETS, "delegation", *servers]
+        else:
+            enabled_toolsets = build_local_allowlist(include_delegation=True)
         skip_memory = False
         skip_context_files = False
     else:

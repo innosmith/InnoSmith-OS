@@ -17,6 +17,7 @@ import { ExportDialog } from '../components/ExportDialog';
 import { AnonymizePanel } from '../components/AnonymizePanel';
 import { OneDrivePicker, type ContextSource } from '../components/OneDrivePicker';
 import { useMediaQuery } from '../hooks/useMediaQuery';
+import { useSSE } from '../hooks/useSSE';
 import { DEFAULT_PROVIDER_ORDER as PROVIDER_ORDER, PROVIDER_LABELS } from '../lib/modelOrdering';
 
 let mermaidReady: Promise<typeof import('mermaid')> | null = null;
@@ -97,7 +98,7 @@ interface ChatMessage {
   job_id?: string | null;
 }
 
-type ChatMode = 'chat' | 'deep_research' | 'agent' | 'code_execute';
+type ChatMode = 'agent' | 'deep_research';
 
 /** Angepinntes Kontext-Dokument der Konversation (bleibt über alle Turns sichtbar). */
 interface ContextItem {
@@ -109,13 +110,12 @@ interface ContextItem {
   created_at: string;
 }
 
-// Hinweis: Der frühere Modus 'web_search' (Tavily) wurde entfernt — die
-// Hermes-native Websuche im Agent-Modus (web_search/web_extract) ersetzt ihn.
+// Zwei Modi: der vereinheitlichte Agent (InnoPilot) deckt Chat, Tool-Nutzung,
+// Web-Recherche und Code-Ausführung ab — lokal oder Cloud. Deep Research bleibt
+// eigenständig (nur öffentliche Modelle, mehrstufige externe Recherche-API).
 const MODES: { id: ChatMode; label: string; tooltip: string }[] = [
-  { id: 'agent', label: 'Agent', tooltip: 'InnoPilot führt Aktionen aus: Kalender, E-Mail, CRM, Aufgaben — inkl. Web-Recherche' },
-  { id: 'chat', label: 'Chat', tooltip: 'Direkte Fragen an das LLM — antwortet aus Trainingswissen' },
-  { id: 'code_execute', label: 'Code', tooltip: 'Python-Code generieren und in isolierter Sandbox ausführen (Datenanalyse, Scripts)' },
-  { id: 'deep_research', label: 'Deep Research', tooltip: 'Mehrstufige Recherche mit vielen Quellen — dauert länger, geht tiefer' },
+  { id: 'agent', label: 'Agent', tooltip: 'InnoPilot: plaudern, Aktionen (Kalender, E-Mail, CRM, Aufgaben), Web-Recherche und Code — lokal oder Cloud. /code für Sandbox-Code, /suche für Web.' },
+  { id: 'deep_research', label: 'Deep Research', tooltip: 'Mehrstufige Recherche mit vielen Quellen (öffentliche Modelle) — dauert länger, geht tiefer' },
 ];
 
 function MermaidBlock({ code }: { code: string }) {
@@ -167,16 +167,19 @@ function CodeCopyButton({ text }: { text: string }) {
   );
 }
 
-// Marker aus code_execute-Ergebnissen: <!--tp-artifacts:conv-<uuid>:name1|name2-->
-const ARTIFACT_MARKER_RE = /\n*<!--tp-artifacts:conv-([0-9a-fA-F-]+):([^>]*)-->/;
+// Marker aus Code-/Agent-Sandbox-Ergebnissen:
+// <!--tp-artifacts:<scope>:name1|name2--> mit scope = conv-<uuid> (persistent),
+// run-<id> oder script-<id> (ephemer). Der volle Scope wird erfasst und direkt
+// gegen den scope-basierten Artefakt-Endpoint geladen.
+const ARTIFACT_MARKER_RE = /\n*<!--tp-artifacts:((?:conv|run|script)-[A-Za-z0-9_-]+):([^>]*)-->/;
 
-function parseArtifacts(content: string): { convId: string | null; names: string[]; cleaned: string } {
+function parseArtifacts(content: string): { scope: string | null; names: string[]; cleaned: string } {
   const m = content.match(ARTIFACT_MARKER_RE);
-  if (!m) return { convId: null, names: [], cleaned: content };
-  const convId = m[1];
+  if (!m) return { scope: null, names: [], cleaned: content };
+  const scope = m[1];
   const names = m[2].split('|').map(s => s.trim()).filter(Boolean);
   const cleaned = content.replace(m[0], '').trimEnd();
-  return { convId, names, cleaned };
+  return { scope, names, cleaned };
 }
 
 const IMAGE_EXT = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp'];
@@ -191,9 +194,14 @@ function ext(name: string): string {
  * spielbare/interaktive Vorschau in einem sandboxed <iframe> (Null-Origin via
  * Blob-URL), alles andere als Download. Auth läuft per Bearer-Header, daher
  * werden die Dateien als Blob geladen (kein direkter <img src>/<iframe src>). */
-function ArtifactViewer({ convId, names }: { convId: string; names: string[] }) {
+const ARTIFACT_IFRAME_SANDBOX = 'allow-scripts allow-modals allow-popups allow-pointer-lock allow-downloads allow-forms';
+
+function ArtifactViewer({ scope, names }: { scope: string; names: string[] }) {
   const [urls, setUrls] = useState<Record<string, string>>({});
   const [errors, setErrors] = useState<Record<string, string>>({});
+  // Name des im Vollbild-Overlay vergrösserten Artefakts (null = keins).
+  const [expanded, setExpanded] = useState<string | null>(null);
+  const stageRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -201,7 +209,7 @@ function ArtifactViewer({ convId, names }: { convId: string; names: string[] }) 
     (async () => {
       for (const name of names) {
         try {
-          const blob = await api.blob(`/api/code/conversations/${convId}/artifacts/${encodeURIComponent(name)}`);
+          const blob = await api.blob(`/api/code/artifacts/${encodeURIComponent(scope)}/${encodeURIComponent(name)}`);
           if (cancelled) return;
           const url = URL.createObjectURL(blob);
           created.push(url);
@@ -213,9 +221,48 @@ function ArtifactViewer({ convId, names }: { convId: string; names: string[] }) 
     })();
     return () => { cancelled = true; created.forEach(u => URL.revokeObjectURL(u)); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [convId, names.join('|')]);
+  }, [scope, names.join('|')]);
+
+  // Esc schliesst das vergrösserte Overlay (sofern nicht gerade echtes Vollbild aktiv).
+  useEffect(() => {
+    if (!expanded) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && !document.fullscreenElement) setExpanded(null);
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [expanded]);
+
+  // Echtes Browser-Vollbild der Artefakt-Bühne (für spielbare HTML-Artefakte/Games).
+  const enterFullscreen = () => {
+    const el = stageRef.current;
+    if (el?.requestFullscreen) el.requestFullscreen().catch(() => { /* vom Browser abgelehnt */ });
+  };
 
   if (!names.length) return null;
+
+  const renderArtifact = (name: string, url: string, large: boolean) => {
+    const e = ext(name);
+    if (IMAGE_EXT.includes(e)) {
+      return <img src={url} alt={name} className={large ? 'mx-auto max-h-full max-w-full rounded object-contain' : 'mx-auto max-h-[520px] max-w-full rounded'} />;
+    }
+    if (HTML_EXT.includes(e)) {
+      return (
+        <iframe
+          src={url}
+          title={name}
+          sandbox={ARTIFACT_IFRAME_SANDBOX}
+          allow="fullscreen; gamepad; autoplay"
+          className={large ? 'h-full w-full border-0 bg-white' : 'h-[520px] w-full rounded border-0 bg-white'}
+        />
+      );
+    }
+    return (
+      <p className="px-2 py-3 text-xs text-gray-500 dark:text-gray-400">
+        Keine Inline-Vorschau — bitte herunterladen.
+      </p>
+    );
+  };
 
   return (
     <div className="mt-3 space-y-3">
@@ -223,14 +270,20 @@ function ArtifactViewer({ convId, names }: { convId: string; names: string[] }) 
         const url = urls[name];
         const err = errors[name];
         const e = ext(name);
+        const canExpand = IMAGE_EXT.includes(e) || HTML_EXT.includes(e);
         return (
           <div key={name} className="overflow-hidden rounded-lg border border-gray-200 dark:border-gray-700">
             <div className="flex items-center justify-between gap-2 border-b border-gray-200 bg-gray-50 px-3 py-1.5 text-xs font-medium text-gray-600 dark:border-gray-700 dark:bg-gray-800/60 dark:text-gray-300">
               <span className="flex items-center gap-1.5 truncate"><FileIcon className="h-3.5 w-3.5 shrink-0" />{name}</span>
               {url && (
                 <div className="flex shrink-0 items-center gap-2">
+                  {canExpand && (
+                    <button onClick={() => setExpanded(name)} className="flex items-center gap-1 text-indigo-600 hover:underline dark:text-indigo-400" title="Vergrössern / Vollbild">
+                      <ExpandIcon className="h-3.5 w-3.5" /> Vergrössern
+                    </button>
+                  )}
                   {HTML_EXT.includes(e) && (
-                    <a href={url} target="_blank" rel="noopener noreferrer" className="text-indigo-600 hover:underline dark:text-indigo-400">Neu öffnen</a>
+                    <a href={url} target="_blank" rel="noopener noreferrer" className="text-indigo-600 hover:underline dark:text-indigo-400">Neuer Tab</a>
                   )}
                   <a href={url} download={name} className="text-indigo-600 hover:underline dark:text-indigo-400">Download</a>
                 </div>
@@ -241,24 +294,38 @@ function ArtifactViewer({ convId, names }: { convId: string; names: string[] }) 
                 <p className="px-2 py-3 text-xs text-red-500">Artefakt konnte nicht geladen werden: {err}</p>
               ) : !url ? (
                 <p className="px-2 py-3 text-xs text-gray-400">Lädt…</p>
-              ) : IMAGE_EXT.includes(e) ? (
-                <img src={url} alt={name} className="mx-auto max-h-[520px] max-w-full rounded" />
-              ) : HTML_EXT.includes(e) ? (
-                <iframe
-                  src={url}
-                  title={name}
-                  sandbox="allow-scripts allow-modals allow-popups allow-pointer-lock allow-downloads"
-                  className="h-[520px] w-full rounded border-0 bg-white"
-                />
               ) : (
-                <p className="px-2 py-3 text-xs text-gray-500 dark:text-gray-400">
-                  Keine Inline-Vorschau — bitte herunterladen.
-                </p>
+                renderArtifact(name, url, false)
               )}
             </div>
           </div>
         );
       })}
+
+      {/* Vergrössertes Overlay: deckt die ganze Hauptfläche; «Vollbild» geht in
+          echtes Browser-Fullscreen (z. B. um ein generiertes Game zu spielen). */}
+      {expanded && urls[expanded] && (
+        <div className="fixed inset-0 z-[60] flex flex-col bg-black/85 p-3 backdrop-blur-sm sm:p-4">
+          <div className="mb-2 flex items-center justify-between gap-3 text-white">
+            <span className="flex min-w-0 items-center gap-1.5 truncate text-sm font-medium">
+              <FileIcon className="h-4 w-4 shrink-0" />{expanded}
+            </span>
+            <div className="flex shrink-0 items-center gap-3 text-xs sm:text-sm">
+              <button onClick={enterFullscreen} className="flex items-center gap-1 rounded-md bg-white/10 px-2.5 py-1 font-medium hover:bg-white/20" title="Echtes Browser-Vollbild">
+                <FullscreenIcon className="h-4 w-4" /> Vollbild
+              </button>
+              <a href={urls[expanded]} target="_blank" rel="noopener noreferrer" className="hover:underline">Neuer Tab</a>
+              <a href={urls[expanded]} download={expanded} className="hover:underline">Download</a>
+              <button onClick={() => setExpanded(null)} className="flex items-center gap-1 rounded-md bg-white/10 px-2.5 py-1 font-medium hover:bg-white/20" title="Schliessen (Esc)">
+                <XIcon className="h-4 w-4" /> Schliessen
+              </button>
+            </div>
+          </div>
+          <div ref={stageRef} className="min-h-0 flex-1 overflow-auto rounded-lg bg-white">
+            {renderArtifact(expanded, urls[expanded], true)}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -350,7 +417,9 @@ export function ChatPage() {
   const [codeStdinOpen, setCodeStdinOpen] = useState(false);
   const [loading, setLoading] = useState(true);
   const isChatMobile = useMediaQuery('(max-width: 1023px)');
-  const [showSidebar, setShowSidebar] = useState(false);
+  // Verlauf-Sidebar: auf dem Desktop standardmässig aufgeklappt (wie Claude/
+  // ChatGPT/Gemini), auf Mobile zugeklappt. Jederzeit manuell umschaltbar.
+  const [showSidebar, setShowSidebar] = useState(() => !isChatMobile);
   const [modelOpen, setModelOpen] = useState(false);
   const [tempOpen, setTempOpen] = useState(false);
   const [attachments, setAttachments] = useState<File[]>([]);
@@ -516,8 +585,8 @@ export function ChatPage() {
     api.get<{ messages: ChatMessage[]; mode?: string; model?: string; grounding?: { enabled_servers?: string[]; include_memory?: boolean } }>(`/api/chat/conversations/${activeId}`)
       .then(d => {
         setMessages(d.messages || []);
-        // Legacy-Konversationen im entfernten Websuche-Modus öffnen im Agent-Modus.
-        if (d.mode) setMode(d.mode === 'web_search' ? 'agent' : (d.mode as ChatMode));
+        // Nur noch zwei Modi: alles ausser Deep Research öffnet als Agent.
+        setMode(d.mode === 'deep_research' ? 'deep_research' : 'agent');
         setEnabledServers(new Set(d.grounding?.enabled_servers || []));
         setIncludeMemory(Boolean(d.grounding?.include_memory));
         // Modell der Konversation wiederherstellen. Legacy-Platzhalter
@@ -546,6 +615,14 @@ export function ChatPage() {
     bottomRef.current?.scrollIntoView({ behavior: isNewMessage ? 'smooth' : 'instant' });
   }, [messages, streamingContent, thinkingContent]);
 
+  // Beim Wechsel des Breakpoints (Resize über die Grenze) den Default wieder
+  // herstellen: Desktop aufgeklappt, Mobile zugeklappt. Manuelle Toggles
+  // innerhalb desselben Breakpoints bleiben erhalten (Effekt feuert nur bei
+  // tatsächlicher Änderung von isChatMobile).
+  useEffect(() => {
+    setShowSidebar(!isChatMobile);
+  }, [isChatMobile]);
+
   useEffect(() => {
     const handler = (e: MouseEvent) => {
       if (modelDropdownRef.current && !modelDropdownRef.current.contains(e.target as Node)) setModelOpen(false);
@@ -561,9 +638,6 @@ export function ChatPage() {
     const m = models.find(x => x.id === id);
     return m?.name || id.split('/').pop() || id;
   };
-
-  const isAgentConversation = (c: Conversation) =>
-    c.mode === 'agent' || c.model === 'nanobot' || c.model === 'hermes';
 
   const modelInfo = (id: string) => models.find(x => x.id === id);
 
@@ -594,7 +668,7 @@ export function ChatPage() {
     if (!convId) {
       try {
         const conv = await api.post<Conversation>('/api/chat/conversations', {
-          model: selectedModel, mode: 'code_execute',
+          model: selectedModel, mode: 'agent',
         });
         setConversations(prev => [conv, ...prev]);
         convId = conv.id;
@@ -695,13 +769,13 @@ export function ChatPage() {
               content += `**Ergebnis (${data.duration_seconds}s):**\n`;
               if (data.stdout) content += `\`\`\`\n${data.stdout}\n\`\`\`\n`;
               if (data.generated_files?.length > 0) {
-                content += `\n**Erzeugte Dateien:** ${data.generated_files.map((f: any) => f.name).join(', ')}`;
+                content += `\n**Erzeugte Dateien:** ${data.generated_files.map((f: { name: string }) => f.name).join(', ')}`;
               }
               if (data.warning) content += `\n\n_Hinweis: ${data.warning}_`;
               // Marker anhängen, damit die Artefakt-Vorschau (identisch zu neu geladenen
               // Nachrichten) gerendert werden kann.
               if (data.scope && data.generated_files?.length > 0) {
-                const names = data.generated_files.map((f: any) => f.name).join('|');
+                const names = data.generated_files.map((f: { name: string }) => f.name).join('|');
                 content += `\n\n<!--tp-artifacts:${data.scope}:${names}-->`;
               }
             } else {
@@ -809,6 +883,87 @@ export function ChatPage() {
   const agentAbortControllers = useRef<Record<string, AbortController>>({});
   const agentOffsets = useRef<Record<string, number>>({});
   const agentAccumulators = useRef<Record<string, { stream: string; think: string; trace: ToolTraceEntry[] }>>({});
+  // Infrastruktur fuer parallele, kontextwechsel-feste Agent-Laeufe.
+  const retryTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+  const retryCounts = useRef<Record<string, number>>({});
+  const activeReaders = useRef<Set<string>>(new Set());
+  const agentStatesRef = useRef<Record<string, AgentStreamState>>({});
+  const activeIdRef = useRef<string | null>(activeId);
+  const MAX_STREAM_RETRIES = 5;
+
+  // agentStates/activeId spiegeln, damit langlebige Callbacks nicht auf veraltete
+  // Closures zugreifen (Ursache fuer Endlos-Retry mit stale State).
+  useEffect(() => { agentStatesRef.current = agentStates; }, [agentStates]);
+  useEffect(() => { activeIdRef.current = activeId; }, [activeId]);
+
+  // Prueft den Job-Status. Bei terminalem Zustand (completed/failed/verschwunden)
+  // werden die Nachrichten aus der DB nachgeladen (nur wenn die Konversation sichtbar
+  // ist) und der lokale Zustand + localStorage-Anker bereinigt.
+  // Rueckgabe: true = terminal behandelt (kein Reconnect noetig).
+  const reconcileAgentJob = useCallback(async (convId: string, jobId: string): Promise<boolean> => {
+    let failed = false;
+    try {
+      const job = await api.get<{ status: string; output: string | null; error_message: string | null }>(`/api/agent-jobs/${jobId}`);
+      if (job.status !== 'completed' && job.status !== 'failed') {
+        return false; // laeuft noch -> Reconnect erlaubt
+      }
+      failed = job.status === 'failed';
+    } catch (err) {
+      const status = (err as { status?: number }).status;
+      // Netzwerk-/Serverfehler (kein 404): nicht terminal, Reconnect weiter erlauben.
+      if (status && status !== 404) return false;
+      // 404: Job nicht mehr auffindbar -> wie terminal behandeln und aufraeumen.
+    }
+    // Nachrichten neu laden, aber nur wenn die Konversation gerade sichtbar ist,
+    // damit wir nicht die Ansicht einer anderen Konversation ueberschreiben.
+    if (activeIdRef.current === convId) {
+      try {
+        const d = await api.get<{ messages: ChatMessage[] }>(`/api/chat/conversations/${convId}`);
+        setMessages(d.messages || []);
+      } catch { /* ignore */ }
+    }
+    updateAgentState(convId, { isStreaming: false, streamingContent: '', thinkingContent: '', toolTrace: [], jobId: null, status: failed ? 'error' : 'done' });
+    agentAbortControllers.current[convId]?.abort();
+    delete agentAbortControllers.current[convId];
+    delete agentAccumulators.current[convId];
+    delete agentOffsets.current[convId];
+    retryCounts.current[convId] = 0;
+    const timer = retryTimers.current[convId];
+    if (timer) { clearTimeout(timer); delete retryTimers.current[convId]; }
+    clearAgentJob(convId);
+    loadConversations();
+    return true;
+  }, [updateAgentState, loadConversations]);
+
+  // Ref-Indirektion, um die zyklische Abhaengigkeit zwischen scheduleReconnect
+  // und connectAgentStream aufzuloesen.
+  const connectAgentStreamRef = useRef<(convId: string, jobId: string, offset: number) => void>(() => {});
+
+  // Geplanter Reconnect mit Job-Status-Check und Max-Retry-Grenze. Registriert den
+  // Timer in retryTimers, damit er beim Unmount sauber gecleart werden kann.
+  const scheduleReconnect = useCallback((convId: string, jobId: string, delay: number) => {
+    const prev = retryTimers.current[convId];
+    if (prev) clearTimeout(prev);
+    const count = retryCounts.current[convId] || 0;
+    if (count >= MAX_STREAM_RETRIES) {
+      // Zu viele Fehlversuche: ueber den Job-Status final aufraeumen.
+      reconcileAgentJob(convId, jobId).then(handled => {
+        if (!handled) updateAgentState(convId, { isStreaming: false, thinkingContent: '', status: 'idle' });
+      });
+      return;
+    }
+    retryCounts.current[convId] = count + 1;
+    const t = setTimeout(async () => {
+      delete retryTimers.current[convId];
+      // Vor dem Reconnect Job-Status pruefen: ist er fertig, direkt aufraeumen.
+      const handled = await reconcileAgentJob(convId, jobId);
+      if (handled) return;
+      if (agentStatesRef.current[convId]?.jobId) {
+        connectAgentStreamRef.current(convId, jobId, agentOffsets.current[convId] || 0);
+      }
+    }, delay);
+    retryTimers.current[convId] = t;
+  }, [reconcileAgentJob, updateAgentState]);
 
   const connectAgentStream = useCallback(async (convId: string, jobId: string, offset: number) => {
     const token = getToken();
@@ -838,16 +993,28 @@ export function ChatPage() {
       }
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
 
+      // Erfolgreich verbunden: als lebender Reader markieren, Retry-Zaehler zuruecksetzen.
+      activeReaders.current.add(convId);
+      retryCounts.current[convId] = 0;
+
       const reader = resp.body!.getReader();
       const decoder = new TextDecoder();
       let buf = '', evt = '';
 
       while (true) {
         const { done, value } = await reader.read();
-        if (done) break;
-        buf += decoder.decode(value, { stream: true });
-        const lines = buf.split('\n');
-        buf = lines.pop() || '';
+        if (value) buf += decoder.decode(value, { stream: true });
+        let lines: string[];
+        if (done) {
+          // Reader-Flush: letzten Rest dekodieren, damit ein finales Event
+          // ohne abschliessenden Zeilenumbruch nicht verloren geht.
+          buf += decoder.decode();
+          lines = buf.split('\n');
+          buf = '';
+        } else {
+          lines = buf.split('\n');
+          buf = lines.pop() || '';
+        }
 
         for (const line of lines) {
           if (line.startsWith('event: ')) { evt = line.slice(7).trim(); continue; }
@@ -926,42 +1093,84 @@ export function ChatPage() {
             }
           } catch { /* */ }
         }
+        if (done) break;
       }
 
-      const state = agentStates[convId];
-      if (state?.jobId) {
-        setTimeout(() => {
-          const s = agentStates[convId];
-          if (s?.jobId) connectAgentStream(convId, jobId, agentOffsets.current[convId] || 0);
-        }, 2000);
+      // Stream endete ohne terminales Event: geregelter Reconnect mit Status-Check.
+      if (agentStatesRef.current[convId]?.jobId) {
+        scheduleReconnect(convId, jobId, 2000);
       }
     } catch (err) {
       if ((err as Error).name === 'AbortError') return;
-      const state = agentStates[convId];
-      if (state?.jobId) {
-        setTimeout(() => {
-          const s = agentStates[convId];
-          if (s?.jobId) connectAgentStream(convId, jobId, agentOffsets.current[convId] || 0);
-        }, 3000);
+      if (agentStatesRef.current[convId]?.jobId) {
+        scheduleReconnect(convId, jobId, 3000);
       }
+    } finally {
+      activeReaders.current.delete(convId);
     }
-  }, [loadConversations, agentStates, updateAgentState]);
+  }, [loadConversations, updateAgentState, scheduleReconnect]);
 
-  // Reconnect nach Reload: lief in dieser Konversation ein Agent-Job, binden wir
-  // den SSE-Stream ab dem zuletzt gesehenen Offset wieder an (Job lief im Backend weiter).
+  // connectAgentStream in die Ref spiegeln (fuer scheduleReconnect).
+  connectAgentStreamRef.current = connectAgentStream;
+
+  // Reconnect nach Reload/Kontextwechsel: lief in dieser Konversation ein Agent-Job,
+  // pruefen wir zuerst den Job-Status. Ist er fertig, laden wir die Nachrichten direkt;
+  // sonst binden wir den Stream ab dem zuletzt gesehenen Offset wieder an.
   useEffect(() => {
     if (!activeId) return;
     const stored = readAgentJob(activeId);
     if (!stored) return;
-    if (agentAbortControllers.current[activeId]) return; // Stream bereits aktiv
-    agentOffsets.current[activeId] = stored.offset;
-    if (!agentAccumulators.current[activeId]) {
-      agentAccumulators.current[activeId] = { stream: '', think: '', trace: [] };
-    }
-    updateAgentState(activeId, { isStreaming: true, jobId: stored.jobId, status: 'running', thinkingContent: 'InnoPilot wird wieder verbunden...' });
-    connectAgentStream(activeId, stored.jobId, stored.offset);
+    // Liveness ueber activeReaders statt blosser Controller-Existenz: verhindert,
+    // dass ein Zombie-Controller den Reconnect dauerhaft blockiert.
+    if (activeReaders.current.has(activeId)) return;
+    const convId = activeId;
+    void (async () => {
+      const handled = await reconcileAgentJob(convId, stored.jobId);
+      if (handled) return;
+      agentOffsets.current[convId] = stored.offset;
+      if (!agentAccumulators.current[convId]) {
+        agentAccumulators.current[convId] = { stream: '', think: '', trace: [] };
+      }
+      updateAgentState(convId, { isStreaming: true, jobId: stored.jobId, status: 'running', thinkingContent: 'InnoPilot wird wieder verbunden...' });
+      connectAgentStream(convId, stored.jobId, stored.offset);
+    })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeId]);
+
+  // Unmount-Cleanup: beim Verlassen der ChatPage alle offenen Agent-Streams schliessen,
+  // pending Retry-Timer stoppen und den Deep-Research-Stream abbrechen. Der Backend-Job
+  // laeuft bewusst weiter; nur die HTTP-Verbindungen werden freigegeben (verhindert das
+  // Verbindungs-Leck, das den Browser-Pool von ~6 Verbindungen/Host erschoepfte).
+  // Der localStorage-Anker {jobId, offset} bleibt fuer den Reconnect erhalten.
+  useEffect(() => {
+    const controllers = agentAbortControllers.current;
+    const timers = retryTimers.current;
+    const readers = activeReaders.current;
+    const drAbort = abortControllerRef;
+    return () => {
+      Object.values(controllers).forEach(c => { try { c.abort(); } catch { /* */ } });
+      Object.keys(controllers).forEach(k => { delete controllers[k]; });
+      Object.values(timers).forEach(t => clearTimeout(t));
+      Object.keys(timers).forEach(k => { delete timers[k]; });
+      readers.clear();
+      try { drAbort.current?.abort(); } catch { /* */ }
+    };
+  }, []);
+
+  // Globales agent_jobs_changed-Event: erfaehrt vom Job-Ende auch ohne offenen Stream
+  // (z. B. nach Kontextwechsel). Fuer die aktive Konversation mit gespeichertem Job wird
+  // der Status abgeglichen und ggf. terminal aufgeraeumt.
+  useSSE(useCallback((event: string) => {
+    if (event !== 'agent_jobs_changed') return;
+    const cid = activeIdRef.current;
+    if (!cid) return;
+    if (activeReaders.current.has(cid)) return; // laufender Stream liefert das Ende selbst
+    const stored = readAgentJob(cid);
+    if (!stored) return;
+    // Nur reagieren, wenn die aktive Konversation einen Job ohne offenen Stream hat:
+    // Status abgleichen und ggf. terminal aufraeumen (Sidebar wird dort aktualisiert).
+    void reconcileAgentJob(cid, stored.jobId);
+  }, [reconcileAgentJob]));
 
   const handleSend = async () => {
     let content = input.trim();
@@ -992,8 +1201,11 @@ export function ChatPage() {
       setMode('agent');
     }
 
-    if (effMode === 'code_execute') {
-      await handleCodeExecute(content);
+    // /code ist der deterministische Sandbox-Shortcut (Code generieren +
+    // ausführen mit Artefakt-Vorschau). Der Agent kann Code auch natürlich über
+    // sein Sandbox-Tool ausführen; /code liefert den fokussierten Zwei-Schritt-Flow.
+    if (content.startsWith('/code ')) {
+      await handleCodeExecute(content.slice(6).trim());
       return;
     }
 
@@ -1179,6 +1391,11 @@ export function ChatPage() {
       updateAgentState(cid, { isStreaming: false, streamingContent: '', thinkingContent: '', toolTrace: [], jobId: null, status: 'idle' });
       delete agentAccumulators.current[cid];
       delete agentAbortControllers.current[cid];
+      // Pending Reconnect abbrechen, damit der gestoppte Job nicht wieder verbunden wird.
+      const timer = retryTimers.current[cid];
+      if (timer) { clearTimeout(timer); delete retryTimers.current[cid]; }
+      retryCounts.current[cid] = 0;
+      activeReaders.current.delete(cid);
       clearAgentJob(cid);
     }
   };
@@ -1227,6 +1444,16 @@ export function ChatPage() {
   const handleDelete = async (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
     await api.delete(`/api/chat/conversations/${id}`);
+    // Laufende Verbindung/Reconnect-Timer der geloeschten Konversation freigeben.
+    agentAbortControllers.current[id]?.abort();
+    delete agentAbortControllers.current[id];
+    delete agentAccumulators.current[id];
+    delete agentOffsets.current[id];
+    const timer = retryTimers.current[id];
+    if (timer) { clearTimeout(timer); delete retryTimers.current[id]; }
+    delete retryCounts.current[id];
+    activeReaders.current.delete(id);
+    clearAgentJob(id);
     setConversations(prev => prev.filter(c => c.id !== id));
     if (activeId === id) { setActiveId(null); setMessages([]); }
   };
@@ -1248,7 +1475,7 @@ export function ChatPage() {
   const toggleThinking = (id: string) => {
     setExpandedThinking(prev => {
       const next = new Set(prev);
-      next.has(id) ? next.delete(id) : next.add(id);
+      if (next.has(id)) next.delete(id); else next.add(id);
       return next;
     });
   };
@@ -1261,15 +1488,14 @@ export function ChatPage() {
   };
 
   const modeIcon = (m: string) => {
-    if (m === 'chat') return <ChatBubbleIcon className="h-4 w-4" />;
-    if (m === 'code_execute') return <CodeIcon className="h-4 w-4" />;
-    if (m === 'web_search') return <SearchIcon className="h-4 w-4" />;
     if (m === 'deep_research') return <ResearchIcon className="h-4 w-4" />;
-    if (m === 'agent') return <SparkleIcon className="h-4 w-4" />;
-    return null;
+    return <SparkleIcon className="h-4 w-4" />;
   };
 
   const selectedModelInfo = modelInfo(selectedModel);
+
+  // Der /code-Shortcut blendet das optionale stdin-Feld ein (nur im Agent-Modus).
+  const showCodeStdin = mode === 'agent' && input.trimStart().startsWith('/code');
 
   const handleBgSelect = async (url: string | null) => {
     await api.patch('/api/settings', { chat_background_url: url });
@@ -1329,30 +1555,18 @@ export function ChatPage() {
                             ? 'Agent läuft...'
                             : agentStates[c.id]?.status === 'error'
                               ? 'Agent-Fehler'
-                              : isAgentConversation(c)
-                                ? 'Modus: Agent (InnoPilot)'
-                                : c.mode === 'code_execute'
-                                  ? 'Modus: Code Execute'
-                                  : c.mode === 'web_search'
-                                    ? 'Modus: Websuche'
-                                    : c.mode === 'deep_research'
-                                      ? 'Modus: Deep Research'
-                                      : 'Modus: Chat'
+                              : c.mode === 'deep_research'
+                                ? 'Modus: Deep Research'
+                                : 'Modus: Agent (InnoPilot)'
                         }
                         className={`h-1.5 w-1.5 shrink-0 rounded-full ${
                           agentStates[c.id]?.status === 'error'
                             ? 'bg-red-500'
                             : agentStates[c.id]?.isStreaming
                               ? 'bg-violet-500 animate-pulse'
-                              : isAgentConversation(c)
-                                ? 'bg-violet-500'
-                                : c.mode === 'code_execute'
-                                  ? 'bg-cyan-500'
-                                  : c.mode === 'web_search'
-                                    ? 'bg-emerald-500'
-                                    : c.mode === 'deep_research'
-                                      ? 'bg-amber-500'
-                                      : 'bg-indigo-500'
+                              : c.mode === 'deep_research'
+                                ? 'bg-amber-500'
+                                : 'bg-violet-500'
                         }`}
                       />
                       <span className="rounded bg-gray-200 px-1.5 py-0.5 text-[10px] text-gray-600 dark:bg-gray-700 dark:text-gray-400">{modelLabel(c.model)}</span>
@@ -1390,6 +1604,16 @@ export function ChatPage() {
               if (next.has(key)) next.delete(key); else next.add(key);
               return next;
             });
+            // Lokal: leeres Set = voller Zugriff (Default). Beim ersten Abwählen
+            // materialisieren wir die volle Liste minus dem abgewählten Server,
+            // damit die Auswahl explizit wird. Backend interpretiert leer = alles.
+            const localAllOn = enabledServers.size === 0;
+            const localServerOn = (key: string) => localAllOn || enabledServers.has(key);
+            const toggleLocalServer = (key: string) => setEnabledServers(prev => {
+              const base = prev.size === 0 ? new Set(mcpServers.map(s => s.key)) : new Set(prev);
+              if (base.has(key)) base.delete(key); else base.add(key);
+              return base;
+            });
             const badgeClass = isCloud
               ? 'flex items-center gap-1.5 rounded-lg border border-amber-300 bg-amber-50 px-2.5 py-1 text-xs font-medium text-amber-700 transition-colors hover:bg-amber-100 dark:border-amber-700 dark:bg-amber-900/30 dark:text-amber-300 dark:hover:bg-amber-900/50'
               : 'flex items-center gap-1.5 rounded-lg border border-violet-200 bg-violet-50 px-2.5 py-1 text-xs font-medium text-violet-700 transition-colors hover:bg-violet-100 dark:border-violet-800 dark:bg-violet-900/30 dark:text-violet-300 dark:hover:bg-violet-900/50';
@@ -1404,7 +1628,7 @@ export function ChatPage() {
                 ) : (
                   <>
                     <span className="h-1.5 w-1.5 rounded-full bg-green-400 animate-pulse" />
-                    InnoPilot · Voller Zugriff (lokal)
+                    {localAllOn ? 'InnoPilot · Voller Zugriff (lokal)' : `InnoPilot · ${activeCount} Server (lokal)`}
                   </>
                 )}
                 <svg className={`h-3 w-3 transition-transform ${mcpOpen ? 'rotate-180' : ''}`} fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="m19.5 8.25-7.5 7.5-7.5-7.5" /></svg>
@@ -1451,26 +1675,34 @@ export function ChatPage() {
                     </>
                   ) : (
                     <>
-                      <div className="mb-3 flex items-center gap-2">
+                      <div className="mb-2 flex items-center gap-2">
                         <div className="flex h-6 w-6 items-center justify-center rounded-md bg-violet-100 dark:bg-violet-900/40">
                           <SparkleIcon className="h-3.5 w-3.5 text-violet-600 dark:text-violet-400" />
                         </div>
-                        <span className="text-xs font-semibold text-gray-800 dark:text-gray-100">Voller Zugriff (lokal)</span>
+                        <span className="text-xs font-semibold text-gray-800 dark:text-gray-100">Tools & Grounding (lokal)</span>
                       </div>
                       <div className="mb-3 rounded-lg bg-green-50 px-3 py-2 text-[10px] leading-snug text-green-700 dark:bg-green-900/20 dark:text-green-300">
-                        Lokales Modell — alle MCP-Server, Memory und Profil verfügbar. Daten bleiben auf dem Server.
+                        Lokales Modell — Daten bleiben auf dem Server. Standardmässig sind alle MCP-Server aktiv; du kannst einzelne für dieses Gespräch abwählen.
                       </div>
-                      <div className="max-h-[320px] space-y-2 overflow-y-auto">
-                        {mcpServers.map(s => (
-                          <div key={s.key} className="flex items-start gap-2.5 rounded-lg bg-gray-50 px-3 py-2 dark:bg-gray-900/40">
-                            <div className="mt-0.5 h-1.5 w-1.5 shrink-0 rounded-full bg-green-400" />
-                            <div className="min-w-0">
-                              <div className="text-[11px] font-semibold text-gray-800 dark:text-gray-200">{s.label}</div>
-                              {s.description && <div className="mt-0.5 text-[10px] leading-snug text-gray-500 dark:text-gray-400">{s.description}</div>}
-                            </div>
-                          </div>
-                        ))}
+                      <div className="max-h-[320px] space-y-1.5 overflow-y-auto">
+                        {mcpServers.map(s => {
+                          const on = localServerOn(s.key);
+                          return (
+                            <button key={s.key} onClick={() => toggleLocalServer(s.key)} className={`flex w-full items-start gap-2.5 rounded-lg px-3 py-2 text-left transition-colors ${on ? 'bg-indigo-50 dark:bg-indigo-900/30' : 'bg-gray-50 hover:bg-gray-100 dark:bg-gray-900/40 dark:hover:bg-gray-900/70'}`}>
+                              <span className={`mt-0.5 flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded border ${on ? 'border-indigo-500 bg-indigo-500' : 'border-gray-300 dark:border-gray-600'}`}>
+                                {on && <svg className="h-2.5 w-2.5 text-white" fill="none" viewBox="0 0 24 24" strokeWidth={3} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="m4.5 12.75 6 6 9-13.5" /></svg>}
+                              </span>
+                              <div className="min-w-0">
+                                <div className="text-[11px] font-semibold text-gray-800 dark:text-gray-200">{s.label}</div>
+                                {s.description && <div className="mt-0.5 text-[10px] leading-snug text-gray-500 dark:text-gray-400">{s.description}</div>}
+                              </div>
+                            </button>
+                          );
+                        })}
                         {mcpServers.length === 0 && <div className="py-2 text-center text-[11px] italic text-gray-400">Keine Server konfiguriert</div>}
+                      </div>
+                      <div className="mt-2 rounded-lg bg-gray-50 px-3 py-2 text-[10px] leading-snug text-gray-500 dark:bg-gray-900/40 dark:text-gray-400">
+                        Memory & USER-Profil sind lokal immer aktiv.
                       </div>
                     </>
                   )}
@@ -1496,10 +1728,7 @@ export function ChatPage() {
                 {modeIcon(mode)}
               </div>
               <p className="text-lg font-medium text-gray-600 dark:text-gray-300">
-                {mode === 'chat' && 'Was möchtest du wissen?'}
-                {mode === 'code_execute' && 'Welchen Code soll ich generieren und ausführen?'}
-                {mode === 'deep_research' && 'Welches Thema vertiefen?'}
-                {mode === 'agent' && 'Was soll InnoPilot tun?'}
+                {mode === 'deep_research' ? 'Welches Thema vertiefen?' : 'Was soll InnoPilot tun?'}
               </p>
             </div>
 
@@ -1534,14 +1763,12 @@ export function ChatPage() {
                   onKeyDown={handleKeyDown}
                   placeholder={
                     mode === 'deep_research' ? 'Frage für Deep Research eingeben...'
-                      : mode === 'agent' ? 'Aufgabe für InnoPilot eingeben...'
-                        : mode === 'code_execute' ? 'Beschreibe was der Code tun soll...'
-                          : 'Nachricht eingeben... (/suche für Web-Recherche)'
+                      : 'Nachricht an InnoPilot... (/code für Sandbox-Code, /suche für Web-Recherche)'
                   }
                   rows={4}
                   className="max-h-48 min-h-[96px] w-full resize-none border-0 bg-transparent px-4 pt-3 pb-1 text-sm outline-none placeholder:text-gray-400 dark:text-gray-100 dark:placeholder:text-gray-500"
                 />
-                {mode === 'code_execute' && (
+                {showCodeStdin && (
                   <div className="px-3 pb-1">
                     <button type="button" onClick={() => setCodeStdinOpen(o => !o)} className="text-[11px] font-medium text-gray-500 hover:text-indigo-600 dark:text-gray-400 dark:hover:text-indigo-400">
                       {codeStdinOpen ? '− Eingabedaten (stdin)' : '+ Eingabedaten (stdin)'}
@@ -1729,11 +1956,11 @@ export function ChatPage() {
 
                     {msg.role === 'assistant' ? (
                       (() => {
-                        const { convId: artConvId, names: artNames, cleaned } = parseArtifacts(msg.content);
+                        const { scope: artScope, names: artNames, cleaned } = parseArtifacts(msg.content);
                         return (
                           <div className="chat-prose prose prose-sm dark:prose-invert max-w-none">
                             <ReactMarkdown remarkPlugins={[remarkGfm, remarkBreaks]} rehypePlugins={[rehypeHighlight]} components={chatMdComponents}>{cleaned}</ReactMarkdown>
-                            {artConvId && artNames.length > 0 && <ArtifactViewer convId={artConvId} names={artNames} />}
+                            {artScope && artNames.length > 0 && <ArtifactViewer scope={artScope} names={artNames} />}
                           </div>
                         );
                       })()
@@ -1989,15 +2216,13 @@ export function ChatPage() {
                 onKeyDown={handleKeyDown}
                 placeholder={
                   mode === 'deep_research' ? 'Frage für Deep Research eingeben...'
-                    : mode === 'agent' ? (isStreaming ? 'Korrigieren & neu lenken — stoppt den aktuellen Lauf...' : 'Aufgabe für InnoPilot eingeben...')
-                      : mode === 'code_execute' ? 'Beschreibe was der Code tun soll...'
-                        : 'Nachricht eingeben... (/suche für Web-Recherche)'
+                    : (isStreaming ? 'Korrigieren & neu lenken — stoppt den aktuellen Lauf...' : 'Nachricht an InnoPilot... (/code für Sandbox-Code, /suche für Web)')
                 }
                 rows={1}
                 className="max-h-36 min-h-[44px] w-full resize-none rounded-t-2xl border-0 bg-transparent px-4 pt-3 pb-1 text-sm outline-none placeholder:text-gray-400 dark:text-gray-100 dark:placeholder:text-gray-500"
               />
 
-              {mode === 'code_execute' && (
+              {showCodeStdin && (
                 <div className="px-3 pb-1">
                   <button type="button" onClick={() => setCodeStdinOpen(o => !o)} className="text-[11px] font-medium text-gray-500 hover:text-indigo-600 dark:text-gray-400 dark:hover:text-indigo-400">
                     {codeStdinOpen ? '− Eingabedaten (stdin)' : '+ Eingabedaten (stdin)'}
@@ -2233,6 +2458,12 @@ function FileOutputIcon({ className }: { className?: string }) {
 function XIcon({ className }: { className?: string }) {
   return <svg className={className} fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M6 18 18 6M6 6l12 12" /></svg>;
 }
+function ExpandIcon({ className }: { className?: string }) {
+  return <svg className={className} fill="none" viewBox="0 0 24 24" strokeWidth={1.8} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M3.75 3.75v4.5m0-4.5h4.5m-4.5 0L9 9M20.25 20.25v-4.5m0 4.5h-4.5m4.5 0L15 15M3.75 20.25v-4.5m0 4.5h4.5m-4.5 0L9 15m11.25-11.25v4.5m0-4.5h-4.5m4.5 0L15 9" /></svg>;
+}
+function FullscreenIcon({ className }: { className?: string }) {
+  return <svg className={className} fill="none" viewBox="0 0 24 24" strokeWidth={1.8} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M3.75 8.25V4.5h3.75M20.25 8.25V4.5h-3.75M3.75 15.75v3.75h3.75M20.25 15.75v3.75h-3.75" /></svg>;
+}
 function PinIcon({ className }: { className?: string }) {
   return <svg className={className} fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M12 17v5M9 4h6l-1 7 3 2v2H7v-2l3-2-1-7Z" /></svg>;
 }
@@ -2259,15 +2490,6 @@ function OneDriveIcon({ className }: { className?: string }) {
 }
 function RefreshIcon({ className }: { className?: string }) {
   return <svg className={className} fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182" /></svg>;
-}
-function ChatBubbleIcon({ className }: { className?: string }) {
-  return <svg className={className} fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M8.625 12a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0Zm0 0H8.25m4.125 0a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0Zm0 0H12m4.125 0a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0Zm0 0h-.375M21 12c0 4.556-4.03 8.25-9 8.25a9.764 9.764 0 0 1-2.555-.337A5.972 5.972 0 0 1 5.41 20.97a5.969 5.969 0 0 1-.474-.065 4.48 4.48 0 0 0 .978-2.025c.09-.457-.133-.901-.467-1.226C3.93 16.178 3 14.189 3 12c0-4.556 4.03-8.25 9-8.25s9 3.694 9 8.25Z" /></svg>;
-}
-function CodeIcon({ className }: { className?: string }) {
-  return <svg className={className} fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="m6.75 7.5 3 2.25-3 2.25m4.5 0h3m-9 8.25h13.5A2.25 2.25 0 0 0 21 18V6a2.25 2.25 0 0 0-2.25-2.25H5.25A2.25 2.25 0 0 0 3 6v12a2.25 2.25 0 0 0 2.25 2.25Z" /></svg>;
-}
-function SearchIcon({ className }: { className?: string }) {
-  return <svg className={className} fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="m21 21-5.197-5.197m0 0A7.5 7.5 0 1 0 5.196 5.196a7.5 7.5 0 0 0 10.607 10.607Z" /></svg>;
 }
 function ResearchIcon({ className }: { className?: string }) {
   return <svg className={className} fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M12 18v-5.25m0 0a6.01 6.01 0 0 0 1.5-.189m-1.5.189a6.01 6.01 0 0 1-1.5-.189m3.75 7.478a12.06 12.06 0 0 1-4.5 0m3.75 2.383a14.406 14.406 0 0 1-3 0M14.25 18v-.192c0-.983.658-1.823 1.508-2.316a7.5 7.5 0 1 0-7.517 0c.85.493 1.509 1.333 1.509 2.316V18" /></svg>;

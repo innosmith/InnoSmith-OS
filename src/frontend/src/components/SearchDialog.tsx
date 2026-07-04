@@ -70,6 +70,8 @@ interface FileHit {
   web_url: string | null;
   is_folder: boolean;
   path: string | null;
+  snippet: string | null;
+  thumbnail_url: string | null;
 }
 
 interface SearchResults {
@@ -83,6 +85,20 @@ interface SearchResults {
   files: FileHit[];
 }
 
+interface SemanticHit {
+  source_type: string; // 'email' | 'onedrive' | 'upload' | 'transcript'
+  source_id: string;
+  title: string | null;
+  url: string | null;
+  mime: string | null;
+  snippet: string | null;
+  chunk_index: number | null;
+  score: number | null;
+  similarity: number | null;
+}
+
+type SemanticMode = 'hybrid' | 'semantic' | 'exact';
+
 type ResultItem =
   | { kind: 'task'; data: SearchTask }
   | { kind: 'project'; data: SearchProject }
@@ -91,7 +107,8 @@ type ResultItem =
   | { kind: 'toggl'; data: TogglHit }
   | { kind: 'bexio'; data: BexioHit }
   | { kind: 'signa'; data: SignaHit }
-  | { kind: 'file'; data: FileHit };
+  | { kind: 'file'; data: FileHit }
+  | { kind: 'semantic'; data: SemanticHit };
 
 export function SearchDialog({
   isOpen,
@@ -103,27 +120,39 @@ export function SearchDialog({
   const [results, setResults] = useState<SearchResults | null>(null);
   const [loading, setLoading] = useState(false);
   const [activeIndex, setActiveIndex] = useState(0);
+  // Semantische Tiefensuche (Dokumente + E-Mails) -- bewusst per Trigger (Enter/⌘↵),
+  // nicht instant, damit der schnelle Keyword-Pfad reaktiv bleibt.
+  const [semHits, setSemHits] = useState<SemanticHit[]>([]);
+  const [semLoading, setSemLoading] = useState(false);
+  const [semMode, setSemMode] = useState<SemanticMode>('hybrid');
+  const [semRanFor, setSemRanFor] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const backdropRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
 
   const flatItems = useMemo<ResultItem[]>(() => {
-    if (!results) return [];
     const items: ResultItem[] = [];
-    for (const t of results.tasks) items.push({ kind: 'task', data: t });
-    for (const p of results.projects) items.push({ kind: 'project', data: p });
-    for (const tag of results.tags) items.push({ kind: 'tag', data: tag });
-    for (const c of (results.crm || [])) items.push({ kind: 'crm', data: c });
-    for (const t of (results.toggl || [])) items.push({ kind: 'toggl', data: t });
-    for (const b of (results.bexio || [])) items.push({ kind: 'bexio', data: b });
-    for (const s of (results.signa || [])) items.push({ kind: 'signa', data: s });
-    for (const f of (results.files || [])) items.push({ kind: 'file', data: f });
+    if (results) {
+      for (const t of results.tasks) items.push({ kind: 'task', data: t });
+      for (const p of results.projects) items.push({ kind: 'project', data: p });
+      for (const tag of results.tags) items.push({ kind: 'tag', data: tag });
+      for (const c of (results.crm || [])) items.push({ kind: 'crm', data: c });
+      for (const t of (results.toggl || [])) items.push({ kind: 'toggl', data: t });
+      for (const b of (results.bexio || [])) items.push({ kind: 'bexio', data: b });
+      for (const s of (results.signa || [])) items.push({ kind: 'signa', data: s });
+      for (const f of (results.files || [])) items.push({ kind: 'file', data: f });
+    }
+    for (const h of semHits) items.push({ kind: 'semantic', data: h });
     return items;
-  }, [results]);
+  }, [results, semHits]);
 
   const grouped = useMemo(() => {
-    if (!results) return null;
     const sections: { label: string; items: ResultItem[] }[] = [];
+    if (!results) {
+      if (semHits.length > 0)
+        sections.push({ label: 'Dokumente & E-Mails', items: semHits.map((d) => ({ kind: 'semantic' as const, data: d })) });
+      return sections.length ? sections : null;
+    }
     if (results.tasks.length > 0)
       sections.push({ label: 'Tasks', items: results.tasks.map((d) => ({ kind: 'task' as const, data: d })) });
     if (results.projects.length > 0)
@@ -140,19 +169,26 @@ export function SearchDialog({
       sections.push({ label: 'SIGNA Signale', items: results.signa.map((d) => ({ kind: 'signa' as const, data: d })) });
     if ((results.files || []).length > 0)
       sections.push({ label: 'OneDrive-Dateien', items: results.files.map((d) => ({ kind: 'file' as const, data: d })) });
+    if (semHits.length > 0)
+      sections.push({ label: 'Dokumente & E-Mails', items: semHits.map((d) => ({ kind: 'semantic' as const, data: d })) });
     return sections;
-  }, [results]);
+  }, [results, semHits]);
 
   useEffect(() => {
     if (isOpen) {
       setQuery('');
       setResults(null);
+      setSemHits([]);
+      setSemRanFor(null);
       setActiveIndex(0);
       requestAnimationFrame(() => inputRef.current?.focus());
     }
   }, [isOpen]);
 
   useEffect(() => {
+    // Bei jeder Query-Änderung die (bewusst getriggerte) Tiefensuche zurücksetzen.
+    setSemHits([]);
+    setSemRanFor(null);
     if (!query.trim()) {
       setResults(null);
       setActiveIndex(0);
@@ -187,8 +223,42 @@ export function SearchDialog({
     };
   }, [query]);
 
+  const runSemantic = useCallback(
+    (mode: SemanticMode) => {
+      const q = query.trim();
+      if (q.length < 2) return;
+      setSemMode(mode);
+      setSemLoading(true);
+      api
+        .get<{ results: SemanticHit[] }>(
+          `/api/search/semantic?q=${encodeURIComponent(q)}&mode=${mode}&limit=20`,
+        )
+        .then((data) => {
+          setSemHits(data.results || []);
+          setSemRanFor(q);
+        })
+        .catch((err) => {
+          console.error('[SearchDialog] Semantik-Fehler:', err);
+          setSemHits([]);
+          setSemRanFor(q);
+        })
+        .finally(() => setSemLoading(false));
+    },
+    [query],
+  );
+
   const activateItem = useCallback(
     (item: ResultItem) => {
+      if (item.kind === 'semantic') {
+        const h = item.data;
+        if (h.source_type === 'email') {
+          window.location.href = '/inbox';
+        } else if (h.url) {
+          window.open(h.url, '_blank');
+        }
+        onClose();
+        return;
+      }
       if (item.kind === 'task') {
         onTaskClick(item.data.id);
         onClose();
@@ -246,12 +316,26 @@ export function SearchDialog({
         setActiveIndex((prev) => (prev - 1 + flatItems.length) % Math.max(flatItems.length, 1));
         return;
       }
-      if (e.key === 'Enter' && flatItems[activeIndex]) {
-        e.preventDefault();
-        activateItem(flatItems[activeIndex]);
+      if (e.key === 'Enter') {
+        // ⌘↵ / Ctrl+↵: bewusste Tiefensuche über Dokumente & E-Mails.
+        if (e.metaKey || e.ctrlKey) {
+          e.preventDefault();
+          runSemantic(semMode);
+          return;
+        }
+        if (flatItems[activeIndex]) {
+          e.preventDefault();
+          activateItem(flatItems[activeIndex]);
+          return;
+        }
+        // Kein Instant-Treffer markiert -> Enter startet die Tiefensuche.
+        if (query.trim().length >= 2) {
+          e.preventDefault();
+          runSemantic(semMode);
+        }
       }
     },
-    [flatItems, activeIndex, activateItem, onClose],
+    [flatItems, activeIndex, activateItem, onClose, runSemantic, semMode, query],
   );
 
   useEffect(() => {
@@ -293,6 +377,41 @@ export function SearchDialog({
             ESC
           </kbd>
         </div>
+
+        {/* Tiefensuche-Leiste: Modus-Chips + Trigger (bewusst semantisch) */}
+        {query.trim().length >= 2 && (
+          <div className="flex items-center gap-2 border-b border-gray-100 px-4 py-2 dark:border-gray-800">
+            <div className="flex items-center gap-1">
+              {(['hybrid', 'semantic', 'exact'] as SemanticMode[]).map((m) => (
+                <button
+                  key={m}
+                  data-testid={`search-mode-${m}`}
+                  onClick={() => runSemantic(m)}
+                  className={`rounded-full px-2.5 py-1 text-[11px] font-medium transition-colors ${
+                    semMode === m && semRanFor === query.trim()
+                      ? 'bg-indigo-600 text-white'
+                      : 'bg-gray-100 text-gray-600 hover:bg-gray-200 dark:bg-gray-800 dark:text-gray-300 dark:hover:bg-gray-700'
+                  }`}
+                >
+                  {m === 'hybrid' ? 'Hybrid' : m === 'semantic' ? 'Semantisch' : 'Exakt'}
+                </button>
+              ))}
+            </div>
+            <button
+              data-testid="search-semantic-trigger"
+              onClick={() => runSemantic(semMode)}
+              className="ml-auto flex items-center gap-1.5 rounded-lg bg-indigo-50 px-2.5 py-1 text-[11px] font-medium text-indigo-700 transition-colors hover:bg-indigo-100 dark:bg-indigo-950/50 dark:text-indigo-300 dark:hover:bg-indigo-900/50"
+            >
+              {semLoading ? (
+                <span className="h-3 w-3 animate-spin rounded-full border-2 border-indigo-500 border-t-transparent" />
+              ) : (
+                <DocSearchIcon className="h-3.5 w-3.5" />
+              )}
+              Dokumente & E-Mails
+              <kbd className="hidden rounded border border-indigo-200 px-1 text-[9px] sm:inline-block dark:border-indigo-800">⌘↵</kbd>
+            </button>
+          </div>
+        )}
 
         {/* Ergebnisse */}
         <div ref={listRef} className="max-h-[50dvh] overflow-y-auto sm:max-h-[60dvh]">
@@ -606,29 +725,85 @@ export function SearchDialog({
                         data-active={isActive}
                         onClick={() => activateItem(item)}
                         onMouseEnter={() => setActiveIndex(idx)}
-                        className={`flex w-full items-center gap-3 px-4 py-2.5 text-left transition-colors ${
+                        className={`flex w-full items-start gap-3 px-4 py-2.5 text-left transition-colors ${
                           isActive
                             ? 'bg-indigo-50 dark:bg-indigo-950/40'
                             : 'hover:bg-gray-50 dark:hover:bg-gray-800/50'
                         }`}
                       >
-                        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-sky-100 text-sky-700 dark:bg-sky-900/40 dark:text-sky-300">
-                          <FileSearchIcon className="h-4 w-4" />
-                        </span>
+                        {f.thumbnail_url ? (
+                          <img
+                            src={f.thumbnail_url}
+                            alt=""
+                            className="h-9 w-9 shrink-0 rounded-md object-cover ring-1 ring-gray-200 dark:ring-gray-700"
+                          />
+                        ) : (
+                          <span className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-sky-100 text-sky-700 dark:bg-sky-900/40 dark:text-sky-300">
+                            <FileSearchIcon className="h-4 w-4" />
+                          </span>
+                        )}
                         <div className="min-w-0 flex-1">
                           <p className="truncate text-sm font-medium text-gray-900 dark:text-white">
                             {f.name}
                           </p>
-                          {sizeStr && (
+                          {f.snippet ? (
+                            <p className="mt-0.5 line-clamp-2 text-xs text-gray-500 dark:text-gray-400">
+                              {f.snippet}
+                            </p>
+                          ) : sizeStr ? (
                             <p className="truncate text-xs text-gray-400 dark:text-gray-500">
                               {sizeStr}
                             </p>
-                          )}
+                          ) : null}
                         </div>
-                        <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium ${f.is_folder ? 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300' : 'bg-sky-100 text-sky-700 dark:bg-sky-900/40 dark:text-sky-300'}`}>
+                        <span className={`mt-0.5 shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium ${f.is_folder ? 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300' : 'bg-sky-100 text-sky-700 dark:bg-sky-900/40 dark:text-sky-300'}`}>
                           {f.is_folder ? 'Ordner' : 'Datei'}
                         </span>
-                        <ExternalLinkIcon className="h-3.5 w-3.5 shrink-0 text-gray-300 dark:text-gray-600" />
+                        <ExternalLinkIcon className="mt-0.5 h-3.5 w-3.5 shrink-0 text-gray-300 dark:text-gray-600" />
+                      </button>
+                    );
+                  }
+
+                  // semantic (Dokument/E-Mail-Chunk mit Snippet-Passage)
+                  if (item.kind === 'semantic') {
+                    const h = item.data;
+                    const isEmail = h.source_type === 'email';
+                    return (
+                      <button
+                        key={`sem-${h.source_type}-${h.source_id}-${h.chunk_index ?? 0}`}
+                        data-active={isActive}
+                        onClick={() => activateItem(item)}
+                        onMouseEnter={() => setActiveIndex(idx)}
+                        className={`flex w-full items-start gap-3 px-4 py-2.5 text-left transition-colors ${
+                          isActive
+                            ? 'bg-indigo-50 dark:bg-indigo-950/40'
+                            : 'hover:bg-gray-50 dark:hover:bg-gray-800/50'
+                        }`}
+                      >
+                        <span className={`mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-full ${
+                          isEmail
+                            ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300'
+                            : 'bg-sky-100 text-sky-700 dark:bg-sky-900/40 dark:text-sky-300'
+                        }`}>
+                          {isEmail ? <MailIcon className="h-4 w-4" /> : <FileSearchIcon className="h-4 w-4" />}
+                        </span>
+                        <div className="min-w-0 flex-1">
+                          <p className="truncate text-sm font-medium text-gray-900 dark:text-white">
+                            {h.title || '(ohne Titel)'}
+                          </p>
+                          {h.snippet && (
+                            <p className="mt-0.5 line-clamp-2 text-xs text-gray-500 dark:text-gray-400">
+                              {h.snippet}
+                            </p>
+                          )}
+                        </div>
+                        <span className={`mt-0.5 shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium ${
+                          isEmail
+                            ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300'
+                            : 'bg-sky-100 text-sky-700 dark:bg-sky-900/40 dark:text-sky-300'
+                        }`}>
+                          {isEmail ? 'E-Mail' : 'Dokument'}
+                        </span>
                       </button>
                     );
                   }
@@ -737,6 +912,22 @@ function SignaSearchIcon({ className }: { className?: string }) {
   return (
     <svg className={className} fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
       <path strokeLinecap="round" strokeLinejoin="round" d="M9.348 14.652a3.75 3.75 0 0 1 0-5.304m5.304 0a3.75 3.75 0 0 1 0 5.304m-7.425 2.121a6.75 6.75 0 0 1 0-9.546m9.546 0a6.75 6.75 0 0 1 0 9.546M5.106 18.894c-3.808-3.807-3.808-9.98 0-13.788m13.788 0c3.808 3.807 3.808 9.98 0 13.788M12 12h.008v.008H12V12Zm.375 0a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0Z" />
+    </svg>
+  );
+}
+
+function MailIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M21.75 6.75v10.5a2.25 2.25 0 0 1-2.25 2.25h-15a2.25 2.25 0 0 1-2.25-2.25V6.75m19.5 0A2.25 2.25 0 0 0 19.5 4.5h-15a2.25 2.25 0 0 0-2.25 2.25m19.5 0v.243a2.25 2.25 0 0 1-1.07 1.916l-7.5 4.615a2.25 2.25 0 0 1-2.36 0L3.32 8.91a2.25 2.25 0 0 1-1.07-1.916V6.75" />
+    </svg>
+  );
+}
+
+function DocSearchIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z" />
     </svg>
   );
 }

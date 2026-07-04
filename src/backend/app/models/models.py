@@ -384,6 +384,30 @@ class SentMailExample(Base):
     created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=func.now())
 
 
+class SemanticDocument(Base):
+    """Ein durchsuchbarer Chunk (E-Mail/Dokument) im semantischen Such-Index.
+
+    ``embedding`` (halfvec) und ``content_tsv`` (tsvector, generiert) werden bewusst
+    NICHT gemappt -- Schreiben/Retrieval laufen ueber rohes SQL im
+    ``semantic_index``- bzw. ``semantic_search``-Service (haelt pgvector aus dem
+    ORM heraus, analog ``AgentEpisode``/``SentMailExample``).
+    """
+
+    __tablename__ = "semantic_documents"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
+    source_type: Mapped[str] = mapped_column(Text, nullable=False)
+    source_id: Mapped[str] = mapped_column(Text, nullable=False)
+    chunk_index: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    title: Mapped[str | None] = mapped_column(Text)
+    content_text: Mapped[str] = mapped_column(Text, nullable=False)
+    url: Mapped[str | None] = mapped_column(Text)
+    mime: Mapped[str | None] = mapped_column(Text)
+    doc_metadata: Mapped[dict] = mapped_column("metadata", JSONB, server_default="{}")
+    source_modified_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    indexed_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=func.now())
+
+
 class LearnedRule(Base):
     """Vom Agenten vorgeschlagene oder manuell gepflegte Regel.
 
@@ -424,7 +448,7 @@ class LlmConversation(Base):
     task_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("tasks.id", ondelete="SET NULL"))
     user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     model: Mapped[str] = mapped_column(Text, nullable=False)
-    mode: Mapped[str] = mapped_column(Text, server_default="chat")
+    mode: Mapped[str] = mapped_column(Text, server_default="agent")
     temperature: Mapped[float] = mapped_column(Float, server_default="0.7")
     grounding: Mapped[dict] = mapped_column(JSONB, server_default="{}")
     total_tokens: Mapped[int] = mapped_column(Integer, server_default="0")

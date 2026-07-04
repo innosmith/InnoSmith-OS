@@ -10,6 +10,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 import uuid
 
@@ -689,6 +690,76 @@ _INLINE_TYPES = {
     "text/html", "image/svg+xml", "image/png", "image/jpeg", "image/gif",
     "image/webp", "text/plain", "application/json", "text/csv",
 }
+
+# Erlaubte Scope-Form (vom Sandbox-Executor vergeben): conv-<key> (persistent),
+# run-<id> / script-<id> (ephemer). Strikte Whitelist, damit keine fremden
+# Pfade adressierbar sind (Path-Traversal-Schutz zusaetzlich im Executor).
+_ARTIFACT_SCOPE_RE = re.compile(r"^(?:conv|run|script)-[A-Za-z0-9_-]{1,72}$")
+
+
+async def _proxy_executor_artifact(scope: str, name: str) -> Response:
+    """Proxyt eine Artefakt-Datei token-authentifiziert vom Sandbox-Executor.
+
+    Gemeinsame Logik fuer den konv-gebundenen und den scope-basierten Endpoint:
+    validiert den Dateinamen, holt die Datei vom Executor und liefert sie mit
+    gehaerteten Headern (CSP, nosniff) aus.
+    """
+    safe_name = os.path.basename(name)
+    if not safe_name or safe_name != name:
+        raise HTTPException(status_code=400, detail="Ungültiger Dateiname")
+
+    settings = get_settings()
+    base_url = (settings.sandbox_executor_url or "").rstrip("/")
+    token = settings.sandbox_executor_token
+    if not base_url or not token:
+        raise HTTPException(status_code=503, detail="Sandbox-Executor nicht konfiguriert")
+
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
+            resp = await client.get(
+                f"{base_url}/artifacts/{scope}/{safe_name}",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+    except httpx.HTTPError as e:
+        logger.exception("Artefakt-Abruf fehlgeschlagen (%s)", base_url)
+        raise HTTPException(status_code=502, detail=f"Executor nicht erreichbar: {e}")
+
+    if resp.status_code == 404:
+        raise HTTPException(status_code=404, detail="Artefakt nicht gefunden")
+    if resp.status_code != 200:
+        raise HTTPException(status_code=502, detail=f"Executor-Fehler (HTTP {resp.status_code})")
+
+    media_type = mimetypes.guess_type(safe_name)[0] or "application/octet-stream"
+    disposition = "inline" if media_type in _INLINE_TYPES else "attachment"
+    headers = {
+        "Content-Disposition": f'{disposition}; filename="{safe_name}"',
+        # Defense-in-Depth: erzeugte Artefakte dürfen keine externen Ressourcen laden.
+        "Content-Security-Policy": (
+            "default-src 'none'; img-src 'self' data: blob:; style-src 'unsafe-inline'; "
+            "script-src 'unsafe-inline' 'unsafe-eval'; font-src data:; media-src 'self' data: blob:; "
+            "frame-ancestors 'self'"
+        ),
+        "X-Content-Type-Options": "nosniff",
+    }
+    return Response(content=resp.content, media_type=media_type, headers=headers)
+
+
+@router.get("/artifacts/{scope}/{name}")
+async def get_artifact_by_scope(
+    scope: str,
+    name: str,
+    user: User = Depends(require_role("owner")),
+):
+    """Liefert eine im Sandbox-Workspace erzeugte Datei anhand ihres Scopes aus.
+
+    Owner-only. Deckt sowohl persistente Konversations-Workspaces (``conv-<id>``)
+    als auch ephemere Ausfuehrungen (``run-<id>``) ab — genutzt vom Agent-Modus,
+    dessen Sandbox-Tool den Scope maschinenlesbar zurueckmeldet. Der Scope wird
+    strikt validiert; der Executor erzwingt zusaetzlich Path-Traversal-Schutz.
+    """
+    if not _ARTIFACT_SCOPE_RE.match(scope):
+        raise HTTPException(status_code=400, detail="Ungültiger Scope")
+    return await _proxy_executor_artifact(scope, name)
 
 
 @router.get("/conversations/{conversation_id}/artifacts/{name}")

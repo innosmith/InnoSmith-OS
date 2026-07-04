@@ -280,7 +280,7 @@ CREATE TABLE llm_conversations (
     task_id         UUID REFERENCES tasks(id) ON DELETE SET NULL,
     user_id         UUID REFERENCES users(id) ON DELETE SET NULL,
     model           TEXT NOT NULL,
-    mode            TEXT DEFAULT 'chat' CHECK (mode IN ('chat', 'deep_research', 'web_search', 'agent', 'code_execute')),
+    mode            TEXT DEFAULT 'agent' CHECK (mode IN ('agent', 'deep_research')),
     temperature     REAL DEFAULT 0.7,
     grounding       JSONB DEFAULT '{}'::jsonb,
     total_tokens    INT DEFAULT 0,
@@ -683,3 +683,37 @@ CREATE TRIGGER agent_feedback_notify AFTER INSERT OR UPDATE ON agent_feedback
 
 CREATE TRIGGER learned_rules_notify AFTER INSERT OR UPDATE ON learned_rules
     FOR EACH ROW EXECUTE FUNCTION notify_change('learned_rules_changed');
+
+-- Semantischer Such-Index ueber E-Mails + Dokumente (user-facing, pgvector).
+-- Eigenes, staerkeres Embedding-Modell (Qwen3-Embedding-4B, native 2560d) als der
+-- Agent-Index (0.6B/1024). Speichertyp halfvec(2560): fp16 -- bei 2560d ist
+-- float32-HNSW technisch nicht moeglich (pgvector-Cap 2000d; halfvec hebt auf
+-- 4000d), Recall-Verlust nachweislich < 0.5 %. Ein Chunk = eine durchsuchbare
+-- Passage; ``content_tsv`` (generiert) traegt den lexikalen Hybrid-Anteil.
+CREATE TABLE semantic_documents (
+    id                 UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    source_type        TEXT NOT NULL
+                       CHECK (source_type IN ('email', 'onedrive', 'upload', 'transcript')),
+    source_id          TEXT NOT NULL,
+    chunk_index        INT NOT NULL DEFAULT 0,
+    title              TEXT,
+    content_text       TEXT NOT NULL,
+    url                TEXT,
+    mime               TEXT,
+    metadata           JSONB DEFAULT '{}'::jsonb,
+    embedding          halfvec(2560),
+    content_tsv        tsvector GENERATED ALWAYS AS (
+                           to_tsvector('german',
+                               coalesce(title, '') || ' ' || coalesce(content_text, ''))
+                       ) STORED,
+    source_modified_at TIMESTAMPTZ,
+    indexed_at         TIMESTAMPTZ DEFAULT now(),
+    UNIQUE (source_type, source_id, chunk_index)
+);
+
+CREATE INDEX idx_semantic_documents_source ON semantic_documents(source_type, source_id);
+CREATE INDEX idx_semantic_documents_modified ON semantic_documents(source_modified_at DESC);
+CREATE INDEX idx_semantic_documents_embedding
+    ON semantic_documents USING hnsw (embedding halfvec_cosine_ops);
+CREATE INDEX idx_semantic_documents_tsv
+    ON semantic_documents USING gin (content_tsv);

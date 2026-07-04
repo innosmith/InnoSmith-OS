@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Newspaper, ChevronDown, ChevronUp, Copy, Check } from 'lucide-react';
+import { ChevronDown, ChevronUp, Copy, Check } from 'lucide-react';
 import { api } from '../api/client';
 import { MarkdownView } from './MarkdownView';
 import { useSSE } from '../hooks/useSSE';
@@ -104,7 +104,6 @@ export function BriefingCard({ cardClass, textPrimary, textSecondary, textMuted,
           onClick={() => setExpanded(v => !v)}
           className="flex min-w-0 flex-1 items-center gap-3 text-left"
         >
-          <Newspaper className={`h-4.5 w-4.5 shrink-0 ${hasBg ? 'text-sky-300' : 'text-sky-500 dark:text-sky-400'}`} />
           <h2 className={`text-sm font-semibold uppercase tracking-wider ${textSecondary}`}>
             Briefing
           </h2>

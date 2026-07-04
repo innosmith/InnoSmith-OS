@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import pathlib
+import re
 import threading
 import time
 import uuid
@@ -26,19 +27,37 @@ litellm.drop_params = True
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/chat", tags=["chat"])
 
-# Hinweis für den reinen Chat-Modus (kein Tool-/MCP-Zugriff). Verhindert, dass das
-# Modell eine Live-Datensuche (z. B. SIGNA-Signale) vortäuscht oder ins Leere laufen
-# lässt, wenn der Nutzer versehentlich nicht im Agent-Modus ist.
-_PLAIN_CHAT_TOOL_HINT = (
-    "Du bist im reinen Chat-Modus und hast in diesem Modus KEINEN Zugriff auf Live-Tools "
-    "oder Firmendaten (SIGNA-Signale/Recherche, E-Mail, Kalender, CRM/Pipedrive, "
-    "Buchhaltung/Bexio, Aufgaben). Wenn der Nutzer nach solchen Live-Daten fragt – "
-    "insbesondere nach einer SIGNA-Signal- oder semantischen Recherche – führe KEINE "
-    "erfundene Suche durch. Weise stattdessen kurz und freundlich darauf hin, dass dafür "
-    "der Agent-Modus (InnoPilot) nötig ist, und bitte den Nutzer, oben links auf 'Agent' "
-    "umzuschalten und die Anfrage dort erneut zu stellen. Allgemeine Wissensfragen "
-    "beantwortest du normal. Angehängte/angepinnte Dokumente in dieser Konversation "
-    "kennst du vollständig — beziehe dich bei Rückfragen direkt darauf. "
+# Name des Hermes-nativen Sandbox-Tools (MCP-Praefix mcp_<server>_<tool>). Der
+# Agent nutzt es fuer Code-Ausfuehrung; wir binden dessen Workspace an die
+# Konversation und rendern die erzeugten Artefakte inline (Feature-Paritaet
+# mit dem alten Code-Modus).
+_SANDBOX_EXEC_TOOL = "mcp_sandbox_execute_code"
+
+# Maschinenlesbarer Marker aus dem Sandbox-Tool-Ergebnis (siehe
+# src/mcp-sandbox/server.py): <!--tp-exec:SCOPE:name1|name2-->. Daraus baut das
+# Backend den Frontend-Artefakt-Marker (<!--tp-artifacts:...-->).
+_EXEC_MARKER_RE = re.compile(r"<!--tp-exec:([A-Za-z0-9_-]+):([^>]*)-->")
+
+
+def _artifacts_marker(scope: str | None, names: list[str] | None) -> str:
+    """Frontend-Marker fuer erzeugte Sandbox-Artefakte (gleiches Format wie
+    code_execute._artifacts_marker). Das ChatPage parst ihn und rendert die
+    Dateien inline (Bilder/HTML spielbar, mit Vergroessern/Vollbild)."""
+    if not scope or not names:
+        return ""
+    joined = "|".join(n for n in names if n)
+    if not joined:
+        return ""
+    return f"\n\n<!--tp-artifacts:{scope}:{joined}-->"
+
+# System-Hinweis für Deep Research (der /messages-Pfad bedient nur noch den
+# Deep-Research-Modus mit öffentlichen Recherche-Modellen, z. B. Perplexity).
+# Der Agent-Modus (InnoPilot) läuft über den eigenen /agent-Pfad.
+_DEEP_RESEARCH_SYSTEM_HINT = (
+    "Du führst eine vertiefte Recherche durch. Recherchiere gründlich, gewichte "
+    "die Quellen kritisch und fasse die Ergebnisse strukturiert zusammen; belege "
+    "Kernaussagen mit Quellen. Angehängte/angepinnte Dokumente in dieser "
+    "Konversation kennst du vollständig — beziehe dich bei Rückfragen direkt darauf. "
     "Sprache: Schweizer Hochdeutsch (ss statt ß, korrekte Umlaute)."
 )
 
@@ -276,7 +295,7 @@ async def create_conversation(
         task_id=body.get("task_id"),
         user_id=user.id,
         model=body.get("model", default_model),
-        mode=body.get("mode", "chat"),
+        mode=body.get("mode", "agent"),
         temperature=body.get("temperature", default_temp),
         grounding=body.get("grounding") or {},
     )
@@ -513,13 +532,15 @@ async def send_message(
     user: User = Depends(require_role("owner")),
     db: AsyncSession = Depends(get_db),
 ):
-    """Nachricht senden und LLM-Antwort als SSE streamen (Hermes-Runtime).
+    """Deep-Research-Nachricht senden und Antwort als SSE streamen.
 
-    Der Plain-Chat läuft seit der Kontext-Vereinheitlichung auf derselben
-    Hermes-Runtime wie der Agent-Modus (Preset ``chat``: keine Tools, aber
-    Session-Kompression, grosszügiges Verlaufsfenster und angepinnte
-    Dokumente). Der frühere litellm-Direktpfad mit 24k-Zeichen-Fenster ist
-    abgelöst. Ausnahme: Gemini Deep Research (Interactions API, eigener Pfad).
+    Seit der Modus-Vereinheitlichung bedient dieser Pfad nur noch Deep Research
+    (öffentliche Recherche-Modelle). Zwei Backends:
+    - Gemini Deep Research: Interactions API (eigener Pfad, ``generate_gemini_research``).
+    - Übrige Recherche-Modelle (z. B. Perplexity): Hermes-Runtime, Preset ``chat``
+      (keine MCP-Tools, aber Session-Kompression, Verlauf und angepinnte Dokumente).
+
+    Der interaktive Agent (InnoPilot) läuft über den eigenen ``/agent``-Pfad.
     """
     from app.services.conversation_context import (
         build_conversation_history,
@@ -662,7 +683,7 @@ async def send_message(
         return EventSourceResponse(generate_gemini_research())
 
     async def generate_hermes_chat():
-        """Plain-Chat auf der Hermes-Runtime (Preset ``chat``, keine Tools).
+        """Deep Research über die Hermes-Runtime (Preset ``chat``, keine Tools).
 
         Die synchronen Hermes-Callbacks (Text/Reasoning) werden threadsicher
         in eine ``asyncio.Queue`` gebrückt und als dieselben SSE-Events wie
@@ -711,7 +732,7 @@ async def send_message(
         def _run_sync() -> str:
             result = agent.run_conversation(
                 user_content,
-                system_message=_PLAIN_CHAT_TOOL_HINT,
+                system_message=_DEEP_RESEARCH_SYSTEM_HINT,
                 conversation_history=list(hermes_history),
             )
             if isinstance(result, dict):
@@ -906,6 +927,21 @@ _AGENT_EVENT_TTL = 600  # Events 10min nach Abschluss aufbewahren
 # prueft dies kooperativ in seinen Callbacks (naechste Tool-/Text-Grenze) und
 # bricht dann ab -- ein echter Stopp, nicht nur ein abgeklemmter Client-Stream.
 _agent_cancel: set[str] = set()
+
+# Aktiver Job pro Konversation (conv_id -> job_id). Erzwingt "ein Lauf pro
+# Konversation": ein neuer Lauf stoppt zuerst den alten (verhindert Hermes-
+# Session-Kollisionen bei session_id=f"chat-{conv_id}" und doppelte Laeufe).
+_conv_active_job: dict[str, str] = {}
+
+# Sanfte Parallelitaets-Begrenzung: max. 3 gleichzeitige Hermes-Laeufe. Mehr
+# warten sauber in der Queue, statt ThreadPool/Ollama unkontrolliert zu fluten.
+_MAX_CONCURRENT_AGENTS = 3
+_agent_semaphore = asyncio.Semaphore(_MAX_CONCURRENT_AGENTS)
+
+# clarify-Timeout: ohne Antwort trifft der Agent nach 180s eine Annahme und
+# laeuft weiter -- der Thread blockiert nicht mehr minutenlang, wenn der Nutzer
+# weggeklickt hat.
+CLARIFY_TIMEOUT = 180
 
 
 class _AgentCancelled(Exception):
@@ -1328,9 +1364,21 @@ async def send_agent_message(
     conv_id_str = str(conv.id)
     job_id_str = str(agent_job_id)
 
+    # Ein Lauf pro Konversation: laeuft in dieser Konversation bereits ein Job,
+    # zuerst kooperativ stoppen (verhindert Hermes-Session-Kollisionen und
+    # doppelte Laeufe, die den ThreadPool/Ollama blockieren).
+    prev_job = _conv_active_job.get(conv_id_str)
+    if prev_job and prev_job != job_id_str and _agent_running.get(prev_job):
+        _agent_cancel.add(prev_job)
+        for _cid, _p in list(_clarify_pending.items()):
+            if _p.get("job_id") == prev_job:
+                _p["answer"] = "Abgebrochen (neuer Lauf gestartet)."
+                _p["event"].set()
+
     _agent_events[job_id_str] = []
     _agent_conditions[job_id_str] = asyncio.Condition()
     _agent_running[job_id_str] = True
+    _conv_active_job[conv_id_str] = job_id_str
 
     asyncio.create_task(
         _run_agent_background(
@@ -1352,6 +1400,62 @@ async def send_agent_message(
 
 
 async def _run_agent_background(
+    job_id: str,
+    conv_id: str,
+    prompt: str,
+    model: str,
+    *,
+    enabled_servers: list[str] | None = None,
+    include_memory: bool = False,
+    conversation_history: list[dict] | None = None,
+):
+    """Wrapper um den eigentlichen Lauf: Parallelitaets-Begrenzung + robuster Cleanup.
+
+    - ``asyncio.Semaphore`` begrenzt gleichzeitige Laeufe (Warte-Status-Event).
+    - ``finally`` garantiert, dass ``_agent_running`` zurueckgesetzt, das Cancel-Set
+      bereinigt, der Konversations-Slot freigegeben und das Event-Cleanup geplant
+      wird -- auch bei ``CancelledError`` (Backend-Reload/-Shutdown). Damit haengt
+      kein Client mehr in einem Endlos-Reconnect.
+    """
+    if _agent_semaphore.locked():
+        await _push_agent_event(job_id, {"event": "status", "data": json.dumps(
+            {"content": "Wartet auf freien Agent-Slot..."})})
+    async with _agent_semaphore:
+        # Nach dem Warten pruefen, ob der Job zwischenzeitlich gestoppt wurde.
+        if job_id in _agent_cancel:
+            _agent_running[job_id] = False
+            _agent_cancel.discard(job_id)
+            if _conv_active_job.get(conv_id) == job_id:
+                _conv_active_job.pop(conv_id, None)
+            await _push_agent_event(job_id, {"event": "stopped", "data": json.dumps({"content": "Vom Benutzer gestoppt"})})
+            asyncio.create_task(_cleanup_agent_events(job_id))
+            return
+        try:
+            await _run_agent_background_impl(
+                job_id,
+                conv_id,
+                prompt,
+                model,
+                enabled_servers=enabled_servers,
+                include_memory=include_memory,
+                conversation_history=conversation_history,
+            )
+        except asyncio.CancelledError:
+            logger.info("[agent-bg] Background-Task abgebrochen, job=%s", job_id)
+            try:
+                await _push_agent_event(job_id, {"event": "error", "data": json.dumps({"error": "Agent-Lauf abgebrochen"})})
+            except Exception:  # noqa: BLE001
+                pass
+            raise
+        finally:
+            _agent_running[job_id] = False
+            _agent_cancel.discard(job_id)
+            if _conv_active_job.get(conv_id) == job_id:
+                _conv_active_job.pop(conv_id, None)
+            asyncio.create_task(_cleanup_agent_events(job_id))
+
+
+async def _run_agent_background_impl(
     job_id: str,
     conv_id: str,
     prompt: str,
@@ -1441,9 +1545,20 @@ async def _run_agent_background(
             _emit("thinking", text)
 
     _tools_used: list[str] = []
+    # Sandbox-Artefakte dieses Laufs: Scope + Dateinamen (Reihenfolge/dedupe),
+    # damit die erzeugten Dateien inline gerendert werden koennen. Bei geforctem
+    # workspace_key landet alles im persistenten conv-<id>-Scope.
+    _artifact_scope: dict[str, str | None] = {"scope": None}
+    _artifact_names: list[str] = []
 
     def on_tool_start(tc_id, name, args):
         _check_cancel()
+        # Sandbox-Ausfuehrung an die Konversation binden: erzwingt den
+        # persistenten conv-<conv_id>-Workspace (reload-sicher, ueber den
+        # bestehenden Artefakt-Endpoint bedienbar) — unabhaengig davon, ob das
+        # Modell selbst einen workspace_key setzt.
+        if str(name) == _SANDBOX_EXEC_TOOL and isinstance(args, dict):
+            args["workspace_key"] = conv_id
         if name and name not in _tools_used:
             _tools_used.append(str(name))
         event = {"type": "tool_start", "name": str(name)}
@@ -1502,6 +1617,16 @@ async def _run_agent_background(
 
     def on_tool_complete(tc_id, name, args, result):
         _trace_append({"type": "tool_complete", "name": str(name), "result": str(result)[:500]})
+        # Sandbox-Artefakte einsammeln: der Marker <!--tp-exec:scope:names-->
+        # aus dem Tool-Ergebnis liefert Scope + Dateinamen fuer das Inline-Rendering.
+        if str(name) == _SANDBOX_EXEC_TOOL:
+            m = _EXEC_MARKER_RE.search(str(result or ""))
+            if m:
+                _artifact_scope["scope"] = m.group(1)
+                for n in m.group(2).split("|"):
+                    n = n.strip()
+                    if n and n not in _artifact_names:
+                        _artifact_names.append(n)
         # Audit-Parität: Hermes-native web_search-Aufrufe historisieren.
         # Exakter Abgleich -- ein Substring-Match hatte frueher auch
         # mcp_taskpilot_web_search erfasst und Duplikate erzeugt.
@@ -1541,7 +1666,7 @@ async def _run_agent_background(
                 "question": str(question),
                 "choices": choice_list,
             }, ensure_ascii=False))
-            answered = ev.wait(timeout=MAX_AGENT_TIMEOUT)
+            answered = ev.wait(timeout=CLARIFY_TIMEOUT)
             if not answered:
                 return "Keine Antwort des Nutzers erhalten. Triff eine sinnvolle Annahme und fahre fort."
             return _clarify_pending.get(clarify_id, {}).get("answer") or "(leere Antwort)"
@@ -1619,6 +1744,13 @@ async def _run_agent_background(
             # kooperativ aus (Callback-Abbruch an nächster Grenze).
             if job_id in _agent_cancel:
                 logger.info("[agent-bg] Stopp durch Nutzer, job=%s", job_id)
+                # Echter Cross-Thread-Abbruch: gibt Ollama/GPU + ThreadPool-Slot
+                # frei, statt den Hermes-Thread unbemerkt weiterlaufen zu lassen.
+                try:
+                    agent.interrupt("Vom Benutzer abgebrochen.")
+                except Exception:  # noqa: BLE001 - Abbruch darf nie scheitern
+                    pass
+                bot_task.cancel()
                 await _update_agent_job("failed", error_message="Vom Benutzer gestoppt", tools_used=list(_tools_used), trace=list(_trace))
                 await _push_agent_event(job_id, {"event": "stopped", "data": json.dumps({"content": "Vom Benutzer gestoppt"})})
                 _agent_running[job_id] = False
@@ -1636,6 +1768,11 @@ async def _run_agent_background(
             except asyncio.TimeoutError:
                 elapsed = time.time() - t_start
                 if elapsed > MAX_AGENT_TIMEOUT:
+                    # Ollama/GPU + ThreadPool-Slot wirklich freigeben.
+                    try:
+                        agent.interrupt("Zeitlimit überschritten.")
+                    except Exception:  # noqa: BLE001 - Abbruch darf nie scheitern
+                        pass
                     bot_task.cancel()
                     logger.warning("[agent-bg] Timeout nach %.0fs, job=%s", elapsed, job_id)
                     await _update_agent_job("failed", error_message=f"Timeout nach {MAX_AGENT_TIMEOUT}s", tools_used=list(_tools_used), trace=list(_trace))
@@ -1649,6 +1786,13 @@ async def _run_agent_background(
             await _drain(evt_type, evt_data)
 
         content = bot_task.result()
+        # Erzeugte Sandbox-Artefakte inline verfuegbar machen: Marker anhaengen,
+        # damit das Frontend den ArtifactViewer (Bilder/HTML spielbar, Vollbild)
+        # rendert — sowohl live (done-Event) als auch nach Reload (gespeicherter
+        # content).
+        artifact_marker = _artifacts_marker(_artifact_scope["scope"], _artifact_names)
+        if artifact_marker:
+            content = f"{content}{artifact_marker}"
         tools_used = list(_tools_used)
         elapsed = time.time() - t_start
         logger.info("[agent-bg] Fertig in %.1fs, Antwort=%d Zeichen, Tools=%s, job=%s",
@@ -1743,6 +1887,38 @@ async def cancel_agent_run(
     return {"ok": True}
 
 
+async def _terminal_event_from_db(job_id: str) -> dict:
+    """Baut aus dem finalen Job-Status ein terminales SSE-Event.
+
+    Wird gesendet, wenn der Stream keinen terminalen Event mehr im Buffer hat,
+    der Job aber nicht mehr laeuft (z. B. Reconnect nach Ablauf des Buffers oder
+    Backend-Reload). So kann der Client immer sauber aufraeumen, statt in einen
+    Endlos-Reconnect zu laufen.
+    """
+    job = None
+    try:
+        async with async_session() as sdb:
+            res = await sdb.execute(select(AgentJob).where(AgentJob.id == uuid.UUID(job_id)))
+            job = res.scalar_one_or_none()
+    except Exception:  # noqa: BLE001
+        job = None
+    if job is None:
+        return {"event": "error", "data": json.dumps(
+            {"error": "Agent-Lauf nicht mehr verfügbar", "_synthetic": True})}
+    if job.status == "completed":
+        meta = job.metadata_json or {}
+        return {"event": "done", "data": json.dumps({
+            "message_id": None,
+            "content": job.output or "",
+            "tools_used": meta.get("tools_used"),
+            "_synthetic": True,
+        }, ensure_ascii=False)}
+    return {"event": "error", "data": json.dumps({
+        "error": job.error_message or "Agent-Lauf beendet",
+        "_synthetic": True,
+    }, ensure_ascii=False)}
+
+
 @router.get("/conversations/{conversation_id}/agent-stream")
 async def stream_agent_events(
     conversation_id: uuid.UUID,
@@ -1777,6 +1953,15 @@ async def stream_agent_events(
                     return
 
             if not _agent_running.get(job_id, False):
+                # Kein stiller Close: finalen Status aus der DB lesen und ein
+                # synthetisches terminales Event senden, damit der Client immer
+                # sauber terminiert (verhindert Endlos-Reconnect mit stale State).
+                term = await _terminal_event_from_db(job_id)
+                data = json.loads(term.get("data", "{}"))
+                data["_idx"] = idx
+                term = dict(term)
+                term["data"] = json.dumps(data, ensure_ascii=False)
+                yield term
                 return
 
             cond = _agent_conditions.get(job_id)

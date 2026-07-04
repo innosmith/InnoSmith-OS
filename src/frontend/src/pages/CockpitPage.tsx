@@ -632,7 +632,10 @@ export function CockpitPage() {
               </div>
             </section>
 
-            {/* Spalte 2: Kalender heute */}
+            {/* Rechte Spalte: Heute + E-Mails & CRM gestapelt */}
+            <div className="space-y-4">
+
+            {/* Kalender heute */}
             <section className={`rounded-xl border p-4 ${cardClass}`}>
               <div className="mb-3 flex items-center justify-between">
                 <h2 className={`text-sm font-semibold uppercase tracking-wider ${textSecondary}`}>
@@ -688,6 +691,88 @@ export function CockpitPage() {
                 </div>
               )}
             </section>
+
+            {/* E-Mails & CRM (zurück in der Agenda/Heute-Zeile) */}
+            <section className={`rounded-xl border p-4 ${cardClass}`}>
+              <div className="mb-3 flex items-center justify-between">
+                <h2 className={`text-sm font-semibold uppercase tracking-wider ${textSecondary}`}>
+                  E-Mails & CRM
+                </h2>
+                <div className={`flex items-center gap-1.5 text-xs font-medium`}>
+                  <button
+                    onClick={() => navigate('/inbox')}
+                    className={`${hasBg ? 'text-white/60 hover:text-white' : 'text-indigo-600 hover:text-indigo-800 dark:text-indigo-400'}`}
+                  >
+                    Posteingang
+                  </button>
+                  <span className={`${hasBg ? 'text-white/30' : 'text-gray-300 dark:text-gray-600'}`}>·</span>
+                  <a
+                    href="https://innosmith.pipedrive.com"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className={`${hasBg ? 'text-white/60 hover:text-white' : 'text-green-600 hover:text-green-800 dark:text-green-400'}`}
+                  >
+                    Pipedrive
+                  </a>
+                </div>
+              </div>
+              <div className="space-y-1.5 max-h-80 overflow-y-auto">
+                {flaggedEmails.map(email => (
+                  <div
+                    key={email.id}
+                    className={`flex items-start gap-2.5 rounded-lg p-2.5 cursor-pointer transition-colors ${
+                      hasBg ? 'hover:bg-white/10' : 'hover:bg-gray-50 dark:hover:bg-gray-800'
+                    }`}
+                    onClick={() => navigate('/inbox')}
+                  >
+                    <FlagIcon className={`mt-0.5 h-4 w-4 shrink-0 ${hasBg ? 'text-orange-300' : 'text-orange-500 dark:text-orange-400'}`} />
+                    <div className="min-w-0 flex-1">
+                      <div className={`text-sm font-medium truncate ${textPrimary}`}>{email.subject || 'Kein Betreff'}</div>
+                      <div className={`text-[11px] ${textMuted}`}>
+                        {email.from_name || email.from_address}
+                        {email.received_at && ` · ${relativeDate(email.received_at)}`}
+                      </div>
+                    </div>
+                    {email.has_attachments && (
+                      <PaperclipIcon className={`mt-0.5 h-3.5 w-3.5 shrink-0 ${textMuted}`} />
+                    )}
+                  </div>
+                ))}
+                {pipedriveActivities.length > 0 && flaggedEmails.length > 0 && (
+                  <div className={`my-2 border-t ${hasBg ? 'border-white/10' : 'border-gray-100 dark:border-gray-800'}`} />
+                )}
+                {pipedriveActivities.map(act => {
+                  const isOverdue = act.due_date && new Date(act.due_date) < new Date();
+                  return (
+                    <a
+                      key={`pd-${act.id}`}
+                      href={`https://innosmith.pipedrive.com/activities/${act.id}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className={`flex items-start gap-2.5 rounded-lg p-2.5 transition-colors ${
+                        hasBg ? 'hover:bg-white/10' : 'hover:bg-gray-50 dark:hover:bg-gray-800'
+                      }`}
+                    >
+                      <div className={`mt-1.5 h-2 w-2 rounded-full shrink-0 ${isOverdue ? 'bg-red-500' : 'bg-orange-400'}`} />
+                      <div className="min-w-0 flex-1">
+                        <div className={`text-sm font-medium truncate ${textPrimary}`}>{act.subject}</div>
+                        <div className={`text-[11px] ${isOverdue ? 'text-red-500 font-medium' : textMuted}`}>
+                          {act.type || 'Aufgabe'}
+                          {act.due_date && ` · ${isOverdue ? 'Überfällig' : new Date(act.due_date).toLocaleDateString('de-CH')}`}
+                          {act.person_name && ` · ${act.person_name}`}
+                        </div>
+                      </div>
+                    </a>
+                  );
+                })}
+                {flaggedEmails.length === 0 && pipedriveActivities.length === 0 && (
+                  <div className={`flex h-20 items-center justify-center rounded-lg text-sm ${textMuted}`}>
+                    Keine E-Mails oder Aufgaben
+                  </div>
+                )}
+              </div>
+            </section>
+            </div>
           </div>
 
           {/* ── Zone 3: Freigaben (kompakt, aufklappbar) ── */}
@@ -1129,84 +1214,6 @@ export function CockpitPage() {
                     {signaLoading && <div className="h-4 w-4 animate-spin rounded-full border-2 border-indigo-500 border-t-transparent" />}
                   </div>
                 )}
-              </div>
-            </section>
-          )}
-
-          {/* ── E-Mails & CRM (ans Ende verschoben, tiefere Priorität) ── */}
-          {(flaggedEmails.length > 0 || pipedriveActivities.length > 0) && (
-            <section className={`rounded-xl border p-4 ${cardClass}`}>
-              <div className="mb-3 flex items-center justify-between">
-                <h2 className={`text-sm font-semibold uppercase tracking-wider ${textSecondary}`}>
-                  E-Mails & CRM
-                </h2>
-                <div className={`flex items-center gap-1.5 text-xs font-medium`}>
-                  <button
-                    onClick={() => navigate('/inbox')}
-                    className={`${hasBg ? 'text-white/60 hover:text-white' : 'text-indigo-600 hover:text-indigo-800 dark:text-indigo-400'}`}
-                  >
-                    Posteingang
-                  </button>
-                  <span className={`${hasBg ? 'text-white/30' : 'text-gray-300 dark:text-gray-600'}`}>·</span>
-                  <a
-                    href="https://innosmith.pipedrive.com"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className={`${hasBg ? 'text-white/60 hover:text-white' : 'text-green-600 hover:text-green-800 dark:text-green-400'}`}
-                  >
-                    Pipedrive
-                  </a>
-                </div>
-              </div>
-              <div className="space-y-1.5 max-h-80 overflow-y-auto">
-                {flaggedEmails.map(email => (
-                  <div
-                    key={email.id}
-                    className={`flex items-start gap-2.5 rounded-lg p-2.5 cursor-pointer transition-colors ${
-                      hasBg ? 'hover:bg-white/10' : 'hover:bg-gray-50 dark:hover:bg-gray-800'
-                    }`}
-                    onClick={() => navigate('/inbox')}
-                  >
-                    <FlagIcon className={`mt-0.5 h-4 w-4 shrink-0 ${hasBg ? 'text-orange-300' : 'text-orange-500 dark:text-orange-400'}`} />
-                    <div className="min-w-0 flex-1">
-                      <div className={`text-sm font-medium truncate ${textPrimary}`}>{email.subject || 'Kein Betreff'}</div>
-                      <div className={`text-[11px] ${textMuted}`}>
-                        {email.from_name || email.from_address}
-                        {email.received_at && ` · ${relativeDate(email.received_at)}`}
-                      </div>
-                    </div>
-                    {email.has_attachments && (
-                      <PaperclipIcon className={`mt-0.5 h-3.5 w-3.5 shrink-0 ${textMuted}`} />
-                    )}
-                  </div>
-                ))}
-                {pipedriveActivities.length > 0 && flaggedEmails.length > 0 && (
-                  <div className={`my-2 border-t ${hasBg ? 'border-white/10' : 'border-gray-100 dark:border-gray-800'}`} />
-                )}
-                {pipedriveActivities.map(act => {
-                  const isOverdue = act.due_date && new Date(act.due_date) < new Date();
-                  return (
-                    <a
-                      key={`pd-${act.id}`}
-                      href={`https://innosmith.pipedrive.com/activities/${act.id}`}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className={`flex items-start gap-2.5 rounded-lg p-2.5 transition-colors ${
-                        hasBg ? 'hover:bg-white/10' : 'hover:bg-gray-50 dark:hover:bg-gray-800'
-                      }`}
-                    >
-                      <div className={`mt-1.5 h-2 w-2 rounded-full shrink-0 ${isOverdue ? 'bg-red-500' : 'bg-orange-400'}`} />
-                      <div className="min-w-0 flex-1">
-                        <div className={`text-sm font-medium truncate ${textPrimary}`}>{act.subject}</div>
-                        <div className={`text-[11px] ${isOverdue ? 'text-red-500 font-medium' : textMuted}`}>
-                          {act.type || 'Aufgabe'}
-                          {act.due_date && ` · ${isOverdue ? 'Überfällig' : new Date(act.due_date).toLocaleDateString('de-CH')}`}
-                          {act.person_name && ` · ${act.person_name}`}
-                        </div>
-                      </div>
-                    </a>
-                  );
-                })}
               </div>
             </section>
           )}

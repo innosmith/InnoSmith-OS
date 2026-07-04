@@ -163,6 +163,31 @@ TOOLS = [
             "required": ["email"],
         },
     ),
+    Tool(
+        name="semantic_search_documents",
+        description=(
+            "Durchsucht den lokalen semantischen Index über Anthonys E-Mails und "
+            "OneDrive-Dokumente (Bedeutung + Stichwort, hybrid). Gibt pro Treffer "
+            "eine Snippet-Passage samt Quelle (Titel, Typ, URL) zurück -- ideal als "
+            "RAG-Grounding, z. B. 'alle Dokumente zum Thema X'. mode=hybrid (Default) "
+            "kombiniert Semantik und Keyword; mode=semantic nur Bedeutung; mode=exact "
+            "nur Stichwort. sources filtert auf 'email' und/oder 'onedrive'."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Suchanfrage in natürlicher Sprache oder Stichworte"},
+                "mode": {"type": "string", "enum": ["hybrid", "semantic", "exact"], "default": "hybrid"},
+                "sources": {
+                    "type": "array",
+                    "items": {"type": "string", "enum": ["email", "onedrive", "upload", "transcript"]},
+                    "description": "Optionaler Filter auf Quelltypen",
+                },
+                "limit": {"type": "integer", "default": 10},
+            },
+            "required": ["query"],
+        },
+    ),
 ]
 
 server = Server("taskpilot")
@@ -419,7 +444,124 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             result["action"] = "updated"
             return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 
+    elif name == "semantic_search_documents":
+        return await _semantic_search_documents(p, arguments)
+
     return [TextContent(type="text", text=f"Unbekanntes Tool: {name}")]
+
+
+_SEARCH_QUERY_INSTRUCT = (
+    "Instruct: Given a search query, retrieve relevant documents and emails "
+    "that answer or relate to it.\nQuery: "
+)
+
+
+async def _embed_query(query: str) -> list[float] | None:
+    """Erzeugt ein Query-Embedding via lokalem Ollama (Such-Modell). Best-effort."""
+    import httpx
+
+    base = _env("TP_OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/")
+    model = _env("TP_SEARCH_EMBED_MODEL", "qwen3-embedding:4b-fp16")
+    dim = int(_env("TP_SEARCH_EMBED_DIM", "2560"))
+    prompt = _SEARCH_QUERY_INSTRUCT + query
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            resp = await client.post(f"{base}/api/embeddings", json={"model": model, "prompt": prompt[:8000]})
+            resp.raise_for_status()
+            vec = resp.json().get("embedding")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Query-Embedding fehlgeschlagen: %s", exc)
+        return None
+    if not isinstance(vec, list) or len(vec) != dim:
+        return None
+    return [float(x) for x in vec]
+
+
+def _vec_literal(vec: list[float]) -> str:
+    return "[" + ",".join(f"{x:.7f}" for x in vec) + "]"
+
+
+async def _semantic_search_documents(p: asyncpg.Pool, arguments: dict) -> list[TextContent]:
+    """Hybrid-Suche (pgvector + tsvector, RRF) über semantic_documents für Hermes."""
+    query = (arguments.get("query") or "").strip()
+    if not query:
+        return [TextContent(type="text", text=json.dumps({"results": [], "note": "leere Anfrage"}))]
+    mode = arguments.get("mode", "hybrid")
+    limit = min(int(arguments.get("limit", 10)), 50)
+    sources = arguments.get("sources") or None
+    cand = max(limit, 50)
+
+    semantic: list[dict] = []
+    keyword: list[dict] = []
+
+    if mode in ("hybrid", "semantic"):
+        vec = await _embed_query(query)
+        if vec is not None:
+            params = [_vec_literal(vec)]
+            src = ""
+            if sources:
+                src = " AND source_type = ANY($2)"
+                params.append(sources)
+            rows = await p.fetch(
+                "SELECT source_type, source_id, title, url, mime, "
+                "left(content_text, 260) AS snippet, "
+                "1 - (embedding <=> $1::halfvec) AS similarity "
+                "FROM semantic_documents WHERE embedding IS NOT NULL" + src +
+                " ORDER BY embedding <=> $1::halfvec LIMIT " + str(cand),
+                *params,
+            )
+            seen = set()
+            for r in rows:
+                key = (r["source_type"], r["source_id"])
+                if key in seen:
+                    continue
+                seen.add(key)
+                semantic.append(_row_to_dict(r))
+
+    if mode in ("hybrid", "exact"):
+        params = [query]
+        src = ""
+        if sources:
+            src = " AND source_type = ANY($2)"
+            params.append(sources)
+        rows = await p.fetch(
+            "SELECT source_type, source_id, title, url, mime, "
+            "ts_headline('german', content_text, q, "
+            "'MaxFragments=2,MinWords=5,MaxWords=22,StartSel=<b>,StopSel=</b>') AS snippet "
+            "FROM semantic_documents, websearch_to_tsquery('german', $1) q "
+            "WHERE content_tsv @@ q" + src +
+            " ORDER BY ts_rank_cd(content_tsv, q) DESC LIMIT " + str(cand),
+            *params,
+        )
+        seen = set()
+        for r in rows:
+            key = (r["source_type"], r["source_id"])
+            if key in seen:
+                continue
+            seen.add(key)
+            d = _row_to_dict(r)
+            if d.get("snippet"):
+                d["snippet"] = d["snippet"].replace("<b>", "").replace("</b>", "")
+            keyword.append(d)
+
+    # RRF-Fusion
+    k = 60
+    scores: dict = {}
+    merged: dict = {}
+    for rank, it in enumerate(semantic):
+        key = (it["source_type"], it["source_id"])
+        scores[key] = scores.get(key, 0.0) + 1.0 / (k + rank)
+        merged.setdefault(key, it)
+    for rank, it in enumerate(keyword):
+        key = (it["source_type"], it["source_id"])
+        scores[key] = scores.get(key, 0.0) + 1.0 / (k + rank)
+        if key not in merged:
+            merged[key] = it
+        elif not merged[key].get("snippet"):
+            merged[key]["snippet"] = it.get("snippet")
+    ranked = sorted(merged.values(), key=lambda it: scores[(it["source_type"], it["source_id"])], reverse=True)
+    results = ranked[:limit]
+    return [TextContent(type="text", text=json.dumps({"mode": mode, "count": len(results), "results": results}, indent=2, ensure_ascii=False))]
 
 
 async def main():

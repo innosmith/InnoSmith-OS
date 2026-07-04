@@ -965,6 +965,146 @@ class GraphClient:
         )
         return data.get("value", [])
 
+    async def _get_raw_url(self, url: str) -> dict:
+        """GET auf eine absolute Graph-URL (z. B. ``@odata.nextLink``)."""
+        client = await self._ensure_client()
+        headers = await self._headers()
+        resp = await client.get(url, headers=headers)
+        resp.raise_for_status()
+        return resp.json()
+
+    async def walk_drive_files(self, *, max_files: int = 100000) -> list[dict]:
+        """Rekursiv ALLE Datei-Items in OneDrive auflisten (ohne Ordner selbst).
+
+        Paginiert über ``@odata.nextLink`` und steigt in Unterordner ab. Best-effort-
+        Cap ``max_files`` gegen Runaway. Gibt driveItem-Objekte mit
+        ``id,name,size,lastModifiedDateTime,file,webUrl,parentReference`` zurück.
+        Nur Lesezugriff (Files.Read(.All)). Für den semantischen Such-Index gedacht.
+        """
+        select = "id,name,size,lastModifiedDateTime,file,folder,webUrl,parentReference"
+        out: list[dict] = []
+        stack: list[str] = [f"{self._user_path}/drive/root/children"]
+        while stack and len(out) < max_files:
+            endpoint = stack.pop()
+            data = await self._get(endpoint, {"$top": "200", "$select": select})
+            while True:
+                for item in data.get("value", []):
+                    if item.get("folder"):
+                        stack.append(f"{self._user_path}/drive/items/{item['id']}/children")
+                    elif item.get("file"):
+                        out.append(item)
+                        if len(out) >= max_files:
+                            break
+                nxt = data.get("@odata.nextLink")
+                if nxt and len(out) < max_files:
+                    data = await self._get_raw_url(nxt)
+                else:
+                    break
+        return out
+
+    async def get_drive_item_thumbnail(self, item_id: str) -> str | None:
+        """Kleine Vorschau-URL (Thumbnail) eines OneDrive-Items, falls vorhanden."""
+        try:
+            data = await self._get(
+                f"{self._user_path}/drive/items/{item_id}/thumbnails",
+                {"$select": "medium,small"},
+            )
+        except Exception:  # noqa: BLE001 - best-effort, kein Thumbnail ist ok
+            return None
+        for entry in data.get("value", []):
+            for size in ("medium", "small", "large"):
+                thumb = entry.get(size)
+                if thumb and thumb.get("url"):
+                    return thumb["url"]
+        return None
+
+    async def get_search_region(self) -> str | None:
+        """Ermittelt die für die Microsoft Search API (app-only) gültige ``region``.
+
+        Im App-only-Modus ist ``region`` Pflicht. Wir bestimmen sie zero-config und
+        cachen das Ergebnis (auch negativ) instanzweit:
+
+        1. **Multi-Geo-Tenant:** ``siteCollection.dataLocationCode`` (z. B. "CHE").
+        2. **Single-Geo-Tenant** (Feld leer): eine Probe-Anfrage ``/search/query``
+           ohne Region -> Graph antwortet ``400`` mit *"Only valid regions are X"*;
+           daraus parsen wir die tatsächliche Region (z. B. "EMEA").
+
+        Gibt None zurück, wenn nichts ermittelbar ist (dann greift der Namens-Fallback).
+        """
+        if getattr(self, "_search_region_resolved", False):
+            return self._search_region
+        self._search_region = None
+
+        # 1) Multi-Geo: expliziter dataLocationCode
+        try:
+            data = await self._get("/sites/root", {"$select": "siteCollection"})
+            code = (data.get("siteCollection") or {}).get("dataLocationCode")
+            if code:
+                self._search_region = code
+        except Exception:  # noqa: BLE001
+            pass
+
+        # 2) Single-Geo: Region aus der Graph-Fehlermeldung ableiten. Wichtig: Es muss
+        #    eine BEWUSST UNGÜLTIGE Region gesendet werden. Ohne Region antwortet Graph
+        #    nur "Region is required ..." (ohne Liste); mit ungültiger Region dagegen
+        #    "Requested region ZZZ not found. Only valid regions are EMEA." -> parsebar.
+        if not self._search_region:
+            try:
+                await self._post("/search/query", {"requests": [{
+                    "entityTypes": ["driveItem"],
+                    "query": {"queryString": "probe"},
+                    "region": "ZZZ",
+                    "from": 0,
+                    "size": 1,
+                }]})
+            except httpx.HTTPStatusError as exc:
+                m = re.search(r"valid regions are ([A-Za-z]+)", exc.response.text or "")
+                if m:
+                    self._search_region = m.group(1)
+            except Exception:  # noqa: BLE001
+                pass
+
+        self._search_region_resolved = True
+        if self._search_region:
+            logger.info("Search-API-Region ermittelt: %s", self._search_region)
+        return self._search_region
+
+    async def search_query(
+        self,
+        query: str,
+        *,
+        entity_types: list[str] | None = None,
+        region: str = "",
+        top: int = 20,
+        include_private: bool = True,
+    ) -> list[dict]:
+        """Microsoft Search API (``POST /search/query``) -- Cross-Entity-Suche.
+
+        APP-ONLY-HINWEIS: Mit Application Permissions sind ausschliesslich die
+        EntityTypes ``site/list/listItem/drive/driveItem`` unterstützt (NICHT
+        ``message``/``event`` -- die laufen über ``search_emails``) und ``region``
+        ist PFLICHT. Für privaten OneDrive-Content muss
+        ``sharePointOneDriveOptions.includeContent=privateContent`` gesetzt sein.
+        Liefert Hits inkl. ``summary`` (Snippet mit Highlight ``<c0>…</c0>``).
+        """
+        ent = entity_types or ["driveItem"]
+        req: dict = {
+            "entityTypes": ent,
+            "query": {"queryString": query},
+            "from": 0,
+            "size": top,
+        }
+        if region:
+            req["region"] = region
+        if include_private and any(e in ("driveItem", "drive", "list", "listItem") for e in ent):
+            req["sharePointOneDriveOptions"] = {"includeContent": "privateContent,sharedContent"}
+        data = await self._post("/search/query", {"requests": [req]})
+        hits: list[dict] = []
+        for resp in data.get("value", []):
+            for container in resp.get("hitsContainers", []):
+                hits.extend(container.get("hits", []))
+        return hits
+
     async def list_sites(self, search: str = "") -> list[dict]:
         """SharePoint-Sites auflisten oder durchsuchen."""
         params: dict[str, str] = {"$top": "20"}

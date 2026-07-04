@@ -91,6 +91,15 @@ interface TriageStats {
   followups_due?: number;
 }
 
+interface EmailSearchHit {
+  source_type: string;
+  source_id: string;
+  title: string | null;
+  snippet: string | null;
+  score: number | null;
+  similarity: number | null;
+}
+
 /* ---------- Triage-Farben & Labels ---------- */
 
 const TRIAGE_CONFIG: Record<string, { label: string; bg: string; text: string; dot: string }> = {
@@ -164,6 +173,35 @@ export function InboxPage() {
   const [reclassReason, setReclassReason] = useState('');
   const [reclassBusy, setReclassBusy] = useState(false);
   const [reclassDone, setReclassDone] = useState<string | null>(null);
+
+  // Semantische E-Mail-Suche (gleicher Backend-Endpoint wie die globale Suche)
+  const [searchTerm, setSearchTerm] = useState('');
+  const [searchHits, setSearchHits] = useState<EmailSearchHit[]>([]);
+  const [searching, setSearching] = useState(false);
+  const [searchActive, setSearchActive] = useState(false);
+
+  const runEmailSearch = useCallback(async () => {
+    const q = searchTerm.trim();
+    if (q.length < 2) return;
+    setSearching(true);
+    setSearchActive(true);
+    try {
+      const data = await api.get<{ results: EmailSearchHit[] }>(
+        `/api/search/semantic?q=${encodeURIComponent(q)}&mode=hybrid&sources=email&limit=25`,
+      );
+      setSearchHits(data.results || []);
+    } catch {
+      setSearchHits([]);
+    } finally {
+      setSearching(false);
+    }
+  }, [searchTerm]);
+
+  const clearEmailSearch = useCallback(() => {
+    setSearchTerm('');
+    setSearchHits([]);
+    setSearchActive(false);
+  }, []);
 
   /* -- E-Mails laden -- */
   const fetchEmails = useCallback(async () => {
@@ -246,6 +284,22 @@ export function InboxPage() {
       if (!email.is_read) {
         await api.patch(`/api/emails/${email.id}/read`);
         setEmails((prev) => prev.map((e) => (e.id === email.id ? { ...e, is_read: true } : e)));
+      }
+    } catch {
+      /* ignore */
+    } finally {
+      setDetailLoading(false);
+    }
+  };
+
+  /* -- E-Mail per ID öffnen (aus Suchtreffer) -- */
+  const openEmailById = async (messageId: string) => {
+    setDetailLoading(true);
+    try {
+      const detail = await api.get<EmailDetail>(`/api/emails/${messageId}`);
+      setSelectedEmail(detail);
+      if (!detail.is_read) {
+        await api.patch(`/api/emails/${messageId}/read`).catch(() => {});
       }
     } catch {
       /* ignore */
@@ -378,6 +432,30 @@ export function InboxPage() {
             </div>
           </div>
           <div className="flex items-center gap-3">
+            {activeTab === 'email' && (
+              <div className={`hidden items-center gap-1.5 rounded-lg border px-2.5 py-1.5 sm:flex ${hasBg ? 'border-white/20 bg-black/30' : 'border-gray-200/70 bg-white/60 dark:border-gray-700/60 dark:bg-gray-800/50'}`}>
+                <svg className={`h-4 w-4 shrink-0 ${hasBg ? 'text-white/60' : 'text-gray-400'}`} fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="m21 21-5.197-5.197m0 0A7.5 7.5 0 1 0 5.196 5.196a7.5 7.5 0 0 0 10.607 10.607Z" />
+                </svg>
+                <input
+                  type="text"
+                  data-testid="inbox-search-input"
+                  value={searchTerm}
+                  onChange={(e) => setSearchTerm(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === 'Enter') runEmailSearch(); if (e.key === 'Escape') clearEmailSearch(); }}
+                  placeholder="E-Mails durchsuchen…"
+                  className={`w-44 bg-transparent text-xs outline-none ${hasBg ? 'text-white placeholder:text-white/50' : 'text-gray-900 placeholder:text-gray-400 dark:text-white dark:placeholder:text-gray-500'}`}
+                />
+                {searching && <span className="h-3 w-3 animate-spin rounded-full border-2 border-indigo-500 border-t-transparent" />}
+                {searchActive && !searching && (
+                  <button onClick={clearEmailSearch} title="Suche zurücksetzen" className={`shrink-0 ${hasBg ? 'text-white/60 hover:text-white' : 'text-gray-400 hover:text-gray-600'}`}>
+                    <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M6 18 18 6M6 6l12 12" />
+                    </svg>
+                  </button>
+                )}
+              </div>
+            )}
             <button
               onClick={() => setBgPickerOpen(true)}
               className={`rounded-lg p-2 transition-colors ${hasBg ? 'text-white/70 hover:bg-white/10 hover:text-white' : 'text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-800 dark:hover:text-gray-300'}`}
@@ -511,7 +589,42 @@ export function InboxPage() {
 
         {/* Email list */}
         <div className={`${selectedEmail ? 'hidden md:block md:w-[380px]' : 'w-full'} shrink-0 overflow-y-auto overflow-x-hidden overscroll-x-none border-r ${hasBg ? 'border-white/10' : 'border-gray-200/60 dark:border-gray-800/60'}`}>
-          {loading ? (
+          {searchActive ? (
+            <div className="p-3">
+              <div className={`mb-2 flex items-center justify-between px-1 text-[11px] font-medium ${hasBg ? 'text-white/70' : 'text-gray-500 dark:text-gray-400'}`}>
+                <span>{searching ? 'Suche läuft…' : `${searchHits.length} Treffer für «${searchTerm.trim()}»`}</span>
+                <button onClick={clearEmailSearch} className="text-indigo-500 hover:text-indigo-600 dark:text-indigo-400">Zurück zum Ordner</button>
+              </div>
+              {!searching && searchHits.length === 0 ? (
+                <div className="flex h-40 flex-col items-center justify-center gap-1 text-sm text-gray-400 dark:text-gray-600">
+                  Keine E-Mails gefunden
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  {searchHits.map((h) => (
+                    <button
+                      key={`${h.source_id}`}
+                      onClick={() => openEmailById(h.source_id)}
+                      className={`group flex w-full flex-col gap-1 rounded-xl px-4 py-3 text-left transition-all ${
+                        hasBg
+                          ? 'bg-black/30 shadow-sm backdrop-blur-lg hover:bg-black/40'
+                          : 'bg-white/70 shadow-sm hover:bg-white hover:shadow-md dark:bg-gray-900/50 dark:hover:bg-gray-900/80'
+                      }`}
+                    >
+                      <span className={`truncate text-[13px] font-semibold ${hasBg ? 'text-white drop-shadow' : 'text-gray-900 dark:text-white'}`}>
+                        {h.title || '(Kein Betreff)'}
+                      </span>
+                      {h.snippet && (
+                        <span className={`line-clamp-2 text-xs ${hasBg ? 'text-white/70 drop-shadow-sm' : 'text-gray-500 dark:text-gray-400'}`}>
+                          {h.snippet}
+                        </span>
+                      )}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          ) : loading ? (
             <div className="flex h-full items-center justify-center">
               <div className="h-8 w-8 animate-spin rounded-full border-2 border-indigo-500 border-t-transparent" />
             </div>

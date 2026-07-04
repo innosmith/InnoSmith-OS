@@ -25,31 +25,50 @@ QUERY_INSTRUCT = (
     "and how they were ultimately handled.\nQuery: "
 )
 
+# Query-Instruktion fuer die user-facing Dokument-/E-Mail-Suche (nicht Triage).
+SEARCH_QUERY_INSTRUCT = (
+    "Instruct: Given a search query, retrieve relevant documents and emails "
+    "that answer or relate to it.\nQuery: "
+)
 
-async def embed_text(text: str, *, is_query: bool = False) -> list[float] | None:
+
+async def embed_text(
+    text: str,
+    *,
+    is_query: bool = False,
+    model: str | None = None,
+    dim: int | None = None,
+    instruct: str | None = None,
+) -> list[float] | None:
     """Erzeugt ein Embedding fuer ``text`` via lokalem Ollama.
 
     ``is_query=True`` stellt der Eingabe den instruction-aware Query-Prefix voran
     (nur fuer Recall-Anfragen; Dokumente/Episoden werden ohne Prefix eingebettet).
+    ``model``/``dim`` erlauben einen zweiten Index (z. B. der staerkere
+    Such-Index mit Qwen3-Embedding-4B/2560) neben dem Agent-Default (0.6B/1024).
+    ``instruct`` ueberschreibt den Query-Prefix (Default: Triage-Instruktion).
 
     Gibt ``None`` zurueck, wenn Ollama nicht erreichbar ist, das Modell fehlt
     oder die Antwort unerwartet ist. Niemals Exceptions nach aussen werfen.
     """
     cfg = get_settings()
+    use_model = model or cfg.embed_model
+    use_dim = dim or cfg.embed_dim
     clean = (text or "").strip()
     if not clean:
         return None
 
-    prompt = (QUERY_INSTRUCT + clean) if is_query else clean
+    prefix = instruct if instruct is not None else QUERY_INSTRUCT
+    prompt = (prefix + clean) if is_query else clean
     base = cfg.ollama_base_url.rstrip("/")
-    payload = {"model": cfg.embed_model, "prompt": prompt[:8000]}
+    payload = {"model": use_model, "prompt": prompt[:8000]}
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with httpx.AsyncClient(timeout=60.0) as client:
             resp = await client.post(f"{base}/api/embeddings", json=payload)
             resp.raise_for_status()
             data = resp.json()
     except Exception as exc:  # noqa: BLE001 - best-effort, darf Job nicht stoppen
-        logger.warning("Embedding fehlgeschlagen (Modell=%s): %s", cfg.embed_model, exc)
+        logger.warning("Embedding fehlgeschlagen (Modell=%s): %s", use_model, exc)
         return None
 
     vec = data.get("embedding")
@@ -57,10 +76,10 @@ async def embed_text(text: str, *, is_query: bool = False) -> list[float] | None
         logger.warning("Embedding-Antwort ohne 'embedding'-Feld")
         return None
 
-    if len(vec) != cfg.embed_dim:
+    if len(vec) != use_dim:
         logger.warning(
             "Embedding-Dimension %d != erwartete %d (Modell=%s) -- verworfen",
-            len(vec), cfg.embed_dim, cfg.embed_model,
+            len(vec), use_dim, use_model,
         )
         return None
     return [float(x) for x in vec]

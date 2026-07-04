@@ -114,8 +114,15 @@ TOOLS = [
             "Python-Code in einer isolierten Sandbox ausführen. "
             "Die Sandbox ist HEADLESS (kein Terminal, kein Fenster, keine Echtzeit-Tastatur), "
             "hat KEIN Netzwerk, KEINE Secrets und begrenzte Ressourcen. "
-            "Kein input() ohne bereitgestellte stdin_data. Für interaktive/grafische Aufgaben "
-            "(Spiele, UIs) ein eigenständiges HTML-Artefakt nach /workspace/ schreiben. "
+            "Kein input() ohne bereitgestellte stdin_data. "
+            "WICHTIG: Dateien, die nach /workspace/ geschrieben werden, werden dem Nutzer "
+            "AUTOMATISCH INLINE im Chat angezeigt — Bilder (.png/.svg/...) als Vorschau, "
+            "HTML (.html) als voll interaktive, SPIELBARE Vorschau in einem Sandbox-iframe "
+            "(Tastatur/Maus/Animation funktionieren, mit Vergrössern und Vollbild). "
+            "Für interaktive/grafische Aufgaben (Spiele, UIs, Visualisierungen, Dashboards) "
+            "daher ein eigenständiges HTML-Artefakt (eingebettetes CSS+JS) nach /workspace/ "
+            "schreiben — NICHT behaupten, das sei nicht darstellbar, und KEIN externes Hosting "
+            "(z. B. GitHub Pages) anbieten. "
             "Verfügbare Packages: pandas, numpy, matplotlib, seaborn, openpyxl, scipy, pyyaml, jinja2, tabulate. "
             "Input-Dateien werden in /input/ bereitgestellt (read-only). "
             "Output-Dateien in /workspace/ schreiben."
@@ -224,6 +231,15 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 for f in result["generated_files"]:
                     size_kb = f.get("size_bytes", 0) / 1024
                     output_text += f"- {f['name']} ({size_kb:.1f} KB)\n"
+                # Maschinenlesbarer Marker fuer den Backend-Callback: teilt Scope +
+                # Dateinamen mit, damit die erzeugten Artefakte inline im Chat
+                # gerendert werden koennen. Rein additiv (menschlicher Text bleibt).
+                scope = result.get("scope")
+                names = "|".join(
+                    f["name"] for f in result["generated_files"] if f.get("name")
+                )
+                if scope and names:
+                    output_text += f"\n\n<!--tp-exec:{scope}:{names}-->"
         else:
             output_text += f"**Ausführung fehlgeschlagen** (Exit-Code: {result.get('exit_code', '?')})\n\n"
             if result.get("error"):

@@ -79,6 +79,10 @@ class Settings(BaseSettings):
     graph_client_id: str = ""
     graph_client_secret: str = ""
     graph_user_email: str = ""
+    # Region fuer die Microsoft Search API im App-only-Modus (Pflicht dort;
+    # z. B. "CHE"/"EUR"). Leer = Search-API-Doc-Preview wird uebersprungen, der
+    # semantische Index + lokale tsvector-Suche laufen unabhaengig davon.
+    graph_search_region: str = ""
 
     # LiteLLM Gateway
     litellm_base_url: str = "http://localhost:4000"
@@ -143,6 +147,30 @@ class Settings(BaseSettings):
     draft_top_p: float = 0.8
     draft_top_k: int = 20
     draft_presence_penalty: float = 1.5
+
+    # Semantische Suche (user-facing Dokument-/E-Mail-Index, pgvector).
+    # Bewusst GETRENNT vom 0.6B-Agent-Index: staerkeres Modell (Qwen3-Embedding-4B,
+    # native 2560d) fuer maximale Retrieval-Qualitaet (MTEB-Multilingual 69.45 vs
+    # 64.33 bei 0.6B). Speichertyp halfvec (fp16): bei 2560d ist float32-HNSW nicht
+    # moeglich (pgvector-Cap 2000d; halfvec hebt auf 4000d), Recall-Verlust < 0.5 %.
+    search_index_enabled: bool = True
+    search_embed_model: str = "qwen3-embedding:4b-fp16"
+    search_embed_dim: int = 2560
+    # Ingest-Scheduler (lokale Embeddings, best-effort)
+    search_index_interval_seconds: int = 86400  # taeglich
+    search_index_mail_top: int = 500            # neueste E-Mails pro Lauf
+    search_index_max_file_mb: int = 25          # groessere Dateien ueberspringen
+    search_index_max_chunks_per_doc: int = 300  # Ausreisser-Cap (riesige PDFs)
+    # Chunking (Zeichen)
+    search_chunk_chars: int = 1000
+    search_chunk_overlap: int = 150
+    # Retrieval
+    search_semantic_k: int = 20                 # finale Trefferzahl (UI)
+    search_candidate_k: int = 50                # Kandidaten vor Rerank/Fusion
+    # Reranker (tiefer/agentischer Pfad) -- Cross-Encoder ueber die Kandidaten.
+    # Default AUS, bis das Modell lokal vorliegt; interaktiver UI-Pfad nutzt ihn nie.
+    search_reranker_enabled: bool = False
+    search_reranker_model: str = "qwen3-reranker:4b"
 
     # Style-Store (lokaler Few-Shot-Speicher gesendeter Mails, pgvector). Ein
     # periodischer Sync indexiert Anthonys gesendete Antworten; pro Draft werden

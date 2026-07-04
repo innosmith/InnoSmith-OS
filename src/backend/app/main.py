@@ -61,6 +61,7 @@ from app.services.meetings import start_meeting_poller, stop_meeting_poller
 from app.services.notification import start_notification_scheduler, stop_notification_scheduler
 from app.services.pipeline_promoter import start_pipeline_promoter, stop_pipeline_promoter
 from app.services.recurring import start_recurring_scheduler, stop_recurring_scheduler
+from app.services.semantic_index import start_semantic_index, stop_semantic_index
 from app.services.agent_scheduler import start_agent_scheduler, stop_agent_scheduler
 from app.services.reflection import (
     start_reflection_scheduler,
@@ -163,7 +164,9 @@ async def lifespan(app: FastAPI):
     await start_reflection_scheduler()
     await start_briefing_scheduler()
     await start_meeting_poller()
+    await start_semantic_index()
     yield
+    await stop_semantic_index()
     await stop_meeting_poller()
     await stop_briefing_scheduler()
     await stop_reflection_scheduler()

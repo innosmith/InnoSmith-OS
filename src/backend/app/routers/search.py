@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import re
 import sys
 import uuid
 from datetime import date
@@ -15,6 +16,7 @@ from app.auth.deps import get_current_user, require_role
 from app.config import get_settings as _get_settings
 from app.database import get_db
 from app.models import Project, Tag, Task, User
+from app.services.semantic_search import hybrid_search
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "pipedrive"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "email-graph"))
@@ -101,6 +103,8 @@ class FileHit(BaseModel):
     web_url: str | None = None
     is_folder: bool = False
     path: str | None = None
+    snippet: str | None = None
+    thumbnail_url: str | None = None
 
 
 SearchResults.model_rebuild()
@@ -292,8 +296,53 @@ async def _search_signa(term: str) -> list[SignaHit]:
         return []
 
 
+def _strip_hit_highlights(summary: str | None) -> str | None:
+    """Wandelt das Search-API-Snippet in sauberen Plaintext.
+
+    Microsoft markiert Treffer mit ``<c0>…</c0>`` (Hit-Highlight) und trennt
+    Snippet-Fragmente mit ``<ddd/>`` (Ellipsis). Wir entfernen die Highlights und
+    ersetzen ``<ddd/>`` durch ein echtes Auslassungszeichen; Mehrfach-Whitespace
+    wird kollabiert. (Kein HTML-Rendering im Frontend -> reiner Text.)
+    """
+    if not summary:
+        return None
+    s = summary.replace("<ddd/>", " … ")
+    s = re.sub(r"</?c\d+>", "", s)
+    s = re.sub(r"\s+", " ", s).strip(" …")
+    return s or None
+
+
+# Prozessweiter Cache der Tenant-Region (siteCollection.dataLocationCode). Wird je
+# Suche ein neuer GraphClient gebaut, würde die Region sonst bei jedem Tastendruck
+# neu aufgelöst -- ein unnötiger Graph-Call. Sentinel ``False`` = noch nicht geprüft.
+_region_cache: str | None | bool = False
+
+
+async def _resolve_region(client, settings) -> str | None:
+    global _region_cache
+    if settings.graph_search_region:
+        return settings.graph_search_region
+    if _region_cache is not False:
+        return _region_cache  # type: ignore[return-value]
+    try:
+        _region_cache = await asyncio.wait_for(client.get_search_region(), timeout=8.0)
+    except Exception:  # noqa: BLE001
+        _region_cache = None
+    return _region_cache  # type: ignore[return-value]
+
+
 async def _search_onedrive(term: str) -> list[FileHit]:
-    """OneDrive-Dateien nach Name durchsuchen."""
+    """OneDrive-Dokumente durchsuchen -- mit Inhalts-Vorschau (Microsoft Search API).
+
+    Bevorzugt die Search API (``POST /search/query``, EntityType ``driveItem``):
+    Sie liefert app-only ein ``summary``-Snippet mit Treffer-Highlight. Dafür ist
+    im App-only-Modus eine ``region`` Pflicht -- wir ermitteln sie automatisch aus
+    ``siteCollection.dataLocationCode`` (oder ``TP_GRAPH_SEARCH_REGION``) und cachen
+    sie. Ist die Region nicht ermittelbar, fällt die Suche auf die reine Namens-/
+    Metadaten-Route (``drive/root/search``) ohne Snippet zurück. Thumbnails werden
+    im reaktiven Instant-Pfad bewusst NICHT geladen (sonst N Graph-Calls je
+    Tastendruck) -- der Snippet ist die eigentliche Vorschau.
+    """
     try:
         from graph_client import GraphClient, GraphConfig  # noqa: E402
         s = _get_settings()
@@ -306,10 +355,31 @@ async def _search_onedrive(term: str) -> list[FileHit]:
             user_email=s.graph_user_email,
         ))
         try:
-            items = await asyncio.wait_for(
-                client.search_drive(term, top=8),
-                timeout=8.0,
-            )
+            region = await _resolve_region(client, s)
+            if region:
+                hits = await asyncio.wait_for(
+                    client.search_query(term, entity_types=["driveItem"], region=region, top=8),
+                    timeout=8.0,
+                )
+                results: list[FileHit] = []
+                for h in hits:
+                    res = h.get("resource") or {}
+                    if not res.get("id"):
+                        continue
+                    results.append(FileHit(
+                        id=res.get("id", ""),
+                        name=res.get("name", ""),
+                        size=res.get("size"),
+                        last_modified=res.get("lastModifiedDateTime"),
+                        web_url=res.get("webUrl"),
+                        is_folder=bool(res.get("folder")),
+                        path=(res.get("parentReference") or {}).get("path", ""),
+                        snippet=_strip_hit_highlights(h.get("summary")),
+                    ))
+                return results
+
+            # Fallback ohne Region: Namens-/Metadaten-Suche (kein Snippet).
+            items = await asyncio.wait_for(client.search_drive(term, top=8), timeout=8.0)
             return [
                 FileHit(
                     id=item.get("id", ""),
@@ -381,3 +451,46 @@ async def search(
     ]
 
     return SearchResults(tasks=tasks, projects=projects, tags=tags, crm=crm_results, toggl=toggl_results, bexio=bexio_results, signa=signa_results, files=file_results)
+
+
+class SemanticHit(BaseModel):
+    source_type: str
+    source_id: str
+    title: str | None = None
+    url: str | None = None
+    mime: str | None = None
+    snippet: str | None = None
+    chunk_index: int | None = None
+    score: float | None = None
+    similarity: float | None = None
+
+
+class SemanticSearchResults(BaseModel):
+    query: str
+    mode: str
+    results: list[SemanticHit]
+
+
+@router.get("/semantic", response_model=SemanticSearchResults)
+async def semantic_search(
+    q: str = Query(..., min_length=2),
+    mode: str = Query("hybrid", pattern="^(hybrid|semantic|exact)$"),
+    sources: str | None = Query(
+        None, description="Komma-Liste der Quelltypen: email,onedrive,upload,transcript"
+    ),
+    limit: int = Query(20, ge=1, le=50),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_role("owner")),
+) -> SemanticSearchResults:
+    """Semantische/hybride Volltextsuche über den lokalen Dokument- und E-Mail-Index.
+
+    Getrennt von der globalen Instant-Suche (``GET /api/search``): Dieser Endpoint
+    bedient den bewusst-semantischen Pfad (Enter im Suchdialog, Inbox-Suche,
+    Agenten-RAG). ``mode`` steuert Hybrid (Default), rein semantisch oder exakt.
+    """
+    logger.info("Semantic-Search: q=%r mode=%s sources=%s user=%s", q, mode, sources, user.email)
+    src_list = [s.strip() for s in sources.split(",") if s.strip()] if sources else None
+    hits = await hybrid_search(db, q, sources=src_list, k=limit, mode=mode)
+    return SemanticSearchResults(
+        query=q, mode=mode, results=[SemanticHit(**h) for h in hits]
+    )
