@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { getToken } from '../api/client';
 
 type ExportFormat = 'markdown' | 'docx' | 'pdf' | 'pptx';
@@ -68,6 +68,11 @@ export function ExportDialog(props: ExportDialogProps) {
   const [templates, setTemplates] = useState<TemplateInfo[]>([]);
   const [templatesLoading, setTemplatesLoading] = useState(false);
 
+  // Merkt sich, ob eine Maus-Interaktion auf dem Backdrop (und nicht im Dialog)
+  // begonnen hat. Verhindert, dass Text-Selektion in einem Eingabefeld, die
+  // ausserhalb endet, den Dialog schliesst.
+  const backdropMouseDown = useRef(false);
+
   const slideCount = format === 'pptx' && contentText
     ? (contentText.split(/\n---\n/).length)
     : null;
@@ -113,6 +118,15 @@ export function ExportDialog(props: ExportDialogProps) {
       setTemplatesLoading(false);
     }
   };
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [isOpen, onClose]);
 
   if (!isOpen) return null;
 
@@ -236,10 +250,20 @@ export function ExportDialog(props: ExportDialogProps) {
   const showPptxOptions = format === 'pptx';
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={onClose}>
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
+      onMouseDown={e => { backdropMouseDown.current = e.target === e.currentTarget; }}
+      onMouseUp={e => {
+        // Nur schliessen, wenn Maus-Down UND Maus-Up direkt auf dem Backdrop
+        // erfolgten (echter Klick daneben) – nicht bei Selektion, die im Dialog
+        // startet und ausserhalb endet.
+        if (backdropMouseDown.current && e.target === e.currentTarget) onClose();
+        backdropMouseDown.current = false;
+      }}
+    >
       <div
         className="w-full max-w-md rounded-xl border border-gray-200 bg-white p-6 shadow-xl dark:border-gray-700 dark:bg-gray-800"
-        onClick={e => e.stopPropagation()}
+        onMouseDown={e => e.stopPropagation()}
       >
         <h3 className="mb-4 text-lg font-semibold text-gray-900 dark:text-white">{dialogTitle}</h3>
 

@@ -1,5 +1,7 @@
-import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo, Fragment } from 'react';
 import { api } from '../api/client';
+import { fileTypeLabel } from '../lib/fileTypeLabel';
+import { clusterDocHits } from '../lib/seriesCluster';
 
 interface SearchDialogProps {
   isOpen: boolean;
@@ -62,18 +64,6 @@ interface SignaHit {
   source: string | null;
 }
 
-interface FileHit {
-  id: string;
-  name: string;
-  size: number | null;
-  last_modified: string | null;
-  web_url: string | null;
-  is_folder: boolean;
-  path: string | null;
-  snippet: string | null;
-  thumbnail_url: string | null;
-}
-
 interface SearchResults {
   tasks: SearchTask[];
   projects: SearchProject[];
@@ -82,22 +72,19 @@ interface SearchResults {
   toggl: TogglHit[];
   bexio: BexioHit[];
   signa: SignaHit[];
-  files: FileHit[];
 }
 
-interface SemanticHit {
+// Fusioniertes Dokument-/E-Mail-Ergebnis (Backend /api/search/documents):
+// OneDrive-Live + lokaler Hybrid-Index, dedupliziert und via RRF gerankt.
+interface DocHit {
   source_type: string; // 'email' | 'onedrive' | 'upload' | 'transcript'
-  source_id: string;
+  id: string;
   title: string | null;
   url: string | null;
-  mime: string | null;
+  mime_type: string | null;
   snippet: string | null;
-  chunk_index: number | null;
   score: number | null;
-  similarity: number | null;
 }
-
-type SemanticMode = 'hybrid' | 'semantic' | 'exact';
 
 type ResultItem =
   | { kind: 'task'; data: SearchTask }
@@ -107,8 +94,54 @@ type ResultItem =
   | { kind: 'toggl'; data: TogglHit }
   | { kind: 'bexio'; data: BexioHit }
   | { kind: 'signa'; data: SignaHit }
-  | { kind: 'file'; data: FileHit }
-  | { kind: 'semantic'; data: SemanticHit };
+  | { kind: 'doc'; data: DocHit };
+
+// Sektions-Überschrift je Treffertyp. Dokumente & E-Mails stehen bewusst zuoberst
+// (reichhaltigste, fusionierte Quelle).
+const SECTION_LABELS: Record<ResultItem['kind'], string> = {
+  doc: 'Dokumente & E-Mails',
+  task: 'Tasks',
+  project: 'Projekte',
+  tag: 'Tags',
+  crm: 'CRM (Pipedrive)',
+  toggl: 'Toggl Track',
+  bexio: 'Bexio',
+  signa: 'SIGNA Signale',
+};
+
+// Anzeige-Zeile: entweder ein Einzel-Treffer oder ein aufklappbarer Serien-Cluster
+// (nur in der Dokument-/E-Mail-Sektion). Navigations-Ziel für die Tastatursteuerung:
+// ein Cluster-Header ist selbst navigierbar (Enter = auf-/zuklappen).
+type DisplayRow =
+  | { kind: 'item'; item: ResultItem }
+  | { kind: 'cluster'; key: string; label: string; count: number; members: DocHit[] };
+type NavTarget =
+  | { kind: 'item'; item: ResultItem }
+  | { kind: 'clusterHeader'; key: string };
+
+// Facetten-Label pro Treffer für die globale Typ-Filterleiste. Dokumente werden
+// nach echtem Dateityp aufgeschlüsselt (E-Mail, PDF, Word, …), alle übrigen Quellen
+// nach ihrer Kategorie -- so ist z. B. "Kontakt" (Pipedrive) filterbar.
+function itemFacet(item: ResultItem): string {
+  switch (item.kind) {
+    case 'doc':
+      return fileTypeLabel(item.data.mime_type, item.data.title, item.data.source_type);
+    case 'task':
+      return 'Aufgabe';
+    case 'project':
+      return 'Projekt';
+    case 'tag':
+      return 'Tag';
+    case 'crm':
+      return 'Kontakt';
+    case 'toggl':
+      return 'Toggl';
+    case 'bexio':
+      return 'Bexio';
+    case 'signa':
+      return 'SIGNA';
+  }
+}
 
 export function SearchDialog({
   isOpen,
@@ -120,21 +153,24 @@ export function SearchDialog({
   const [results, setResults] = useState<SearchResults | null>(null);
   const [loading, setLoading] = useState(false);
   const [activeIndex, setActiveIndex] = useState(0);
-  // Semantische Tiefensuche (Dokumente + E-Mails) -- bewusst per Trigger (Enter/⌘↵),
-  // nicht instant, damit der schnelle Keyword-Pfad reaktiv bleibt.
-  const [semHits, setSemHits] = useState<SemanticHit[]>([]);
-  const [semLoading, setSemLoading] = useState(false);
-  const [semMode, setSemMode] = useState<SemanticMode>('hybrid');
-  const [semRanFor, setSemRanFor] = useState<string | null>(null);
+  // Fusionierte Dokument-/E-Mail-Suche -- laeuft automatisch (debounced) parallel zum
+  // schnellen Instant-Pfad, kein bewusster Trigger noetig.
+  const [docHits, setDocHits] = useState<DocHit[]>([]);
+  const [docLoading, setDocLoading] = useState(false);
+  // Optionaler Typ-Filter für die (potenziell lange) Dokument-/E-Mail-Sektion.
+  // null = "Alle". Die Facetten werden dynamisch aus den Treffern abgeleitet.
+  const [typeFilter, setTypeFilter] = useState<string | null>(null);
+  // Aufgeklappte Serien-Cluster (Schlüssel aus seriesCluster.ts). Default: alle zu.
+  const [expandedSeries, setExpandedSeries] = useState<Set<string>>(new Set());
   const inputRef = useRef<HTMLInputElement>(null);
   const backdropRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
 
-  const flatItems = useMemo<ResultItem[]>(() => {
+  // Alle Treffer als flache Liste in Anzeige-Reihenfolge (Dokumente & E-Mails zuerst),
+  // quellenübergreifend. Basis für Facetten, Filter, Gruppierung und Tastaturnavigation.
+  const baseItems = useMemo<ResultItem[]>(() => {
     const items: ResultItem[] = [];
-    // Reihenfolge identisch zu `grouped`: semantische Tiefensuche zuerst (falls
-    // ausgelöst), damit activeIndex/Tastatur-Navigation der Anzeige folgt.
-    for (const h of semHits) items.push({ kind: 'semantic', data: h });
+    for (const h of docHits) items.push({ kind: 'doc', data: h });
     if (results) {
       for (const t of results.tasks) items.push({ kind: 'task', data: t });
       for (const p of results.projects) items.push({ kind: 'project', data: p });
@@ -143,68 +179,167 @@ export function SearchDialog({
       for (const t of (results.toggl || [])) items.push({ kind: 'toggl', data: t });
       for (const b of (results.bexio || [])) items.push({ kind: 'bexio', data: b });
       for (const s of (results.signa || [])) items.push({ kind: 'signa', data: s });
-      for (const f of (results.files || [])) items.push({ kind: 'file', data: f });
     }
     return items;
-  }, [results, semHits]);
+  }, [results, docHits]);
 
+  // Globale Facetten (Chip-Leiste) über ALLE Treffertypen. E-Mail und Kontakt zuerst
+  // (häufigste Such-Intents), dann nach Häufigkeit, dann alphabetisch.
+  const facets = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const it of baseItems) {
+      const label = itemFacet(it);
+      counts.set(label, (counts.get(label) || 0) + 1);
+    }
+    const priority = (l: string) => (l === 'E-Mail' ? 0 : l === 'Kontakt' ? 1 : 2);
+    return Array.from(counts.entries())
+      .sort((a, b) => {
+        const pa = priority(a[0]);
+        const pb = priority(b[0]);
+        if (pa !== pb) return pa - pb;
+        if (b[1] !== a[1]) return b[1] - a[1];
+        return a[0].localeCompare(b[0], 'de');
+      })
+      .map(([label, count]) => ({ label, count }));
+  }, [baseItems]);
+
+  // Sichtbare Treffer nach aktivem Filter (null = alle Typen).
+  const visibleItems = useMemo(
+    () => (typeFilter ? baseItems.filter((it) => itemFacet(it) === typeFilter) : baseItems),
+    [baseItems, typeFilter],
+  );
+
+  // Eindeutiger Kontakt: genau eine Person im CRM-Ergebnis. Wird zusätzlich zuoberst
+  // angeheftet, damit sofort sichtbar ist, um wen es geht (Klick -> Pipedrive). Bei
+  // 0 oder mehreren Personen keine Anheftung (nicht eindeutig).
+  const pinnedContact = useMemo<CrmHit | null>(() => {
+    const persons = (results?.crm || []).filter((c) => c.type === 'person');
+    return persons.length === 1 ? persons[0] : null;
+  }, [results]);
+
+  // Gruppierung folgt der Item-Reihenfolge; Sektionen erscheinen in der Reihenfolge
+  // ihres ersten Treffers und enthalten nur die aktuell sichtbaren (gefilterten) Items.
   const grouped = useMemo(() => {
     const sections: { label: string; items: ResultItem[] }[] = [];
-    if (!results) {
-      if (semHits.length > 0)
-        sections.push({ label: 'Dokumente & E-Mails', items: semHits.map((d) => ({ kind: 'semantic' as const, data: d })) });
-      return sections.length ? sections : null;
+    const byLabel = new Map<string, ResultItem[]>();
+    for (const it of visibleItems) {
+      const label = SECTION_LABELS[it.kind];
+      let bucket = byLabel.get(label);
+      if (!bucket) {
+        bucket = [];
+        byLabel.set(label, bucket);
+        sections.push({ label, items: bucket });
+      }
+      bucket.push(it);
     }
-    // Getriggerte Tiefensuche: bewusst GANZ OBEN, damit man nicht an allen
-    // Instant-Sektionen vorbeiscrollen muss (der Enter/⌘↵-Trigger signalisiert
-    // die eigentliche Suchabsicht). Instant-Treffer folgen darunter.
-    if (semHits.length > 0)
-      sections.push({ label: 'Dokumente & E-Mails', items: semHits.map((d) => ({ kind: 'semantic' as const, data: d })) });
-    if (results.tasks.length > 0)
-      sections.push({ label: 'Tasks', items: results.tasks.map((d) => ({ kind: 'task' as const, data: d })) });
-    if (results.projects.length > 0)
-      sections.push({ label: 'Projekte', items: results.projects.map((d) => ({ kind: 'project' as const, data: d })) });
-    if (results.tags.length > 0)
-      sections.push({ label: 'Tags', items: results.tags.map((d) => ({ kind: 'tag' as const, data: d })) });
-    if ((results.crm || []).length > 0)
-      sections.push({ label: 'CRM (Pipedrive)', items: results.crm.map((d) => ({ kind: 'crm' as const, data: d })) });
-    if ((results.toggl || []).length > 0)
-      sections.push({ label: 'Toggl Track', items: results.toggl.map((d) => ({ kind: 'toggl' as const, data: d })) });
-    if ((results.bexio || []).length > 0)
-      sections.push({ label: 'Bexio', items: results.bexio.map((d) => ({ kind: 'bexio' as const, data: d })) });
-    if ((results.signa || []).length > 0)
-      sections.push({ label: 'SIGNA Signale', items: results.signa.map((d) => ({ kind: 'signa' as const, data: d })) });
-    if ((results.files || []).length > 0)
-      sections.push({ label: 'OneDrive-Dateien', items: results.files.map((d) => ({ kind: 'file' as const, data: d })) });
     return sections;
-  }, [results, semHits]);
+  }, [visibleItems]);
+
+  // Anzeige-Modell: In der Dokument-/E-Mail-Sektion werden Serien (Rechnungs-Reihen,
+  // E-Mail-Threads) zu aufklappbaren Cluster-Zeilen verdichtet; übrige Sektionen 1:1.
+  const displaySections = useMemo(() => {
+    const sections = grouped.map((section) => {
+      if (section.items.length > 0 && section.items[0].kind === 'doc') {
+        const hits = section.items.map((it) => (it as { kind: 'doc'; data: DocHit }).data);
+        const rows: DisplayRow[] = clusterDocHits<DocHit>(hits).map((r) =>
+          r.kind === 'cluster'
+            ? { kind: 'cluster', key: r.key, label: r.label, count: r.count, members: r.members }
+            : { kind: 'item', item: { kind: 'doc', data: r.hit } },
+        );
+        return { label: section.label, rows };
+      }
+      return {
+        label: section.label,
+        rows: section.items.map((item): DisplayRow => ({ kind: 'item', item })),
+      };
+    });
+    // Eindeutigen Kontakt zuoberst anheften (zusätzlich zur regulären CRM-Sektion),
+    // solange der aktive Filter Kontakte nicht ausblendet.
+    if (pinnedContact && (!typeFilter || typeFilter === 'Kontakt')) {
+      sections.unshift({
+        label: 'Kontakt',
+        rows: [{ kind: 'item', item: { kind: 'crm', data: pinnedContact } }],
+      });
+    }
+    return sections;
+  }, [grouped, pinnedContact, typeFilter]);
+
+  // Flache Navigations-Ziele in Render-Reihenfolge (Tastatur/activeIndex). Ein
+  // eingeklappter Cluster = 1 Ziel (Header); ausgeklappt = Header + Mitglieder.
+  const navTargets = useMemo(() => {
+    const targets: NavTarget[] = [];
+    for (const section of displaySections) {
+      for (const row of section.rows) {
+        if (row.kind === 'item') {
+          targets.push({ kind: 'item', item: row.item });
+        } else {
+          targets.push({ kind: 'clusterHeader', key: row.key });
+          if (expandedSeries.has(row.key)) {
+            for (const m of row.members) targets.push({ kind: 'item', item: { kind: 'doc', data: m } });
+          }
+        }
+      }
+    }
+    return targets;
+  }, [displaySections, expandedSeries]);
+
+  const toggleSeries = useCallback((key: string) => {
+    setExpandedSeries((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+    setActiveIndex(0);
+  }, []);
+
+  // Aktiven Filter zuruecksetzen, sobald der gewaehlte Typ nicht mehr vorkommt
+  // (neue Query/neue Treffer) -- verhindert eine leere, "haengende" Filterung.
+  useEffect(() => {
+    if (typeFilter && !facets.some((f) => f.label === typeFilter)) setTypeFilter(null);
+  }, [facets, typeFilter]);
+
+  const selectFilter = useCallback((label: string | null) => {
+    setTypeFilter(label);
+    setActiveIndex(0);
+    requestAnimationFrame(() => listRef.current?.scrollTo({ top: 0 }));
+  }, []);
 
   useEffect(() => {
     if (isOpen) {
       setQuery('');
       setResults(null);
-      setSemHits([]);
-      setSemRanFor(null);
+      setDocHits([]);
+      setTypeFilter(null);
+      setExpandedSeries(new Set());
       setActiveIndex(0);
       requestAnimationFrame(() => inputRef.current?.focus());
     }
   }, [isOpen]);
 
   useEffect(() => {
-    // Bei jeder Query-Änderung die (bewusst getriggerte) Tiefensuche zurücksetzen.
-    setSemHits([]);
-    setSemRanFor(null);
-    if (!query.trim()) {
+    const q = query.trim();
+    // Neue Query -> aufgeklappte Cluster zurücksetzen (Schlüssel wären ohnehin stale).
+    setExpandedSeries(new Set());
+    if (q.length < 2) {
+      // Unter 2 Zeichen: keine Suche (weder Instant noch Dokumente/Semantik).
       setResults(null);
+      setDocHits([]);
       setActiveIndex(0);
       return;
     }
 
+    // Ein gemeinsamer Debounce (400 ms) startet BEIDE Pfade parallel: den schnellen
+    // Instant-Pfad (Tasks, CRM, ...) und die fusionierte Dokument-/E-Mail-Suche
+    // (OneDrive-Live + semantischer Index). Ein gemeinsamer AbortController schuetzt
+    // vor veralteten Antworten; beide rendern progressiv, sobald sie eintreffen.
     const controller = new AbortController();
+    const encoded = encodeURIComponent(q);
     const timeout = setTimeout(() => {
       setLoading(true);
+      setDocLoading(true);
       api
-        .get<SearchResults>(`/api/search?q=${encodeURIComponent(query.trim())}`)
+        .get<SearchResults>(`/api/search?q=${encoded}`, { signal: controller.signal })
         .then((data) => {
           if (!controller.signal.aborted) {
             setResults(data);
@@ -220,7 +355,25 @@ export function SearchDialog({
         .finally(() => {
           if (!controller.signal.aborted) setLoading(false);
         });
-    }, 300);
+
+      api
+        .get<{ results: DocHit[] }>(
+          `/api/search/documents?q=${encoded}&limit=100`,
+          { signal: controller.signal },
+        )
+        .then((data) => {
+          if (!controller.signal.aborted) setDocHits(data.results || []);
+        })
+        .catch((err) => {
+          if (!controller.signal.aborted) {
+            console.error('[SearchDialog] Dokument-Suche-Fehler:', err);
+            setDocHits([]);
+          }
+        })
+        .finally(() => {
+          if (!controller.signal.aborted) setDocLoading(false);
+        });
+    }, 400);
 
     return () => {
       clearTimeout(timeout);
@@ -228,40 +381,12 @@ export function SearchDialog({
     };
   }, [query]);
 
-  const runSemantic = useCallback(
-    (mode: SemanticMode) => {
-      const q = query.trim();
-      if (q.length < 2) return;
-      setSemMode(mode);
-      setSemLoading(true);
-      api
-        .get<{ results: SemanticHit[] }>(
-          `/api/search/semantic?q=${encodeURIComponent(q)}&mode=${mode}&limit=100`,
-        )
-        .then((data) => {
-          setSemHits(data.results || []);
-          setSemRanFor(q);
-          // Treffer stehen jetzt oben -> ersten markieren und Liste hochscrollen,
-          // damit man sofort dort ist (statt an Instant-Sektionen vorbeizuscrollen).
-          setActiveIndex(0);
-          requestAnimationFrame(() => listRef.current?.scrollTo({ top: 0 }));
-        })
-        .catch((err) => {
-          console.error('[SearchDialog] Semantik-Fehler:', err);
-          setSemHits([]);
-          setSemRanFor(q);
-        })
-        .finally(() => setSemLoading(false));
-    },
-    [query],
-  );
-
   const activateItem = useCallback(
     (item: ResultItem) => {
-      if (item.kind === 'semantic') {
+      if (item.kind === 'doc') {
         const h = item.data;
         if (h.source_type === 'email') {
-          window.location.href = `/inbox?email=${encodeURIComponent(h.source_id)}`;
+          window.location.href = `/inbox?email=${encodeURIComponent(h.id)}`;
         } else if (h.url) {
           window.open(h.url, '_blank');
         }
@@ -298,11 +423,6 @@ export function SearchDialog({
       } else if (item.kind === 'signa') {
         window.location.href = `/signale`;
         onClose();
-      } else if (item.kind === 'file') {
-        if (item.data.web_url) {
-          window.open(item.data.web_url, '_blank');
-        }
-        onClose();
       }
     },
     [onTaskClick, onProjectClick, onClose],
@@ -317,34 +437,26 @@ export function SearchDialog({
       }
       if (e.key === 'ArrowDown') {
         e.preventDefault();
-        setActiveIndex((prev) => (prev + 1) % Math.max(flatItems.length, 1));
+        setActiveIndex((prev) => (prev + 1) % Math.max(navTargets.length, 1));
         return;
       }
       if (e.key === 'ArrowUp') {
         e.preventDefault();
-        setActiveIndex((prev) => (prev - 1 + flatItems.length) % Math.max(flatItems.length, 1));
+        setActiveIndex((prev) => (prev - 1 + navTargets.length) % Math.max(navTargets.length, 1));
         return;
       }
       if (e.key === 'Enter') {
-        // ⌘↵ / Ctrl+↵: bewusste Tiefensuche über Dokumente & E-Mails.
-        if (e.metaKey || e.ctrlKey) {
+        // Enter aktiviert das markierte Ziel: Treffer öffnen ODER Serien-Cluster
+        // auf-/zuklappen. Die Suche läuft ohnehin automatisch beim Tippen.
+        const target = navTargets[activeIndex];
+        if (target) {
           e.preventDefault();
-          runSemantic(semMode);
-          return;
-        }
-        if (flatItems[activeIndex]) {
-          e.preventDefault();
-          activateItem(flatItems[activeIndex]);
-          return;
-        }
-        // Kein Instant-Treffer markiert -> Enter startet die Tiefensuche.
-        if (query.trim().length >= 2) {
-          e.preventDefault();
-          runSemantic(semMode);
+          if (target.kind === 'clusterHeader') toggleSeries(target.key);
+          else activateItem(target.item);
         }
       }
     },
-    [flatItems, activeIndex, activateItem, onClose, runSemantic, semMode, query],
+    [navTargets, activeIndex, activateItem, toggleSeries, onClose],
   );
 
   useEffect(() => {
@@ -355,6 +467,103 @@ export function SearchDialog({
   if (!isOpen) return null;
 
   let runningIndex = -1;
+
+  // Einzel-Doc-Zeile (fusioniertes Dokument / E-Mail). Wird sowohl für Einzeltreffer
+  // als auch für aufgeklappte Cluster-Mitglieder (``indented``) verwendet.
+  const renderDocRow = (h: DocHit, idx: number, indented: boolean) => {
+    const isActive = idx === activeIndex;
+    const isEmail = h.source_type === 'email';
+    const typeLabel = fileTypeLabel(h.mime_type, h.title, h.source_type);
+    return (
+      <button
+        key={`doc-${h.source_type}-${h.id}`}
+        data-active={isActive}
+        onClick={() => activateItem({ kind: 'doc', data: h })}
+        onMouseEnter={() => setActiveIndex(idx)}
+        className={`flex w-full items-start gap-3 py-2.5 text-left transition-colors ${
+          indented ? 'pl-11 pr-4' : 'px-4'
+        } ${
+          isActive
+            ? 'bg-indigo-50 dark:bg-indigo-950/40'
+            : 'hover:bg-gray-50 dark:hover:bg-gray-800/50'
+        }`}
+      >
+        <span className={`mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-full ${
+          isEmail
+            ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300'
+            : 'bg-sky-100 text-sky-700 dark:bg-sky-900/40 dark:text-sky-300'
+        }`}>
+          {isEmail ? <MailIcon className="h-4 w-4" /> : <FileSearchIcon className="h-4 w-4" />}
+        </span>
+        <div className="min-w-0 flex-1">
+          <p className="truncate text-sm font-medium text-gray-900 dark:text-white">
+            {h.title || '(ohne Titel)'}
+          </p>
+          {h.snippet && (
+            <p className="mt-0.5 line-clamp-2 text-xs text-gray-500 dark:text-gray-400">
+              {h.snippet}
+            </p>
+          )}
+        </div>
+        <span className={`mt-0.5 shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium ${
+          isEmail
+            ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300'
+            : 'bg-sky-100 text-sky-700 dark:bg-sky-900/40 dark:text-sky-300'
+        }`}>
+          {typeLabel}
+        </span>
+      </button>
+    );
+  };
+
+  // CRM-Zeile (Pipedrive). Identisches Markup für die reguläre CRM-Sektion UND den
+  // oben angehefteten eindeutigen Kontakt -- Klick öffnet den Datensatz in Pipedrive.
+  const renderCrmRow = (crm: CrmHit, idx: number) => {
+    const isActive = idx === activeIndex;
+    const typeLabels: Record<string, string> = { person: 'Kontakt', deal: 'Deal', organization: 'Organisation' };
+    const typeColors: Record<string, string> = {
+      person: 'bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-300',
+      deal: 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300',
+      organization: 'bg-purple-100 text-purple-700 dark:bg-purple-900/40 dark:text-purple-300',
+    };
+    return (
+      <button
+        key={`${crm.type}-${crm.id}`}
+        data-active={isActive}
+        onClick={() => activateItem({ kind: 'crm', data: crm })}
+        onMouseEnter={() => setActiveIndex(idx)}
+        className={`flex w-full items-center gap-3 px-4 py-2.5 text-left transition-colors ${
+          isActive
+            ? 'bg-indigo-50 dark:bg-indigo-950/40'
+            : 'hover:bg-gray-50 dark:hover:bg-gray-800/50'
+        }`}
+      >
+        {crm.pic_url ? (
+          <img
+            src={crm.pic_url}
+            alt=""
+            className="h-9 w-9 shrink-0 rounded-full object-cover"
+          />
+        ) : (
+          <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-300">
+            <CrmSearchIcon className="h-4 w-4" />
+          </span>
+        )}
+        <div className="min-w-0 flex-1">
+          <p className="truncate text-sm font-medium text-gray-900 dark:text-white">
+            {crm.name}
+          </p>
+          <p className="truncate text-xs text-gray-400 dark:text-gray-500">
+            {crm.detail || crm.email || ''}
+          </p>
+        </div>
+        <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium ${typeColors[crm.type] || 'bg-gray-100 text-gray-600'}`}>
+          {typeLabels[crm.type] || crm.type}
+        </span>
+        <ExternalLinkIcon className="h-3.5 w-3.5 shrink-0 text-gray-300 dark:text-gray-600" />
+      </button>
+    );
+  };
 
   return (
     <div
@@ -376,10 +585,10 @@ export function SearchDialog({
             type="text"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="Suchen…"
+            placeholder='Suchen…  ("Vorname Nachname" für exakte Phrase)'
             className="flex-1 bg-transparent text-sm text-gray-900 outline-none placeholder:text-gray-400 dark:text-white dark:placeholder:text-gray-500"
           />
-          {loading && (
+          {(loading || docLoading) && (
             <div className="h-4 w-4 animate-spin rounded-full border-2 border-indigo-500 border-t-transparent" />
           )}
           <kbd className="hidden rounded-md border border-gray-200 px-1.5 py-0.5 text-[10px] font-medium text-gray-400 sm:inline-block dark:border-gray-600 dark:text-gray-500">
@@ -387,38 +596,33 @@ export function SearchDialog({
           </kbd>
         </div>
 
-        {/* Tiefensuche-Leiste: Modus-Chips + Trigger (bewusst semantisch) */}
-        {query.trim().length >= 2 && (
-          <div className="flex items-center gap-2 border-b border-gray-100 px-4 py-2 dark:border-gray-800">
-            <div className="flex items-center gap-1">
-              {(['hybrid', 'semantic', 'exact'] as SemanticMode[]).map((m) => (
-                <button
-                  key={m}
-                  data-testid={`search-mode-${m}`}
-                  onClick={() => runSemantic(m)}
-                  className={`rounded-full px-2.5 py-1 text-[11px] font-medium transition-colors ${
-                    semMode === m && semRanFor === query.trim()
-                      ? 'bg-indigo-600 text-white'
-                      : 'bg-gray-100 text-gray-600 hover:bg-gray-200 dark:bg-gray-800 dark:text-gray-300 dark:hover:bg-gray-700'
-                  }`}
-                >
-                  {m === 'hybrid' ? 'Hybrid' : m === 'semantic' ? 'Semantisch' : 'Exakt'}
-                </button>
-              ))}
-            </div>
+        {/* Optionale globale Typ-Filter über alle Treffertypen (nur bei >=2 Arten) */}
+        {facets.length >= 2 && (
+          <div className="flex items-center gap-1.5 overflow-x-auto border-b border-gray-100 px-4 py-2 dark:border-gray-800">
+            <FilterIcon className="h-3.5 w-3.5 shrink-0 text-gray-400 dark:text-gray-500" />
             <button
-              data-testid="search-semantic-trigger"
-              onClick={() => runSemantic(semMode)}
-              className="ml-auto flex items-center gap-1.5 rounded-lg bg-indigo-50 px-2.5 py-1 text-[11px] font-medium text-indigo-700 transition-colors hover:bg-indigo-100 dark:bg-indigo-950/50 dark:text-indigo-300 dark:hover:bg-indigo-900/50"
+              onClick={() => selectFilter(null)}
+              className={`shrink-0 rounded-full px-2.5 py-1 text-[11px] font-medium transition-colors ${
+                typeFilter === null
+                  ? 'bg-indigo-600 text-white'
+                  : 'bg-gray-100 text-gray-600 hover:bg-gray-200 dark:bg-gray-800 dark:text-gray-300 dark:hover:bg-gray-700'
+              }`}
             >
-              {semLoading ? (
-                <span className="h-3 w-3 animate-spin rounded-full border-2 border-indigo-500 border-t-transparent" />
-              ) : (
-                <DocSearchIcon className="h-3.5 w-3.5" />
-              )}
-              Dokumente & E-Mails
-              <kbd className="hidden rounded border border-indigo-200 px-1 text-[9px] sm:inline-block dark:border-indigo-800">⌘↵</kbd>
+              Alle <span className="opacity-60">{baseItems.length}</span>
             </button>
+            {facets.map((f) => (
+              <button
+                key={f.label}
+                onClick={() => selectFilter(f.label)}
+                className={`shrink-0 rounded-full px-2.5 py-1 text-[11px] font-medium transition-colors ${
+                  typeFilter === f.label
+                    ? 'bg-indigo-600 text-white'
+                    : 'bg-gray-100 text-gray-600 hover:bg-gray-200 dark:bg-gray-800 dark:text-gray-300 dark:hover:bg-gray-700'
+                }`}
+              >
+                {f.label} <span className="opacity-60">{f.count}</span>
+              </button>
+            ))}
           </div>
         )}
 
@@ -436,19 +640,79 @@ export function SearchDialog({
             </div>
           )}
 
-          {query.trim() && !loading && grouped && grouped.length === 0 && (
+          {query.trim().length >= 2 && !loading && !docLoading && grouped && grouped.length === 0 && (
             <div className="px-4 py-10 text-center text-sm text-gray-400 dark:text-gray-500">
               Keine Ergebnisse für &laquo;{query}&raquo;
             </div>
           )}
 
-          {grouped &&
-            grouped.map((section) => (
+          {displaySections.map((section) => (
               <div key={section.label}>
                 <div className="sticky top-0 z-10 bg-gray-50/90 px-4 py-2 text-[11px] font-semibold uppercase tracking-wider text-gray-500 backdrop-blur-sm dark:bg-gray-800/90 dark:text-gray-400">
                   {section.label}
                 </div>
-                {section.items.map((item) => {
+                {section.rows.map((row) => {
+                  // Serien-Cluster: aufklappbare Kopfzeile + (bei Expansion) Mitglieder.
+                  if (row.kind === 'cluster') {
+                    runningIndex++;
+                    const headerIdx = runningIndex;
+                    const headerActive = headerIdx === activeIndex;
+                    const expanded = expandedSeries.has(row.key);
+                    // Repräsentant der Serie: alle Mitglieder teilen den source_type
+                    // (Serienschlüssel ist danach präfixt) -> Typ-Icon/Badge wie in
+                    // den Einzelzeilen, damit man dem Cluster den Typ direkt ansieht.
+                    const rep = row.members[0];
+                    const clusterIsEmail = rep.source_type === 'email';
+                    const clusterTypeLabel = fileTypeLabel(rep.mime_type, rep.title, rep.source_type);
+                    return (
+                      <Fragment key={`cluster-${row.key}`}>
+                        <button
+                          data-active={headerActive}
+                          onClick={() => toggleSeries(row.key)}
+                          onMouseEnter={() => setActiveIndex(headerIdx)}
+                          className={`flex w-full items-center gap-3 px-4 py-2.5 text-left transition-colors ${
+                            headerActive
+                              ? 'bg-indigo-50 dark:bg-indigo-950/40'
+                              : 'hover:bg-gray-50 dark:hover:bg-gray-800/50'
+                          }`}
+                        >
+                          <ChevronIcon className={`h-4 w-4 shrink-0 text-gray-400 transition-transform dark:text-gray-500 ${expanded ? 'rotate-90' : ''}`} />
+                          <span className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full ${
+                            clusterIsEmail
+                              ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300'
+                              : 'bg-sky-100 text-sky-700 dark:bg-sky-900/40 dark:text-sky-300'
+                          }`}>
+                            {clusterIsEmail ? <MailIcon className="h-4 w-4" /> : <FileSearchIcon className="h-4 w-4" />}
+                          </span>
+                          <div className="min-w-0 flex-1">
+                            <p className="truncate text-sm font-medium text-gray-900 dark:text-white">
+                              {row.label}
+                            </p>
+                            <p className="truncate text-xs text-gray-400 dark:text-gray-500">
+                              {expanded ? 'Serie zuklappen' : `${row.count} ähnliche Treffer`}
+                            </p>
+                          </div>
+                          <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium ${
+                            clusterIsEmail
+                              ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300'
+                              : 'bg-sky-100 text-sky-700 dark:bg-sky-900/40 dark:text-sky-300'
+                          }`}>
+                            {clusterTypeLabel}
+                          </span>
+                          <span className="shrink-0 rounded-full bg-gray-100 px-2 py-0.5 text-[10px] font-medium text-gray-500 dark:bg-gray-800 dark:text-gray-400">
+                            {row.count}
+                          </span>
+                        </button>
+                        {expanded &&
+                          row.members.map((m) => {
+                            runningIndex++;
+                            return renderDocRow(m, runningIndex, true);
+                          })}
+                      </Fragment>
+                    );
+                  }
+
+                  const item = row.item;
                   runningIndex++;
                   const idx = runningIndex;
                   const isActive = idx === activeIndex;
@@ -555,50 +819,7 @@ export function SearchDialog({
 
                   // crm
                   if (item.kind === 'crm') {
-                    const crm = item.data;
-                    const typeLabels: Record<string, string> = { person: 'Kontakt', deal: 'Deal', organization: 'Organisation' };
-                    const typeColors: Record<string, string> = {
-                      person: 'bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-300',
-                      deal: 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300',
-                      organization: 'bg-purple-100 text-purple-700 dark:bg-purple-900/40 dark:text-purple-300',
-                    };
-                    return (
-                      <button
-                        key={`${crm.type}-${crm.id}`}
-                        data-active={isActive}
-                        onClick={() => activateItem(item)}
-                        onMouseEnter={() => setActiveIndex(idx)}
-                        className={`flex w-full items-center gap-3 px-4 py-2.5 text-left transition-colors ${
-                          isActive
-                            ? 'bg-indigo-50 dark:bg-indigo-950/40'
-                            : 'hover:bg-gray-50 dark:hover:bg-gray-800/50'
-                        }`}
-                      >
-                        {crm.pic_url ? (
-                          <img
-                            src={crm.pic_url}
-                            alt=""
-                            className="h-9 w-9 shrink-0 rounded-full object-cover"
-                          />
-                        ) : (
-                          <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-300">
-                            <CrmSearchIcon className="h-4 w-4" />
-                          </span>
-                        )}
-                        <div className="min-w-0 flex-1">
-                          <p className="truncate text-sm font-medium text-gray-900 dark:text-white">
-                            {crm.name}
-                          </p>
-                          <p className="truncate text-xs text-gray-400 dark:text-gray-500">
-                            {crm.detail || crm.email || ''}
-                          </p>
-                        </div>
-                        <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium ${typeColors[crm.type] || 'bg-gray-100 text-gray-600'}`}>
-                          {typeLabels[crm.type] || crm.type}
-                        </span>
-                        <ExternalLinkIcon className="h-3.5 w-3.5 shrink-0 text-gray-300 dark:text-gray-600" />
-                      </button>
-                    );
+                    return renderCrmRow(item.data, idx);
                   }
 
                   // toggl
@@ -724,97 +945,9 @@ export function SearchDialog({
                     );
                   }
 
-                  // file
-                  if (item.kind === 'file') {
-                    const f = item.data;
-                    const sizeStr = f.size != null ? (f.size < 1024 * 1024 ? `${Math.round(f.size / 1024)} KB` : `${(f.size / (1024 * 1024)).toFixed(1)} MB`) : '';
-                    return (
-                      <button
-                        key={`file-${f.id}`}
-                        data-active={isActive}
-                        onClick={() => activateItem(item)}
-                        onMouseEnter={() => setActiveIndex(idx)}
-                        className={`flex w-full items-start gap-3 px-4 py-2.5 text-left transition-colors ${
-                          isActive
-                            ? 'bg-indigo-50 dark:bg-indigo-950/40'
-                            : 'hover:bg-gray-50 dark:hover:bg-gray-800/50'
-                        }`}
-                      >
-                        {f.thumbnail_url ? (
-                          <img
-                            src={f.thumbnail_url}
-                            alt=""
-                            className="h-9 w-9 shrink-0 rounded-md object-cover ring-1 ring-gray-200 dark:ring-gray-700"
-                          />
-                        ) : (
-                          <span className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-sky-100 text-sky-700 dark:bg-sky-900/40 dark:text-sky-300">
-                            <FileSearchIcon className="h-4 w-4" />
-                          </span>
-                        )}
-                        <div className="min-w-0 flex-1">
-                          <p className="truncate text-sm font-medium text-gray-900 dark:text-white">
-                            {f.name}
-                          </p>
-                          {f.snippet ? (
-                            <p className="mt-0.5 line-clamp-2 text-xs text-gray-500 dark:text-gray-400">
-                              {f.snippet}
-                            </p>
-                          ) : sizeStr ? (
-                            <p className="truncate text-xs text-gray-400 dark:text-gray-500">
-                              {sizeStr}
-                            </p>
-                          ) : null}
-                        </div>
-                        <span className={`mt-0.5 shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium ${f.is_folder ? 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300' : 'bg-sky-100 text-sky-700 dark:bg-sky-900/40 dark:text-sky-300'}`}>
-                          {f.is_folder ? 'Ordner' : 'Datei'}
-                        </span>
-                        <ExternalLinkIcon className="mt-0.5 h-3.5 w-3.5 shrink-0 text-gray-300 dark:text-gray-600" />
-                      </button>
-                    );
-                  }
-
-                  // semantic (Dokument/E-Mail-Chunk mit Snippet-Passage)
-                  if (item.kind === 'semantic') {
-                    const h = item.data;
-                    const isEmail = h.source_type === 'email';
-                    return (
-                      <button
-                        key={`sem-${h.source_type}-${h.source_id}-${h.chunk_index ?? 0}`}
-                        data-active={isActive}
-                        onClick={() => activateItem(item)}
-                        onMouseEnter={() => setActiveIndex(idx)}
-                        className={`flex w-full items-start gap-3 px-4 py-2.5 text-left transition-colors ${
-                          isActive
-                            ? 'bg-indigo-50 dark:bg-indigo-950/40'
-                            : 'hover:bg-gray-50 dark:hover:bg-gray-800/50'
-                        }`}
-                      >
-                        <span className={`mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-full ${
-                          isEmail
-                            ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300'
-                            : 'bg-sky-100 text-sky-700 dark:bg-sky-900/40 dark:text-sky-300'
-                        }`}>
-                          {isEmail ? <MailIcon className="h-4 w-4" /> : <FileSearchIcon className="h-4 w-4" />}
-                        </span>
-                        <div className="min-w-0 flex-1">
-                          <p className="truncate text-sm font-medium text-gray-900 dark:text-white">
-                            {h.title || '(ohne Titel)'}
-                          </p>
-                          {h.snippet && (
-                            <p className="mt-0.5 line-clamp-2 text-xs text-gray-500 dark:text-gray-400">
-                              {h.snippet}
-                            </p>
-                          )}
-                        </div>
-                        <span className={`mt-0.5 shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium ${
-                          isEmail
-                            ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300'
-                            : 'bg-sky-100 text-sky-700 dark:bg-sky-900/40 dark:text-sky-300'
-                        }`}>
-                          {isEmail ? 'E-Mail' : 'Dokument'}
-                        </span>
-                      </button>
-                    );
+                  // doc (fusioniertes Dokument / E-Mail mit Snippet-Passage)
+                  if (item.kind === 'doc') {
+                    return renderDocRow(item.data, idx, false);
                   }
 
                   return null;
@@ -824,7 +957,7 @@ export function SearchDialog({
         </div>
 
         {/* Footer-Hinweise (nur Desktop) */}
-        {flatItems.length > 0 && (
+        {navTargets.length > 0 && (
           <div className="hidden items-center gap-4 border-t border-gray-200 px-4 py-2 text-[11px] text-gray-400 sm:flex dark:border-gray-700 dark:text-gray-500">
             <span className="flex items-center gap-1">
               <kbd className="rounded border border-gray-200 px-1 py-0.5 text-[10px] dark:border-gray-600">↑↓</kbd>
@@ -837,6 +970,9 @@ export function SearchDialog({
             <span className="flex items-center gap-1">
               <kbd className="rounded border border-gray-200 px-1 py-0.5 text-[10px] dark:border-gray-600">ESC</kbd>
               Schliessen
+            </span>
+            <span className="ml-auto truncate text-gray-400/80 dark:text-gray-500/80">
+              Leerzeichen = alle Begriffe · &quot;…&quot; = exakte Phrase · OR = einer von mehreren
             </span>
           </div>
         )}
@@ -862,6 +998,14 @@ function SearchIcon({ className }: { className?: string }) {
   return (
     <svg className={className} fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
       <path strokeLinecap="round" strokeLinejoin="round" d="m21 21-5.197-5.197m0 0A7.5 7.5 0 1 0 5.196 5.196a7.5 7.5 0 0 0 10.607 10.607Z" />
+    </svg>
+  );
+}
+
+function FilterIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M12 3c2.755 0 5.455.232 8.083.678.533.09.917.556.917 1.096v1.044a2.25 2.25 0 0 1-.659 1.591l-5.432 5.432a2.25 2.25 0 0 0-.659 1.591v2.927a2.25 2.25 0 0 1-1.244 2.013L9.75 21v-6.568a2.25 2.25 0 0 0-.659-1.591L3.659 7.409A2.25 2.25 0 0 1 3 5.818V4.774c0-.54.384-1.006.917-1.096A48.32 48.32 0 0 1 12 3Z" />
     </svg>
   );
 }
@@ -925,18 +1069,18 @@ function SignaSearchIcon({ className }: { className?: string }) {
   );
 }
 
-function MailIcon({ className }: { className?: string }) {
+function ChevronIcon({ className }: { className?: string }) {
   return (
-    <svg className={className} fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
-      <path strokeLinecap="round" strokeLinejoin="round" d="M21.75 6.75v10.5a2.25 2.25 0 0 1-2.25 2.25h-15a2.25 2.25 0 0 1-2.25-2.25V6.75m19.5 0A2.25 2.25 0 0 0 19.5 4.5h-15a2.25 2.25 0 0 0-2.25 2.25m19.5 0v.243a2.25 2.25 0 0 1-1.07 1.916l-7.5 4.615a2.25 2.25 0 0 1-2.36 0L3.32 8.91a2.25 2.25 0 0 1-1.07-1.916V6.75" />
+    <svg className={className} fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M8.25 4.5l7.5 7.5-7.5 7.5" />
     </svg>
   );
 }
 
-function DocSearchIcon({ className }: { className?: string }) {
+function MailIcon({ className }: { className?: string }) {
   return (
     <svg className={className} fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
-      <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z" />
+      <path strokeLinecap="round" strokeLinejoin="round" d="M21.75 6.75v10.5a2.25 2.25 0 0 1-2.25 2.25h-15a2.25 2.25 0 0 1-2.25-2.25V6.75m19.5 0A2.25 2.25 0 0 0 19.5 4.5h-15a2.25 2.25 0 0 0-2.25 2.25m19.5 0v.243a2.25 2.25 0 0 1-1.07 1.916l-7.5 4.615a2.25 2.25 0 0 1-2.36 0L3.32 8.91a2.25 2.25 0 0 1-1.07-1.916V6.75" />
     </svg>
   );
 }

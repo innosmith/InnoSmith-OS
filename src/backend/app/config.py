@@ -244,6 +244,11 @@ class Settings(BaseSettings):
     contentconverter_cconv_bin: str = "/home/innosmith/dev/github/TaskPilot/.venv/bin/cconv"
     pptx_template_dir: str = "/home/innosmith/dev/github/contentConverter/templates"
     mapping_keys_ttl_seconds: int = 7200  # 2h
+    # Zusätzliche PATH-Verzeichnisse (colon-separiert), die dem contentConverter-
+    # Subprozess vorangestellt werden, damit das Mermaid-CLI (mmdc) und node
+    # gefunden werden. Leer = Dev-Defaults werden automatisch ermittelt
+    # (~/.local/bin + neuestes ~/.nvm/versions/node/*/bin).
+    contentconverter_extra_path: str = ""
 
     model_config = {
         "env_file": str(_PROJECT_ROOT / ".env.dev"),

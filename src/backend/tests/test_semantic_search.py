@@ -38,11 +38,18 @@ class TestChunkText:
 
 class TestIsIndexableFile:
     def test_documents_whitelisted(self):
-        for name in ("report.pdf", "notes.DOCX", "sheet.xlsx", "readme.md", "data.csv", "page.html"):
+        for name in ("report.pdf", "notes.DOCX", "sheet.xlsx", "readme.md", "data.csv", "log.TXT"):
             assert is_indexable_file(name) is True
 
     def test_binary_media_rejected(self):
         for name in ("photo.jpg", "clip.mp4", "audio.mp3", "archive.zip", "app.exe", "noext"):
+            assert is_indexable_file(name) is False
+
+    def test_code_and_config_rejected_for_search_index(self):
+        # Bewusst NICHT im Such-Index (Rauschen / viele Projektkopien) -- der
+        # Agent-Kontext nutzt eine separate, breitere Whitelist.
+        for name in ("__init__.py", "app.js", "main.ts", "dossier_context.json",
+                     "config.yaml", "page.html", "data.xml"):
             assert is_indexable_file(name) is False
 
 

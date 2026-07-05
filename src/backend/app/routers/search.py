@@ -90,7 +90,6 @@ class SearchResults(BaseModel):
     toggl: list[TogglHit]
     bexio: list[BexioHit]
     signa: list["SignaHit"]
-    files: list["FileHit"]
 
 
 class SignaHit(BaseModel):
@@ -111,6 +110,7 @@ class FileHit(BaseModel):
     path: str | None = None
     snippet: str | None = None
     thumbnail_url: str | None = None
+    mime_type: str | None = None
 
 
 SearchResults.model_rebuild()
@@ -354,6 +354,38 @@ async def _resolve_region(client, settings) -> str | None:
     return region
 
 
+def _file_dedupe_key(name: str, size: int | None) -> str:
+    """Dedup-Schlüssel für OneDrive-Treffer.
+
+    Dieselbe logische Datei existiert im OneDrive oft physisch mehrfach (verschiedene
+    ``driveItem``-IDs in unterschiedlichen Ordnern, privat + geteilt). Dedup auf der
+    ID greift daher NICHT -- wir normalisieren stattdessen auf ``name`` (+ ``size`` als
+    Tie-Breaker gegen echte Namensgleichheit unterschiedlicher Dateien).
+    """
+    norm = (name or "").strip().casefold()
+    return f"{norm}|{size if size is not None else ''}"
+
+
+def _dedupe_file_hits(hits: list[FileHit]) -> list[FileHit]:
+    """Dedupliziert OneDrive-Treffer nach normalisiertem Namen (+ Grösse).
+
+    Behält pro Schlüssel den ersten (relevanz-höchsten) Treffer, ergänzt aber das
+    längste verfügbare Snippet als beste Vorschau. Reihenfolge bleibt erhalten.
+    """
+    by_key: dict[str, FileHit] = {}
+    order: list[str] = []
+    for h in hits:
+        key = _file_dedupe_key(h.name, h.size)
+        existing = by_key.get(key)
+        if existing is None:
+            by_key[key] = h
+            order.append(key)
+            continue
+        if len(h.snippet or "") > len(existing.snippet or ""):
+            existing.snippet = h.snippet
+    return [by_key[k] for k in order]
+
+
 async def _search_onedrive(term: str) -> list[FileHit]:
     """OneDrive-Dokumente durchsuchen -- mit Inhalts-Vorschau (Microsoft Search API).
 
@@ -364,7 +396,8 @@ async def _search_onedrive(term: str) -> list[FileHit]:
     sie. Ist die Region nicht ermittelbar, fällt die Suche auf die reine Namens-/
     Metadaten-Route (``drive/root/search``) ohne Snippet zurück. Thumbnails werden
     im reaktiven Instant-Pfad bewusst NICHT geladen (sonst N Graph-Calls je
-    Tastendruck) -- der Snippet ist die eigentliche Vorschau.
+    Tastendruck) -- der Snippet ist die eigentliche Vorschau. Ergebnisse werden nach
+    normalisiertem Namen dedupliziert (dieselbe Datei liegt oft mehrfach im Drive).
     """
     try:
         from graph_client import GraphClient, GraphConfig  # noqa: E402
@@ -401,14 +434,15 @@ async def _search_onedrive(term: str) -> list[FileHit]:
                         is_folder=bool(res.get("folder")),
                         path=(res.get("parentReference") or {}).get("path", ""),
                         snippet=_strip_hit_highlights(h.get("summary")),
+                        mime_type=(res.get("file") or {}).get("mimeType"),
                     ))
-                return results
+                return _dedupe_file_hits(results)
 
             # Fallback ohne Region: Namens-/Metadaten-Suche (kein Snippet).
             items = await asyncio.wait_for(
                 client.search_drive(term, top=_ONEDRIVE_SEARCH_TOP), timeout=8.0
             )
-            return [
+            fallback = [
                 FileHit(
                     id=item.get("id", ""),
                     name=item.get("name", ""),
@@ -417,13 +451,68 @@ async def _search_onedrive(term: str) -> list[FileHit]:
                     web_url=item.get("webUrl"),
                     is_folder=bool(item.get("folder")),
                     path=(item.get("parentReference") or {}).get("path", ""),
+                    mime_type=(item.get("file") or {}).get("mimeType"),
                 )
                 for item in items
             ]
+            return _dedupe_file_hits(fallback)
         finally:
             await client.close()
     except Exception as exc:
         logger.debug("OneDrive-Suche fehlgeschlagen (wird ignoriert): %s", exc)
+        return []
+
+
+# Live-E-Mail-Fenster (Graph $search, ganzes Postfach). Grosszügig gewählt, damit
+# echte Treffer vollständig ankommen -- keine künstliche Repräsentations-Quote.
+_EMAIL_SEARCH_TOP = 25
+
+
+async def _search_emails_live(term: str) -> list[dict]:
+    """E-Mails live über das GANZE Postfach durchsuchen (Graph ``$search``).
+
+    Symmetrisch zu ``_search_onedrive``: garantiert vollständige E-Mail-Abdeckung
+    unabhängig vom (nur teilweise backfilled) lokalen Index. Liefert normalisierte
+    Kandidaten-Dicts (siehe ``_merge_documents``); ``id`` = Graph-Message-ID, damit
+    Live- und Index-Treffer derselben Mail verschmelzen. Best-effort mit Timeout.
+    """
+    try:
+        from graph_client import GraphClient, GraphConfig  # noqa: E402
+        s = _get_settings()
+        if not all([s.graph_tenant_id, s.graph_client_id, s.graph_client_secret, s.graph_user_email]):
+            return []
+        client = GraphClient(GraphConfig(
+            tenant_id=s.graph_tenant_id,
+            client_id=s.graph_client_id,
+            client_secret=s.graph_client_secret,
+            user_email=s.graph_user_email,
+        ))
+        try:
+            msgs = await asyncio.wait_for(
+                client.search_emails(term, top=_EMAIL_SEARCH_TOP), timeout=8.0
+            )
+        finally:
+            await client.close()
+        out: list[dict] = []
+        for m in msgs:
+            mid = m.get("id")
+            if not mid:
+                continue
+            frm = (m.get("from") or {}).get("emailAddress") or {}
+            sender = frm.get("name") or frm.get("address")
+            preview = (m.get("bodyPreview") or "").strip()
+            snippet = f"{sender}: {preview}" if sender and preview else (preview or sender)
+            out.append({
+                "source_type": "email",
+                "id": mid,
+                "title": m.get("subject") or "(kein Betreff)",
+                "url": m.get("webLink"),
+                "mime_type": "message/rfc822",
+                "snippet": snippet or None,
+            })
+        return out
+    except Exception as exc:
+        logger.debug("Live-E-Mail-Suche fehlgeschlagen (wird ignoriert): %s", exc)
         return []
 
 
@@ -453,10 +542,9 @@ async def search(
     toggl_task = _search_toggl(user, q)
     bexio_task = _search_bexio(user, q)
     signa_task = _search_signa(q)
-    files_task = _search_onedrive(q)
 
-    task_result, project_result, tag_result, crm_results, toggl_results, bexio_results, signa_results, file_results = await asyncio.gather(
-        db_task, db_project, db_tag, crm_task, toggl_task, bexio_task, signa_task, files_task,
+    task_result, project_result, tag_result, crm_results, toggl_results, bexio_results, signa_results = await asyncio.gather(
+        db_task, db_project, db_tag, crm_task, toggl_task, bexio_task, signa_task,
     )
 
     tasks = [
@@ -478,7 +566,7 @@ async def search(
         for t in tag_result.scalars().all()
     ]
 
-    return SearchResults(tasks=tasks, projects=projects, tags=tags, crm=crm_results, toggl=toggl_results, bexio=bexio_results, signa=signa_results, files=file_results)
+    return SearchResults(tasks=tasks, projects=projects, tags=tags, crm=crm_results, toggl=toggl_results, bexio=bexio_results, signa=signa_results)
 
 
 class SemanticHit(BaseModel):
@@ -522,3 +610,166 @@ async def semantic_search(
     return SemanticSearchResults(
         query=q, mode=mode, results=[SemanticHit(**h) for h in hits]
     )
+
+
+class DocHit(BaseModel):
+    source_type: str  # 'onedrive' | 'email' | 'upload' | 'transcript'
+    id: str
+    title: str | None = None
+    url: str | None = None
+    mime_type: str | None = None
+    snippet: str | None = None
+    score: float | None = None
+
+
+class DocumentSearchResults(BaseModel):
+    query: str
+    results: list[DocHit]
+
+
+# RRF-Konstante für die Doc-Fusion (identisch zur semantischen Fusion, siehe
+# semantic_search._RRF_K): dämpft den Einfluss sehr hoher Einzelränge.
+_DOC_RRF_K = 60
+
+def _doc_merge_key(source_type: str, title: str | None, source_id: str) -> str:
+    """Merge-Schlüssel über beide Doc-Quellen (Live + Index).
+
+    Datei-artige Quellen (``onedrive``/``upload``) werden über den normalisierten
+    Titel/Dateinamen zusammengeführt -- so kollabiert dieselbe Datei aus Live-Suche
+    und Index (bzw. mehrere physische Kopien) zu einer Zeile. E-Mails/Transkripte
+    haben keinen dedup-fähigen Dateinamen und werden über ``source_id`` gehalten.
+    """
+    if source_type in ("onedrive", "upload"):
+        norm = (title or "").strip().casefold()
+        if norm:
+            return f"file:{norm}"
+    return f"{source_type}:{source_id}"
+
+
+def _file_candidates(hits: list[FileHit]) -> list[dict]:
+    """OneDrive-Live-Treffer → normalisierte Merge-Kandidaten (Ordner ausgeschlossen)."""
+    return [
+        {
+            "source_type": "onedrive",
+            "id": f.id,
+            "title": f.name,
+            "url": f.web_url,
+            "mime_type": f.mime_type,
+            "snippet": f.snippet,
+        }
+        for f in hits
+        if not f.is_folder
+    ]
+
+
+def _index_candidates(items: list[dict]) -> list[dict]:
+    """Hybrid-Index-Treffer → normalisierte Merge-Kandidaten (``mime``→``mime_type``)."""
+    return [
+        {
+            "source_type": it["source_type"],
+            "id": it["source_id"],
+            "title": it.get("title"),
+            "url": it.get("url"),
+            "mime_type": it.get("mime"),
+            "snippet": it.get("snippet"),
+        }
+        for it in items
+    ]
+
+
+def _merge_documents(*ranklists: list[dict], k: int = _DOC_RRF_K) -> list[DocHit]:
+    """Fusioniert beliebig viele (bereits sortierte) Kandidaten-Ranglisten via RRF.
+
+    Jede Liste (Live-Mail, Live-OneDrive, Index pro Quelltyp) trägt unabhängig
+    ``1/(k + rang)`` zum Score bei -- Präsenz entsteht also aus dem Retrieval, die
+    Fusion bestimmt allein die Reihenfolge und kann keine Quelle verdrängen.
+
+    Treffer derselben Entität (siehe ``_doc_merge_key``: Dateien über den Namen,
+    E-Mails/Transkripte über die ID) verschmelzen zu einer Zeile. Feld-Regeln:
+    Identität (``url``/``mime_type``) übernimmt der erstplatzierte Treffer -- da Live-
+    Listen zuerst übergeben werden, gewinnt deren klickbarer Link; als Vorschau
+    gewinnt das längste (informativste) Snippet.
+    """
+    scores: dict[str, float] = {}
+    merged: dict[str, dict] = {}
+    order: list[str] = []
+
+    for cands in ranklists:
+        for rank, it in enumerate(cands):
+            key = _doc_merge_key(it["source_type"], it.get("title"), it["id"])
+            scores[key] = scores.get(key, 0.0) + 1.0 / (k + rank)
+            existing = merged.get(key)
+            if existing is None:
+                merged[key] = {
+                    "source_type": it["source_type"],
+                    "id": it["id"],
+                    "title": it.get("title"),
+                    "url": it.get("url"),
+                    "mime_type": it.get("mime_type"),
+                    "snippet": it.get("snippet"),
+                }
+                order.append(key)
+                continue
+            if len(it.get("snippet") or "") > len(existing.get("snippet") or ""):
+                existing["snippet"] = it.get("snippet")
+            if not existing.get("url"):
+                existing["url"] = it.get("url")
+            if not existing.get("mime_type"):
+                existing["mime_type"] = it.get("mime_type")
+
+    ranked = sorted(order, key=lambda key: scores[key], reverse=True)
+    out: list[DocHit] = []
+    for key in ranked:
+        d = merged[key]
+        d["score"] = round(scores[key], 6)
+        out.append(DocHit(**d))
+    return out
+
+
+@router.get("/documents", response_model=DocumentSearchResults)
+async def search_documents(
+    q: str = Query(..., min_length=2),
+    limit: int = Query(50, ge=1, le=200),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_role("owner")),
+) -> DocumentSearchResults:
+    """Symmetrische Dokument-/E-Mail-Suche: pro Quelle live + Index, dann RRF-Fusion.
+
+    Leitprinzip: **Präsenz durch Retrieval, Reihenfolge durch Fusion.** Jede Quelle
+    wird eigenständig abgefragt -- live über die volle API (OneDrive-Drive,
+    E-Mail-Postfach) UND über den lokalen Hybrid-Index (je Quelltyp getrennt). Weil
+    keine Quelle beim Abruf mit einer anderen um Plätze konkurriert, kann die (stark
+    gewachsene) OneDrive-Menge die E-Mails nicht mehr verdrängen. ``_merge_documents``
+    fusioniert alle Ranglisten via RRF und verschmilzt Dubletten (Datei über Namen,
+    E-Mail über Message-ID). Best-effort: fällt eine Quelle aus, bleiben die anderen.
+    """
+    logger.info("Document-Search: q=%r user=%s", q, user.email)
+    # Fünf unabhängige Ranglisten, parallel. Live zuerst (klickbare Links/Snippets
+    # gewinnen beim Merge), Index je Quelltyp getrennt (keine Verdrängung beim Abruf).
+    live_drive, live_mail, idx_drive, idx_mail, idx_other = await asyncio.gather(
+        _search_onedrive(q),
+        _search_emails_live(q),
+        hybrid_search(db, q, mode="hybrid", sources=["onedrive"], k=limit),
+        hybrid_search(db, q, mode="hybrid", sources=["email"], k=limit),
+        hybrid_search(db, q, mode="hybrid", sources=["upload", "transcript"], k=limit),
+        return_exceptions=True,
+    )
+    labelled = {
+        "Live-OneDrive": live_drive,
+        "Live-E-Mail": live_mail,
+        "Index-OneDrive": idx_drive,
+        "Index-E-Mail": idx_mail,
+        "Index-Upload/Transkript": idx_other,
+    }
+    for name, res in list(labelled.items()):
+        if isinstance(res, BaseException):
+            logger.debug("Document-Search-Quelle '%s' fehlgeschlagen: %s", name, res)
+            labelled[name] = []
+    results = _merge_documents(
+        _file_candidates(labelled["Live-OneDrive"]),
+        labelled["Live-E-Mail"],
+        _index_candidates(labelled["Index-OneDrive"]),
+        _index_candidates(labelled["Index-E-Mail"]),
+        _index_candidates(labelled["Index-Upload/Transkript"]),
+    )[:limit]
+    return DocumentSearchResults(query=q, results=results)

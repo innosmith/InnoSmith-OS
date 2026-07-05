@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 from datetime import datetime, timezone
 
 from sqlalchemy import text
@@ -28,21 +29,38 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.database import async_session
-from app.services.context_resolver import ALLOWED_TEXT_EXTENSIONS, _extract_text
+from app.services.context_resolver import _extract_text
 from app.services.embeddings import embed_text, to_pgvector
 from app.services.learning import html_to_text, strip_quoted_history
 
 logger = logging.getLogger("taskpilot.semantic_index")
 
-# Text-tragende Endungen, die wir indexieren (deckungsgleich mit der
-# Extraktions-Pipeline in context_resolver._extract_text). Bilder/Audio/Video/
-# Archive fehlen bewusst -> werden nie heruntergeladen/eingebettet.
-_DOC_EXTENSIONS = ALLOWED_TEXT_EXTENSIONS | {".pdf", ".docx", ".xlsx"}
+# Endungen für den semantischen SUCH-Index -- bewusst ENG gehalten: nur echte
+# Nutzdokumente. Code-/Config-/generische Struktur-Dateien (.py, .js, .ts, .json,
+# .xml, .yaml, .html, ...) liegen oft in vielen Projektkopien vor (z. B.
+# dossier_context.json, __init__.py) und wären reines Rauschen in der Dokumentsuche.
+# Der Agent-Kontext (context_resolver.ALLOWED_TEXT_EXTENSIONS) bleibt breit -- dort
+# sind Code/Configs bewusst gewollt. Bilder/Audio/Video/Archive fehlen ebenfalls.
+_DOC_EXTENSIONS = {".pdf", ".docx", ".xlsx", ".md", ".txt", ".csv"}
 
 # E-Mail-Ordner, die in den Index aufgenommen werden.
 _MAIL_FOLDERS = ("inbox", "sentitems", "archive")
 
 _MIN_CHUNK_CHARS = 20
+
+# NUL (0x00) ist in PostgreSQL text/tsvector HART verboten
+# (CharacterNotInRepertoireError) -- manche extrahierten .md-Dateien (z. B.
+# UTF-16-/korrupte Exporte) enthalten NUL-Bytes und wuerden sonst den kompletten
+# Dokument-Insert sprengen. Weitere C0-Steuerzeichen (ausser Tab/LF/CR) tragen
+# keine Suchinformation und werden ebenfalls entfernt.
+_CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+
+
+def _sanitize_text(s: str | None) -> str:
+    """Entfernt NUL- und andere C0-Steuerzeichen (ausser \\t\\n\\r). "" bei None."""
+    if not s:
+        return ""
+    return _CONTROL_CHARS_RE.sub("", s)
 
 # Scheduler-Handle
 _task: asyncio.Task | None = None
@@ -83,7 +101,7 @@ def chunk_text(body: str, size: int, overlap: int) -> list[str]:
     Bevorzugt Absatz-/Zeilengrenzen innerhalb des Fensters, um Sätze nicht mitten
     im Wort zu zerschneiden. Rein, deterministisch, gut testbar.
     """
-    clean = (body or "").strip()
+    clean = _sanitize_text(body).strip()
     if not clean:
         return []
     if size <= 0:
@@ -163,7 +181,7 @@ async def _upsert_chunks(
                 "st": source_type,
                 "sid": source_id,
                 "idx": idx,
-                "title": (title or "")[:500] or None,
+                "title": (_sanitize_text(title)[:500] or None),
                 "body": chunk,
                 "url": url,
                 "mime": mime,
@@ -351,9 +369,24 @@ async def sync_semantic_index(
                 logger.info("Drive-Walk fehlgeschlagen: %s", exc)
                 files = []
             indexable = [f for f in files if is_indexable_file(f.get("name") or "")]
+            # In-Run-Dedup: Dieselbe Datei liegt im OneDrive oft physisch mehrfach
+            # (verschiedene driveItem-IDs, gleicher Name + Grösse in mehreren Ordnern,
+            # privat + geteilt). Ohne Dedup würde jede Kopie als eigenes Dokument
+            # eingebettet -> Rauschen im Index. Wir indexieren pro (Name, Grösse) nur
+            # die erste Kopie dieses Laufs.
+            seen_files: set[tuple[str, int]] = set()
+            deduped: list[dict] = []
+            for f in indexable:
+                key = ((f.get("name") or "").strip().casefold(), int(f.get("size") or 0))
+                if key in seen_files:
+                    continue
+                seen_files.add(key)
+                deduped.append(f)
+            skipped_dupes = len(indexable) - len(deduped)
+            indexable = deduped
             logger.info(
-                "Backfill Dokumente: %d Dateien gesamt, davon %d indexierbar",
-                len(files), len(indexable),
+                "Backfill Dokumente: %d Dateien gesamt, %d indexierbar, %d Duplikate übersprungen",
+                len(files), len(indexable), skipped_dupes,
             )
             for i, item in enumerate(indexable, 1):
                 if _stop.is_set():

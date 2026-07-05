@@ -25,6 +25,58 @@ _exit_stack: AsyncExitStack | None = None
 _lock = asyncio.Lock()
 
 
+def _resolve_mermaid_path_dirs(settings) -> list[str]:
+    """Ermittelt zusätzliche PATH-Verzeichnisse für das Mermaid-CLI (mmdc).
+
+    Ist ``TP_CONTENTCONVERTER_EXTRA_PATH`` gesetzt, werden diese Verzeichnisse
+    verwendet. Sonst werden Dev-Defaults ermittelt: ``~/.local/bin`` (mmdc-Wrapper)
+    sowie das neueste ``~/.nvm/versions/node/*/bin`` (node). Im Docker-Image ist
+    ``mmdc`` systemweit installiert -- dort greifen die Defaults ins Leere und der
+    normale PATH genügt.
+    """
+    dirs: list[str] = []
+
+    if settings.contentconverter_extra_path:
+        dirs.extend(
+            d for d in settings.contentconverter_extra_path.split(os.pathsep) if d
+        )
+    else:
+        home = Path.home()
+        local_bin = home / ".local" / "bin"
+        if (local_bin / "mmdc").exists():
+            dirs.append(str(local_bin))
+        node_bins = sorted(home.glob(".nvm/versions/node/*/bin"))
+        if node_bins:
+            dirs.append(str(node_bins[-1]))
+
+    # Nur existierende Verzeichnisse, Reihenfolge erhalten, Duplikate entfernen
+    return [d for d in dict.fromkeys(dirs) if Path(d).is_dir()]
+
+
+def _build_subprocess_env(settings) -> dict[str, str]:
+    """Baut die Umgebung für den contentConverter-Subprozess.
+
+    Reicht relevante Variablen durch (PATH, HOME, LANG, CONTENTCONVERTER_*,
+    PUPPETEER_*, NODE_*) und stellt sicher, dass die Mermaid-CLI-Verzeichnisse
+    im PATH vorangestellt sind.
+    """
+    env = {
+        k: v
+        for k, v in os.environ.items()
+        if k.startswith(
+            ("CONTENTCONVERTER_", "PATH", "HOME", "LANG", "PUPPETEER_", "NODE_")
+        )
+    }
+
+    extra_dirs = _resolve_mermaid_path_dirs(settings)
+    if extra_dirs:
+        current_path = env.get("PATH", "")
+        parts = extra_dirs + (current_path.split(os.pathsep) if current_path else [])
+        env["PATH"] = os.pathsep.join(dict.fromkeys(p for p in parts if p))
+
+    return env
+
+
 async def start_content_converter() -> None:
     """Startet den contentConverter MCP-Server als Singleton-Subprocess."""
     global _session, _exit_stack
@@ -44,11 +96,7 @@ async def start_content_converter() -> None:
         server_params = StdioServerParameters(
             command=cconv_bin,
             args=["serve"],
-            env={
-                k: v
-                for k, v in os.environ.items()
-                if k.startswith(("CONTENTCONVERTER_", "PATH", "HOME", "LANG"))
-            },
+            env=_build_subprocess_env(settings),
         )
 
         stdio_transport = await _exit_stack.enter_async_context(

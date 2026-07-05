@@ -23,6 +23,42 @@ RUN PANDOC_PATH=$(python -c "import pypandoc; print(pypandoc.get_pandoc_path())"
     && ln -sf "$PANDOC_PATH" /usr/local/bin/pandoc \
     && pandoc --version | head -1
 
+# Node.js + Mermaid-CLI (mmdc): rendert ```mermaid-Bloecke in
+# Word/PDF/PowerPoint-Exporten als PNG-Grafik statt als Code-Text.
+#
+# Chromium: Das Debian-Chromium-Paket ist ein nicht-offizieller Build mit
+# aktiven DCHECKs und stuerzt auf dieser aarch64-Plattform (GX10) bereits beim
+# Start mit SIGTRAP ab. Stattdessen wird -- wie auf dem Host bereits bewaehrt --
+# Playwrights Chromium-Build verwendet, der auf arm64 zuverlaessig laeuft.
+# mmdc/puppeteer startet dieses Binary direkt via executablePath.
+# PUPPETEER_SKIP_DOWNLOAD verhindert zusaetzlich den Download eines gebuendelten
+# (evtl. falsch-architektur) Puppeteer-Chromium.
+ENV PUPPETEER_SKIP_DOWNLOAD=true \
+    PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      nodejs npm \
+    && npm install -g @mermaid-js/mermaid-cli@10 \
+    && pip install --no-cache-dir playwright \
+    && python -m playwright install --with-deps chromium \
+    && npm cache clean --force \
+    && rm -rf /var/lib/apt/lists/* /root/.npm
+# Puppeteer-Config: Playwright-Chromium + --no-sandbox (Container ohne User-Namespace).
+# executablePath wird zur Build-Zeit aufgeloest (fixe Version im Image) und der
+# Browser-Pfad world-lesbar gemacht (Container laeuft als uid 1000).
+RUN CHROME_BIN="$(ls -d "$PLAYWRIGHT_BROWSERS_PATH"/chromium-*/chrome-linux/chrome | sort -V | tail -1)" \
+    && test -x "$CHROME_BIN" \
+    && printf '{"executablePath":"%s","args":["--no-sandbox","--disable-gpu","--disable-dev-shm-usage"]}\n' "$CHROME_BIN" \
+      > /etc/puppeteer-config.json \
+    && chmod 0644 /etc/puppeteer-config.json \
+    && chmod -R a+rX "$PLAYWRIGHT_BROWSERS_PATH"
+# mmdc-Wrapper: haengt die Puppeteer-Config automatisch an, da cconv mmdc ohne -p aufruft
+RUN MMDC_BIN="$(command -v mmdc)" \
+    && mv "$MMDC_BIN" "${MMDC_BIN}.real" \
+    && printf '#!/bin/sh\nexec "%s.real" "$@" -p /etc/puppeteer-config.json\n' "$MMDC_BIN" > "$MMDC_BIN" \
+    && chmod 0755 "$MMDC_BIN" \
+    && node --version && test -x "${MMDC_BIN}.real" \
+    && test -x "$(sed -n 's/.*"executablePath":"\([^"]*\)".*/\1/p' /etc/puppeteer-config.json)"
+
 # Private Packages (via docker/build.sh nach vendor/ kopiert)
 # [all] = pdf + anonymize + mcp + extract (Presidio, spaCy, GLiNER, Faker, …)
 COPY src/backend/vendor/ /opt/vendor/

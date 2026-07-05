@@ -616,7 +616,7 @@ class GraphClient:
             {
                 "$search": f'"{query}"',
                 "$top": str(top),
-                "$select": "id,subject,from,receivedDateTime,bodyPreview,conversationId",
+                "$select": "id,subject,from,receivedDateTime,bodyPreview,conversationId,webLink",
             },
         )
         return data.get("value", [])
