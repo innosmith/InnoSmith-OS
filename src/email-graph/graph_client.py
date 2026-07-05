@@ -215,6 +215,87 @@ class GraphClient:
         data = await self._get(f"{self._user_path}/mailFolders", {"$top": "100"})
         return data.get("value", [])
 
+    # Well-known-Ordner, die vom Such-Index ausgenommen bleiben (kein Nutzwert,
+    # potenziell riesig/rauschig): Junk-E-Mail und Geloeschte Elemente.
+    _INDEX_SKIP_WELLKNOWN = {"junkemail", "deleteditems"}
+
+    async def iter_all_mail_folders(self) -> list[dict]:
+        """Enumeriert ALLE Mail-Ordner inkl. verschachtelter, ohne Junk/Geloeschte.
+
+        Steigt rekursiv in ``childFolders`` ab und paginiert ueber ``@odata.nextLink``.
+        Junk und Geloeschte Elemente werden ueber ihre Well-Known-IDs ausgeschlossen
+        (inkl. Unterordner, da nicht abgestiegen wird). ``$select`` wird bewusst NICHT
+        gesetzt: v1.0 lehnt ``$select=wellKnownName`` auf ``mailFolders`` mit 400 ab;
+        die Default-Antwort enthaelt ``displayName``/``childFolderCount`` ohnehin. Gibt
+        ``{id, displayName, wellKnownName}`` zurueck. Nur Lesezugriff.
+        """
+        # Well-Known-Ordner (Junk/Geloescht) per Namen aufloesen -> deren echte IDs
+        # ausschliessen. So ist der Ausschluss unabhaengig von Anzeige-Sprache/Namen.
+        skip_ids: set[str] = set()
+        for wk in ("junkemail", "deleteditems"):
+            try:
+                f = await self._get(f"{self._user_path}/mailFolders/{wk}", {"$select": "id"})
+                fid = f.get("id")
+                if fid:
+                    skip_ids.add(fid)
+            except Exception as exc:  # noqa: BLE001 - Ordner evtl. nicht vorhanden
+                logger.info("Well-Known-Ordner '%s' nicht aufloesbar: %s", wk, exc)
+
+        out: list[dict] = []
+
+        async def _recurse(endpoint: str) -> None:
+            data = await self._get(endpoint, {"$top": "100"})
+            while True:
+                for f in data.get("value", []):
+                    fid = f.get("id")
+                    if not fid or fid in skip_ids:
+                        continue  # Junk/Geloescht inkl. Unterordner (kein Abstieg)
+                    wkn = (f.get("wellKnownName") or "").lower()
+                    if wkn in self._INDEX_SKIP_WELLKNOWN:
+                        continue
+                    out.append({
+                        "id": fid,
+                        "displayName": f.get("displayName"),
+                        "wellKnownName": wkn or None,
+                    })
+                    if (f.get("childFolderCount") or 0) > 0:
+                        await _recurse(f"{self._user_path}/mailFolders/{fid}/childFolders")
+                nxt = data.get("@odata.nextLink")
+                if not nxt:
+                    break
+                data = await self._get_raw_url(nxt)
+
+        await _recurse(f"{self._user_path}/mailFolders")
+        return out
+
+    async def iter_folder_messages(
+        self, folder_id: str, page_size: int = 200, max_total: int = 0
+    ):
+        """Async-Generator ueber ALLE Nachrichten eines Ordners (volle Pagination).
+
+        Folgt echtem ``@odata.nextLink`` (statt ``$skip``, das Graph bei Deep-Paging
+        deckelt). Schlankes ``$select=id,receivedDateTime`` -- der volle Body wird
+        beim Indexieren ohnehin einzeln via ``get_email`` geladen. ``max_total=0``
+        bedeutet unbegrenzt.
+        """
+        params = {
+            "$top": str(page_size),
+            "$select": "id,receivedDateTime",
+            "$orderby": "receivedDateTime desc",
+        }
+        data = await self._get(f"{self._user_path}/mailFolders/{folder_id}/messages", params)
+        yielded = 0
+        while True:
+            for m in data.get("value", []):
+                yield m
+                yielded += 1
+                if max_total and yielded >= max_total:
+                    return
+            nxt = data.get("@odata.nextLink")
+            if not nxt:
+                return
+            data = await self._get_raw_url(nxt)
+
     async def list_emails(
         self,
         folder: str = "inbox",

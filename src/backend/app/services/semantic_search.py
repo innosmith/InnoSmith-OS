@@ -142,7 +142,8 @@ def rrf_fuse(semantic: list[dict], keyword: list[dict], k: int = _RRF_K) -> list
     for rank, it in enumerate(semantic):
         key = (it["source_type"], it["source_id"])
         scores[key] = scores.get(key, 0.0) + 1.0 / (k + rank)
-        merged.setdefault(key, dict(it))
+        entry = merged.setdefault(key, dict(it))
+        entry.setdefault("matched_keyword", False)
     for rank, it in enumerate(keyword):
         key = (it["source_type"], it["source_id"])
         scores[key] = scores.get(key, 0.0) + 1.0 / (k + rank)
@@ -150,6 +151,9 @@ def rrf_fuse(semantic: list[dict], keyword: list[dict], k: int = _RRF_K) -> list
             merged[key] = dict(it)
         elif not merged[key].get("snippet"):
             merged[key]["snippet"] = it.get("snippet")
+        # Keyword-Deckung ist das verlaessliche Relevanzsignal (Begriff steht wirklich
+        # im Dokument) -- unabhaengig vom semantischen Rang markieren.
+        merged[key]["matched_keyword"] = True
     ranked = sorted(merged.values(), key=lambda it: scores[(it["source_type"], it["source_id"])], reverse=True)
     for it in ranked:
         it["score"] = round(scores[(it["source_type"], it["source_id"])], 6)
@@ -189,8 +193,12 @@ async def hybrid_search(
     try:
         if mode == "semantic":
             results = _dedupe_by_source(await _semantic_candidates(db, q, sources, cand))
+            for r in results:
+                r["matched_keyword"] = False
         elif mode == "exact":
             results = _dedupe_by_source(await _keyword_candidates(db, q, sources, cand))
+            for r in results:
+                r["matched_keyword"] = True
         else:  # hybrid
             sem = _dedupe_by_source(await _semantic_candidates(db, q, sources, cand))
             kw = _dedupe_by_source(await _keyword_candidates(db, q, sources, cand))

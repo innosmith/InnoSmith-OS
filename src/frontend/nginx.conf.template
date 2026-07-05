@@ -6,6 +6,12 @@ server {
 
     client_max_body_size 20m;
 
+    # Docker-interner DNS-Resolver. Zusammen mit variablem proxy_pass (siehe unten)
+    # loest nginx die Backend-IP zur Laufzeit neu auf, statt sie beim Start zu cachen.
+    # Verhindert 502 (Connection refused), wenn das Backend nach dem Frontend neu
+    # erstellt wird und eine neue Container-IP bekommt (z. B. bei `make prod`).
+    resolver 127.0.0.11 valid=10s ipv6=off;
+
     add_header X-Content-Type-Options "nosniff" always;
     add_header X-Frame-Options "DENY" always;
     add_header X-XSS-Protection "1; mode=block" always;
@@ -16,7 +22,9 @@ server {
     }
 
     location ^~ /api/ {
-        proxy_pass http://${BACKEND_HOST}:8000;
+        # Variabler Upstream -> Laufzeit-Aufloesung via resolver (kein Start-Caching).
+        set $backend_upstream http://${BACKEND_HOST}:8000;
+        proxy_pass $backend_upstream;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -37,7 +45,8 @@ server {
     }
 
     location ^~ /uploads/ {
-        proxy_pass http://${BACKEND_HOST}:8000;
+        set $uploads_upstream http://${BACKEND_HOST}:8000;
+        proxy_pass $uploads_upstream;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
     }

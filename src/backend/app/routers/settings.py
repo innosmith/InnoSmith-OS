@@ -200,6 +200,53 @@ async def update_triage_settings(
     return TriageSettings(**{f: merged.get(f) for f in TRIAGE_FIELDS})
 
 
+# --- Suchindex-Einstellungen (Ausschluss-Pfade) ---
+
+class SearchIndexSettings(BaseModel):
+    # OneDrive-Pfade (relativ zu Drive-Root), die NICHT indexiert werden sollen.
+    excluded_paths: list[str] | None = None
+
+
+class SearchIndexUpdateResponse(SearchIndexSettings):
+    purged: int = 0  # Anzahl beim Speichern bereinigter Chunk-Zeilen
+
+
+@router.get("/search-index", response_model=SearchIndexSettings)
+async def get_search_index_settings(
+    user: User = Depends(require_role("owner")),
+) -> SearchIndexSettings:
+    """Aktuelle Ausschlussliste (gespeichert oder Default)."""
+    from app.services.semantic_index import _DEFAULT_EXCLUDED_PATHS
+
+    s = user.settings or {}
+    raw = s.get("search_excluded_paths")
+    if "search_excluded_paths" in s and isinstance(raw, list):
+        paths = [str(p) for p in raw]
+    else:
+        paths = list(_DEFAULT_EXCLUDED_PATHS)
+    return SearchIndexSettings(excluded_paths=paths)
+
+
+@router.put("/search-index", response_model=SearchIndexUpdateResponse)
+async def update_search_index_settings(
+    body: SearchIndexSettings,
+    user: User = Depends(require_role("owner")),
+    db: AsyncSession = Depends(get_db),
+) -> SearchIndexUpdateResponse:
+    """Speichert die Ausschlussliste und bereinigt sofort bestehende Zeilen (keine Leichen)."""
+    from app.services.semantic_index import purge_excluded_documents
+
+    paths = [p.strip() for p in (body.excluded_paths or []) if p and p.strip()]
+    await _merge_settings(db, user, {"search_excluded_paths": paths})
+    purged = 0
+    try:
+        purged = await purge_excluded_documents(db, paths)
+        await db.commit()
+    except Exception:  # noqa: BLE001 - Speichern der Liste darf trotzdem gelingen
+        await db.rollback()
+    return SearchIndexUpdateResponse(excluded_paths=paths, purged=purged)
+
+
 # --- Integrations-Einstellungen (Pipedrive etc.) ---
 
 class IntegrationSettings(BaseModel):

@@ -24,11 +24,13 @@ def _fh(id_, name, snippet=None, size=100, is_folder=False, mime="application/pd
     )
 
 
-def _idx(source_type, source_id, title, snippet="s", url="u", mime="application/pdf"):
+def _idx(source_type, source_id, title, snippet="s", url="u", mime="application/pdf",
+         matched_keyword=False):
     """Roh-Index-Treffer, wie ihn ``hybrid_search`` liefert (vor Normalisierung)."""
     return {
         "source_type": source_type, "source_id": source_id, "title": title,
         "url": url, "mime": mime, "snippet": snippet, "score": 0.5,
+        "matched_keyword": matched_keyword,
     }
 
 
@@ -169,3 +171,41 @@ class TestPresenceThroughRetrieval:
     def test_empty_lists_are_ignored(self):
         out = _merge_documents([], [], _index_candidates([_idx("onedrive", "X", "a.pdf")]))
         assert len(out) == 1
+
+
+class TestKeywordFirst:
+    """Keyword-gedeckte Treffer stehen immer vor rein-semantischen -- unabhaengig vom
+    RRF-Score (der nur innerhalb der Gruppe entscheidet). Nichts wird entfernt.
+    """
+
+    def test_keyword_hit_ranks_above_higher_scored_semantic_only(self):
+        # Rein-semantischer Treffer mit KUENSTLICH hohem Score (in drei Ranglisten an
+        # Rang 0), Keyword-Treffer nur einmal -> niedrigerer Score.
+        noise = _index_candidates([_idx("onedrive", "NOISE", "Rohdaten.xlsx", matched_keyword=False)])
+        real = _index_candidates([_idx("email", "REAL", "Vertrag Merz.pdf", matched_keyword=True)])
+        out = _merge_documents(noise, noise, noise, real)
+        assert out[0].title == "Vertrag Merz.pdf"
+        assert out[0].matched_keyword is True
+        assert out[-1].matched_keyword is False
+        # Recall bleibt: beide Treffer sind vorhanden.
+        assert {d.title for d in out} == {"Vertrag Merz.pdf", "Rohdaten.xlsx"}
+
+    def test_live_sources_are_keyword_backed(self):
+        assert _file_candidates([_fh("A", "Doc.pdf")])[0]["matched_keyword"] is True
+        assert _index_candidates([_idx("onedrive", "B", "Other.pdf")])[0]["matched_keyword"] is False
+
+    def test_keyword_flag_sticky_across_merge(self):
+        # Dieselbe Datei live (keyword) UND als semantischer Index-Treffer -> keyword.
+        idx = _index_candidates([_idx("onedrive", "B", "Report.pdf", matched_keyword=False)])
+        live = _file_candidates([_fh("A", "Report.pdf")])
+        out = _merge_documents(idx, live)  # Index zuerst (semantik-only), dann Live
+        assert len(out) == 1
+        assert out[0].matched_keyword is True
+
+    def test_all_semantic_only_keeps_score_order(self):
+        # Ohne jeden Keyword-Treffer bleibt die bisherige (Score-)Reihenfolge erhalten.
+        a = _index_candidates([_idx("onedrive", "A", "A.pdf", matched_keyword=False)])
+        b = _index_candidates([_idx("onedrive", "B", "B.pdf", matched_keyword=False)])
+        out = _merge_documents(a, a, b)  # A hat hoeheren Score (zwei Listen)
+        assert out[0].title == "A.pdf"
+        assert all(d.matched_keyword is False for d in out)

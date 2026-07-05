@@ -84,6 +84,7 @@ interface DocHit {
   mime_type: string | null;
   snippet: string | null;
   score: number | null;
+  matched_keyword?: boolean; // true = klarer Keyword-Treffer, false = nur semantisch
 }
 
 type ResultItem =
@@ -113,8 +114,9 @@ const SECTION_LABELS: Record<ResultItem['kind'], string> = {
 // (nur in der Dokument-/E-Mail-Sektion). Navigations-Ziel für die Tastatursteuerung:
 // ein Cluster-Header ist selbst navigierbar (Enter = auf-/zuklappen).
 type DisplayRow =
-  | { kind: 'item'; item: ResultItem }
-  | { kind: 'cluster'; key: string; label: string; count: number; members: DocHit[] };
+  | { kind: 'item'; item: ResultItem; dimmed?: boolean }
+  | { kind: 'cluster'; key: string; label: string; count: number; members: DocHit[]; dimmed?: boolean }
+  | { kind: 'divider'; label: string };
 type NavTarget =
   | { kind: 'item'; item: ResultItem }
   | { kind: 'clusterHeader'; key: string };
@@ -238,14 +240,31 @@ export function SearchDialog({
   // Anzeige-Modell: In der Dokument-/E-Mail-Sektion werden Serien (Rechnungs-Reihen,
   // E-Mail-Threads) zu aufklappbaren Cluster-Zeilen verdichtet; übrige Sektionen 1:1.
   const displaySections = useMemo(() => {
+    // Baut Cluster-/Einzelzeilen für eine Doc-Trefferliste (optional abgeschwächt).
+    const buildDocRows = (hits: DocHit[], dimmed: boolean): DisplayRow[] =>
+      clusterDocHits<DocHit>(hits).map((r) =>
+        r.kind === 'cluster'
+          ? { kind: 'cluster', key: r.key, label: r.label, count: r.count, members: r.members, dimmed }
+          : { kind: 'item', item: { kind: 'doc', data: r.hit }, dimmed },
+      );
+
     const sections = grouped.map((section) => {
       if (section.items.length > 0 && section.items[0].kind === 'doc') {
         const hits = section.items.map((it) => (it as { kind: 'doc'; data: DocHit }).data);
-        const rows: DisplayRow[] = clusterDocHits<DocHit>(hits).map((r) =>
-          r.kind === 'cluster'
-            ? { kind: 'cluster', key: r.key, label: r.label, count: r.count, members: r.members }
-            : { kind: 'item', item: { kind: 'doc', data: r.hit } },
-        );
+        // Keyword-First-Differenzierung: klare Treffer (Begriff steht wirklich drin)
+        // oben; rein-semantische Treffer darunter, abgeschwächt, unter einem Trenner.
+        // Backend liefert bereits keyword-first sortiert -> reine Partition, kein Reorder.
+        const strong = hits.filter((h) => h.matched_keyword);
+        const related = hits.filter((h) => !h.matched_keyword);
+        const rows: DisplayRow[] = [...buildDocRows(strong, false)];
+        if (related.length > 0) {
+          // Trenner nur, wenn es auch klare Treffer darüber gibt; sonst (rein
+          // konzeptuelle Query) die verwandten Treffer normal, nicht abgeschwächt.
+          if (strong.length > 0) {
+            rows.push({ kind: 'divider', label: 'Möglicherweise verwandt' });
+          }
+          rows.push(...buildDocRows(related, strong.length > 0));
+        }
         return { label: section.label, rows };
       }
       return {
@@ -272,12 +291,13 @@ export function SearchDialog({
       for (const row of section.rows) {
         if (row.kind === 'item') {
           targets.push({ kind: 'item', item: row.item });
-        } else {
+        } else if (row.kind === 'cluster') {
           targets.push({ kind: 'clusterHeader', key: row.key });
           if (expandedSeries.has(row.key)) {
             for (const m of row.members) targets.push({ kind: 'item', item: { kind: 'doc', data: m } });
           }
         }
+        // 'divider' ist rein visuell und nicht navigierbar -> überspringen.
       }
     }
     return targets;
@@ -470,7 +490,7 @@ export function SearchDialog({
 
   // Einzel-Doc-Zeile (fusioniertes Dokument / E-Mail). Wird sowohl für Einzeltreffer
   // als auch für aufgeklappte Cluster-Mitglieder (``indented``) verwendet.
-  const renderDocRow = (h: DocHit, idx: number, indented: boolean) => {
+  const renderDocRow = (h: DocHit, idx: number, indented: boolean, dimmed = false) => {
     const isActive = idx === activeIndex;
     const isEmail = h.source_type === 'email';
     const typeLabel = fileTypeLabel(h.mime_type, h.title, h.source_type);
@@ -482,7 +502,7 @@ export function SearchDialog({
         onMouseEnter={() => setActiveIndex(idx)}
         className={`flex w-full items-start gap-3 py-2.5 text-left transition-colors ${
           indented ? 'pl-11 pr-4' : 'px-4'
-        } ${
+        } ${dimmed && !isActive ? 'opacity-60' : ''} ${
           isActive
             ? 'bg-indigo-50 dark:bg-indigo-950/40'
             : 'hover:bg-gray-50 dark:hover:bg-gray-800/50'
@@ -652,12 +672,28 @@ export function SearchDialog({
                   {section.label}
                 </div>
                 {section.rows.map((row) => {
+                  // Trenner "Möglicherweise verwandt": rein visuell, nicht navigierbar,
+                  // erhöht runningIndex NICHT (sonst würde die Tastatur-Navigation zählen).
+                  if (row.kind === 'divider') {
+                    return (
+                      <div
+                        key={`divider-${section.label}-${row.label}`}
+                        className="flex items-center gap-2 px-4 pb-1 pt-3 text-[11px] font-medium uppercase tracking-wider text-gray-400 dark:text-gray-500"
+                      >
+                        <span className="h-px flex-1 bg-gray-200 dark:bg-gray-700" />
+                        {row.label}
+                        <span className="h-px flex-1 bg-gray-200 dark:bg-gray-700" />
+                      </div>
+                    );
+                  }
+
                   // Serien-Cluster: aufklappbare Kopfzeile + (bei Expansion) Mitglieder.
                   if (row.kind === 'cluster') {
                     runningIndex++;
                     const headerIdx = runningIndex;
                     const headerActive = headerIdx === activeIndex;
                     const expanded = expandedSeries.has(row.key);
+                    const dimmed = row.dimmed && !headerActive;
                     // Repräsentant der Serie: alle Mitglieder teilen den source_type
                     // (Serienschlüssel ist danach präfixt) -> Typ-Icon/Badge wie in
                     // den Einzelzeilen, damit man dem Cluster den Typ direkt ansieht.
@@ -671,12 +707,13 @@ export function SearchDialog({
                           onClick={() => toggleSeries(row.key)}
                           onMouseEnter={() => setActiveIndex(headerIdx)}
                           className={`flex w-full items-center gap-3 px-4 py-2.5 text-left transition-colors ${
+                            dimmed ? 'opacity-60' : ''
+                          } ${
                             headerActive
                               ? 'bg-indigo-50 dark:bg-indigo-950/40'
                               : 'hover:bg-gray-50 dark:hover:bg-gray-800/50'
                           }`}
                         >
-                          <ChevronIcon className={`h-4 w-4 shrink-0 text-gray-400 transition-transform dark:text-gray-500 ${expanded ? 'rotate-90' : ''}`} />
                           <span className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full ${
                             clusterIsEmail
                               ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300'
@@ -684,6 +721,7 @@ export function SearchDialog({
                           }`}>
                             {clusterIsEmail ? <MailIcon className="h-4 w-4" /> : <FileSearchIcon className="h-4 w-4" />}
                           </span>
+                          <ChevronIcon className={`h-4 w-4 shrink-0 text-gray-400 transition-transform dark:text-gray-500 ${expanded ? 'rotate-90' : ''}`} />
                           <div className="min-w-0 flex-1">
                             <p className="truncate text-sm font-medium text-gray-900 dark:text-white">
                               {row.label}
@@ -706,13 +744,14 @@ export function SearchDialog({
                         {expanded &&
                           row.members.map((m) => {
                             runningIndex++;
-                            return renderDocRow(m, runningIndex, true);
+                            return renderDocRow(m, runningIndex, true, row.dimmed);
                           })}
                       </Fragment>
                     );
                   }
 
                   const item = row.item;
+                  const rowDimmed = row.dimmed ?? false;
                   runningIndex++;
                   const idx = runningIndex;
                   const isActive = idx === activeIndex;
@@ -947,7 +986,7 @@ export function SearchDialog({
 
                   // doc (fusioniertes Dokument / E-Mail mit Snippet-Passage)
                   if (item.kind === 'doc') {
-                    return renderDocRow(item.data, idx, false);
+                    return renderDocRow(item.data, idx, false, rowDimmed);
                   }
 
                   return null;

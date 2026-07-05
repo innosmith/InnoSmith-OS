@@ -5,7 +5,7 @@ COMPOSE_SHARED = docker compose -f docker/docker-compose.yml
 COMPOSE_INT    = $(COMPOSE_SHARED) -f docker/docker-compose.integration.yml --profile clamav
 COMPOSE_PROD   = docker compose -p taskpilot-prod --env-file .env.prod -f docker/docker-compose.prod.yml
 
-.PHONY: help dev int prod build down logs-int logs-prod status health vendor sandbox sandbox-executor test test-smoke test-contract test-e2e test-explore test-all reset-dev schema-int seed-int backup-prod backup-schedule backup-unschedule backup-status
+.PHONY: help dev int prod build down logs-int logs-prod logs-indexer status health vendor sandbox sandbox-executor test test-smoke test-contract test-e2e test-explore test-all reset-dev schema-int seed-int backup-prod backup-schedule backup-unschedule backup-status
 
 help: ## Zeigt diese Hilfe
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | \
@@ -88,6 +88,9 @@ logs-backend-int: ## Nur Backend-Int Logs
 
 logs-backend-prod: ## Nur Backend-Prod Logs
 	docker logs -f taskpilot-backend-prod
+
+logs-indexer: ## Nur Index-Daemon-Prod Logs (Vektorisierung)
+	docker logs -f taskpilot-indexer-prod
 
 # ── Status ────────────────────────────────────────────────
 

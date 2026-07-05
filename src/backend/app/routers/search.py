@@ -509,6 +509,8 @@ async def _search_emails_live(term: str) -> list[dict]:
                 "url": m.get("webLink"),
                 "mime_type": "message/rfc822",
                 "snippet": snippet or None,
+                # Graph $search ist keyword-basiert -> verlaessliches Relevanzsignal.
+                "matched_keyword": True,
             })
         return out
     except Exception as exc:
@@ -579,6 +581,7 @@ class SemanticHit(BaseModel):
     chunk_index: int | None = None
     score: float | None = None
     similarity: float | None = None
+    matched_keyword: bool = False
 
 
 class SemanticSearchResults(BaseModel):
@@ -620,6 +623,7 @@ class DocHit(BaseModel):
     mime_type: str | None = None
     snippet: str | None = None
     score: float | None = None
+    matched_keyword: bool = False
 
 
 class DocumentSearchResults(BaseModel):
@@ -656,6 +660,8 @@ def _file_candidates(hits: list[FileHit]) -> list[dict]:
             "url": f.web_url,
             "mime_type": f.mime_type,
             "snippet": f.snippet,
+            # Microsoft Search API ist keyword-basiert -> verlaessliches Relevanzsignal.
+            "matched_keyword": True,
         }
         for f in hits
         if not f.is_folder
@@ -672,6 +678,7 @@ def _index_candidates(items: list[dict]) -> list[dict]:
             "url": it.get("url"),
             "mime_type": it.get("mime"),
             "snippet": it.get("snippet"),
+            "matched_keyword": it.get("matched_keyword", False),
         }
         for it in items
     ]
@@ -707,6 +714,7 @@ def _merge_documents(*ranklists: list[dict], k: int = _DOC_RRF_K) -> list[DocHit
                     "url": it.get("url"),
                     "mime_type": it.get("mime_type"),
                     "snippet": it.get("snippet"),
+                    "matched_keyword": bool(it.get("matched_keyword")),
                 }
                 order.append(key)
                 continue
@@ -716,8 +724,16 @@ def _merge_documents(*ranklists: list[dict], k: int = _DOC_RRF_K) -> list[DocHit
                 existing["url"] = it.get("url")
             if not existing.get("mime_type"):
                 existing["mime_type"] = it.get("mime_type")
+            # Keyword-Deckung ist sticky: sobald EINE Quelle den Treffer per Keyword
+            # gefunden hat, gilt er als klarer Treffer.
+            if it.get("matched_keyword"):
+                existing["matched_keyword"] = True
 
-    ranked = sorted(order, key=lambda key: scores[key], reverse=True)
+    # Keyword-First: klare (keyword-gedeckte) Treffer immer vor rein-semantische;
+    # innerhalb jeder Gruppe entscheidet der RRF-Score. Deterministisch, entfernt nichts.
+    # Bei rein-konzeptuellen Queries ohne Keyword-Treffer bleibt die semantische
+    # Reihenfolge erhalten (alle matched_keyword=False -> reiner Score-Sort).
+    ranked = sorted(order, key=lambda key: (merged[key]["matched_keyword"], scores[key]), reverse=True)
     out: list[DocHit] = []
     for key in ranked:
         d = merged[key]

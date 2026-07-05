@@ -84,3 +84,25 @@ class TestRrfFuse:
 
     def test_empty_inputs(self):
         assert rrf_fuse([], []) == []
+
+    def test_matched_keyword_flag(self):
+        # A nur semantisch, B in beiden, C nur Keyword.
+        semantic = [
+            {"source_type": "onedrive", "source_id": "A", "snippet": "s-a", "similarity": 0.5},
+            {"source_type": "email", "source_id": "B", "snippet": "s-b", "similarity": 0.4},
+        ]
+        keyword = [
+            {"source_type": "email", "source_id": "B", "snippet": "k-b"},
+            {"source_type": "onedrive", "source_id": "C", "snippet": "k-c"},
+        ]
+        fused = rrf_fuse(semantic, keyword)
+        flags = {(f["source_type"], f["source_id"]): f["matched_keyword"] for f in fused}
+        assert flags[("onedrive", "A")] is False   # nur semantisch
+        assert flags[("email", "B")] is True        # in beiden -> Keyword-gedeckt
+        assert flags[("onedrive", "C")] is True      # nur Keyword
+
+    def test_similarity_preserved_for_semantic_hit(self):
+        semantic = [{"source_type": "onedrive", "source_id": "A", "snippet": "s", "similarity": 0.42}]
+        fused = rrf_fuse(semantic, [])
+        assert fused[0]["similarity"] == 0.42
+        assert fused[0]["matched_keyword"] is False

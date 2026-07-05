@@ -31,6 +31,7 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile.backend
+    image: taskpilot-backend:prod
     container_name: taskpilot-backend-prod
     ports:
       - "127.0.0.1:8200:8000"
@@ -71,6 +72,34 @@ services:
       timeout: 5s
       retries: 3
       start_period: 15s
+
+  # Dedizierter Index-Daemon: selbes Image wie backend-prod, aber ohne API.
+  # Uebernimmt die gesamte Vektorisierung (E-Mails ueber alle Ordner voll paginiert
+  # + OneDrive-Dokumente mit Ausschlussfilter) in einer Endlosschleife. Der
+  # In-Process-Scheduler im Backend ist per search_index_in_process=False deaktiviert.
+  indexer-prod:
+    image: taskpilot-backend:prod
+    container_name: taskpilot-indexer-prod
+    command: ["python", "-m", "app.scripts.index_daemon"]
+    env_file: ../.env.prod
+    environment:
+      TP_APP_ENV: prod
+      TP_DB_HOST: postgres-prod
+      TP_DB_PORT: "5432"
+      TP_LITELLM_BASE_URL: http://taskpilot-litellm:4000
+      TP_OLLAMA_BASE_URL: http://host.docker.internal:11434
+      TP_MCP_BASE_DIR: /app
+    volumes:
+      - ${HOME}/.hermes:/home/taskpilot/.hermes
+    depends_on:
+      postgres-prod:
+        condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - default
+      - taskpilot-shared
+    restart: unless-stopped
 
   frontend-prod:
     build:

@@ -72,7 +72,7 @@ interface TriageTestResult {
   triage_class: string | null;
 }
 
-type SettingsTab = 'profile' | 'display' | 'cockpit' | 'finance' | 'finance_analysis' | 'llm' | 'integrations' | 'triage' | 'team' | 'intelligence';
+type SettingsTab = 'profile' | 'display' | 'cockpit' | 'finance' | 'finance_analysis' | 'llm' | 'integrations' | 'triage' | 'search_index' | 'team' | 'intelligence';
 
 export function SettingsPage() {
   const [searchParams] = useSearchParams();
@@ -110,6 +110,9 @@ export function SettingsPage() {
   const [briefingMsg, setBriefingMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
   const [hiddenFolders, setHiddenFolders] = useState<string[]>(['ArchivSorted', 'Conversation History', 'Outbox']);
   const [hiddenFolderInput, setHiddenFolderInput] = useState('');
+  const [excludedPaths, setExcludedPaths] = useState<string[]>([]);
+  const [excludedInput, setExcludedInput] = useState('');
+  const [searchIndexMsg, setSearchIndexMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
   const [integrationsActiveEnv, setIntegrationsActiveEnv] = useState(true);
   const [appEnv, setAppEnv] = useState('prod');
 
@@ -149,10 +152,11 @@ export function SettingsPage() {
       setProfileEmail(p.email);
       setMfaEnabled(!!p.mfa_enabled);
       if (p.role === 'owner') {
-        const [s, u, ts] = await Promise.all([
+        const [s, u, ts, si] = await Promise.all([
           api.get<UserSettingsData>('/api/settings'),
           api.get<ManagedUser[]>('/api/auth/users'),
           api.get<TriageSettingsData>('/api/settings/triage'),
+          api.get<{ excluded_paths: string[] | null }>('/api/settings/search-index'),
         ]);
         setSettings(s);
         setUsers(u);
@@ -162,6 +166,7 @@ export function SettingsPage() {
         if (ts.inbox_hidden_folders) setHiddenFolders(ts.inbox_hidden_folders);
         setIntegrationsActiveEnv(ts.integrations_active_env ?? true);
         setAppEnv(ts.app_env ?? 'prod');
+        if (si.excluded_paths) setExcludedPaths(si.excluded_paths);
       }
     } catch { /* */ }
     finally { setLoading(false); }
@@ -342,6 +347,26 @@ export function SettingsPage() {
       setTimeout(() => setTriageMsg(null), 3000);
     } catch {
       setTriageMsg({ type: 'err', text: 'Fehler beim Speichern' });
+    }
+  };
+
+  const saveSearchIndexSettings = async () => {
+    try {
+      const res = await api.put<{ excluded_paths: string[] | null; purged: number }>(
+        '/api/settings/search-index',
+        { excluded_paths: excludedPaths },
+      );
+      if (res.excluded_paths) setExcludedPaths(res.excluded_paths);
+      const purged = res.purged || 0;
+      setSearchIndexMsg({
+        type: 'ok',
+        text: purged > 0
+          ? `Gespeichert -- ${purged} bereits indexierte Einträge bereinigt`
+          : 'Ausschlussliste gespeichert',
+      });
+      setTimeout(() => setSearchIndexMsg(null), 4000);
+    } catch {
+      setSearchIndexMsg({ type: 'err', text: 'Fehler beim Speichern' });
     }
   };
 
@@ -536,6 +561,7 @@ export function SettingsPage() {
         { id: 'llm', label: 'LLM-Modelle' },
         { id: 'integrations', label: 'Integrationen' },
         { id: 'triage', label: 'E-Mail-Triage' },
+        { id: 'search_index', label: 'Suchindex' },
         { id: 'team', label: 'Team' },
       ]
     : [{ id: 'profile', label: 'Profil' }];
@@ -1790,6 +1816,88 @@ export function SettingsPage() {
                     </div>
                   </div>
                 )}
+              </div>
+            </section>
+          )}
+
+          {/* ── Suchindex ── */}
+          {tab === 'search_index' && isOwner && (
+            <section>
+              <h2 className="mb-4 text-lg font-semibold text-gray-900 dark:text-white">Suchindex</h2>
+              <div className="space-y-6">
+                <div className="rounded-lg border border-gray-200 bg-white/60 p-4 text-sm text-gray-600 dark:border-gray-700 dark:bg-gray-800/40 dark:text-gray-300">
+                  Die Vektorisierung läuft permanent als eigener Dienst und indexiert dein
+                  vollständiges E-Mail-Archiv (alle Ordner ausser Junk und Gelöschte Elemente)
+                  sowie deine OneDrive-Dokumente. Über die Ausschlussliste hältst du grosse,
+                  themenfremde Ordner aus der Suche heraus.
+                </div>
+
+                <div>
+                  <label className="mb-2 block text-sm font-medium text-gray-700 dark:text-gray-300">
+                    Ausgeschlossene OneDrive-Pfade
+                  </label>
+                  <p className="mb-2 text-xs text-gray-500 dark:text-gray-400">
+                    Pfade relativ zum OneDrive-Stamm (z. B. <code>/Shared/KnowledgeFlow/bundesgericht-steuerrecht</code>).
+                    Dokumente unterhalb dieser Pfade werden weder indexiert noch angezeigt; bereits
+                    indexierte Einträge werden beim Speichern entfernt.
+                  </p>
+                  <div className="flex flex-wrap gap-2 mb-2">
+                    {excludedPaths.map(p => (
+                      <span key={p} className="inline-flex items-center gap-1 rounded-full bg-gray-100 px-3 py-1 text-xs font-medium text-gray-700 dark:bg-gray-700 dark:text-gray-300">
+                        {p}
+                        <button
+                          onClick={() => setExcludedPaths(prev => prev.filter(x => x !== p))}
+                          className="ml-0.5 text-gray-400 hover:text-red-500"
+                        >
+                          ×
+                        </button>
+                      </span>
+                    ))}
+                    {excludedPaths.length === 0 && (
+                      <span className="text-xs text-gray-400 dark:text-gray-500">Keine Ausschlüsse -- alles wird indexiert.</span>
+                    )}
+                  </div>
+                  <div className="flex gap-2">
+                    <input
+                      type="text"
+                      value={excludedInput}
+                      onChange={e => setExcludedInput(e.target.value)}
+                      onKeyDown={e => {
+                        if (e.key === 'Enter' && excludedInput.trim()) {
+                          const name = excludedInput.trim();
+                          if (!excludedPaths.includes(name)) setExcludedPaths(prev => [...prev, name]);
+                          setExcludedInput('');
+                        }
+                      }}
+                      placeholder="/Shared/… Pfad eingeben"
+                      className="flex-1 rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-sm text-gray-900 focus:border-indigo-500 focus:outline-none dark:border-gray-700 dark:bg-gray-800 dark:text-white font-mono"
+                    />
+                    <button
+                      onClick={() => {
+                        const name = excludedInput.trim();
+                        if (name && !excludedPaths.includes(name)) setExcludedPaths(prev => [...prev, name]);
+                        setExcludedInput('');
+                      }}
+                      className="shrink-0 rounded-lg bg-gray-200 px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-300 dark:bg-gray-700 dark:text-gray-300 dark:hover:bg-gray-600"
+                    >
+                      Hinzufügen
+                    </button>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-3">
+                  <button
+                    onClick={saveSearchIndexSettings}
+                    className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-indigo-700"
+                  >
+                    Speichern & bereinigen
+                  </button>
+                  {searchIndexMsg && (
+                    <span className={`text-sm ${searchIndexMsg.type === 'ok' ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-600 dark:text-red-400'}`}>
+                      {searchIndexMsg.text}
+                    </span>
+                  )}
+                </div>
               </div>
             </section>
           )}

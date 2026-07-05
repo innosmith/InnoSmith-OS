@@ -158,7 +158,15 @@ class Settings(BaseSettings):
     search_embed_dim: int = 2560
     # Ingest-Scheduler (lokale Embeddings, best-effort)
     search_index_interval_seconds: int = 86400  # taeglich
-    search_index_mail_top: int = 500            # neueste E-Mails pro Lauf
+    search_index_mail_top: int = 500            # Fallback fuer den alten One-Off-Aufruf
+    # In-Process-Scheduler im Backend. Default AUS: die Indexierung laeuft als
+    # dedizierter Daemon-Container (app.scripts.index_daemon), damit die schwere
+    # Embedding-Arbeit den API-Prozess nicht konkurrenziert und keine Doppelarbeit
+    # (Backend + Daemon) entsteht.
+    search_index_in_process: bool = False
+    # Volle E-Mail-Pagination (nextLink): Seitengroesse + Obergrenze je Ordner.
+    search_index_mail_page_size: int = 200      # $top je Graph-Seite
+    search_index_mail_max_per_folder: int = 0   # 0 = unbegrenzt (Voll-Archiv)
     search_index_max_file_mb: int = 25          # groessere Dateien ueberspringen
     search_index_max_chunks_per_doc: int = 300  # Ausreisser-Cap (riesige PDFs)
     # Chunking (Zeichen)

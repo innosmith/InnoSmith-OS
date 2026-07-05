@@ -24,16 +24,30 @@ import os
 import re
 from datetime import datetime, timezone
 
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.database import async_session
+from app.models import User
 from app.services.context_resolver import _extract_text
 from app.services.embeddings import embed_text, to_pgvector
 from app.services.learning import html_to_text, strip_quoted_history
 
 logger = logging.getLogger("taskpilot.semantic_index")
+
+# OneDrive-Pfade (relativ zu Drive-Root), die standardmaessig NICHT indexiert werden.
+# Der KnowledgeFlow-Korpus (Bundesgerichts-Entscheide) ist ein themenfremder Fremd-
+# korpus, der den persoenlichen Such-Index sonst dominiert (>50 % der Chunks) und
+# ueber reine Vektor-Naehe irrelevante Treffer liefert. Ueber die Owner-Settings
+# (``search_excluded_paths``) frei konfigurierbar; diese Konstante ist nur der
+# Default, wenn noch nichts konfiguriert wurde.
+_DEFAULT_EXCLUDED_PATHS: tuple[str, ...] = (
+    "/Shared/KnowledgeFlow/bundesgericht-steuerrecht",
+)
+
+# Praefix, mit dem Graph den Drive-Root in ``parentReference.path`` ausweist.
+_DRIVE_ROOT_PREFIX = "/drive/root:"
 
 # Endungen für den semantischen SUCH-Index -- bewusst ENG gehalten: nur echte
 # Nutzdokumente. Code-/Config-/generische Struktur-Dateien (.py, .js, .ts, .json,
@@ -42,9 +56,6 @@ logger = logging.getLogger("taskpilot.semantic_index")
 # Der Agent-Kontext (context_resolver.ALLOWED_TEXT_EXTENSIONS) bleibt breit -- dort
 # sind Code/Configs bewusst gewollt. Bilder/Audio/Video/Archive fehlen ebenfalls.
 _DOC_EXTENSIONS = {".pdf", ".docx", ".xlsx", ".md", ".txt", ".csv"}
-
-# E-Mail-Ordner, die in den Index aufgenommen werden.
-_MAIL_FOLDERS = ("inbox", "sentitems", "archive")
 
 _MIN_CHUNK_CHARS = 20
 
@@ -93,6 +104,83 @@ def _ext_of(name: str) -> str:
 def is_indexable_file(name: str) -> bool:
     """True, wenn die Datei anhand ihrer Endung als Text indexiert werden soll."""
     return _ext_of(name) in _DOC_EXTENSIONS
+
+
+def _normalize_drive_path(path: str | None) -> str:
+    """Reduziert einen Graph-Pfad auf den Teil relativ zum Drive-Root, lowercase.
+
+    ``/drive/root:/Shared/KnowledgeFlow/…`` -> ``/shared/knowledgeflow/…``. So lassen
+    sich Item-Pfade robust mit den (relativ notierten) Ausschluss-Praefixen vergleichen.
+    """
+    p = (path or "").strip()
+    idx = p.find(_DRIVE_ROOT_PREFIX)
+    if idx >= 0:
+        p = p[idx + len(_DRIVE_ROOT_PREFIX):]
+    if not p.startswith("/"):
+        p = "/" + p
+    return p.lower()
+
+
+def _path_is_excluded(item_path: str | None, excluded: list[str]) -> bool:
+    """True, wenn der Item-Pfad unter einem der Ausschluss-Praefixe liegt."""
+    if not excluded:
+        return False
+    norm = _normalize_drive_path(item_path)
+    for prefix in excluded:
+        pref = _normalize_drive_path(prefix)
+        if pref and (norm == pref or norm.startswith(pref.rstrip("/") + "/") or norm.startswith(pref)):
+            return True
+    return False
+
+
+async def _load_excluded_paths(db: AsyncSession) -> list[str]:
+    """Laedt die Ausschlussliste aus den Owner-Settings (Default, falls nie gesetzt).
+
+    Fehlt der Key ``search_excluded_paths`` vollstaendig, gelten die Defaults; ist er
+    vorhanden (auch als leere Liste), wird die explizite Owner-Wahl respektiert.
+    """
+    row = await db.execute(select(User.settings).where(User.role == "owner").limit(1))
+    settings = row.scalar_one_or_none() or {}
+    if "search_excluded_paths" not in settings:
+        return list(_DEFAULT_EXCLUDED_PATHS)
+    val = settings.get("search_excluded_paths")
+    if not isinstance(val, list):
+        return list(_DEFAULT_EXCLUDED_PATHS)
+    return [str(p) for p in val if str(p).strip()]
+
+
+async def purge_excluded_documents(db: AsyncSession, excluded: list[str]) -> int:
+    """Loescht bereits indexierte OneDrive-Zeilen, die unter einem Ausschlusspfad liegen.
+
+    Sorgt dafuer, dass nach Aktivierung eines Ausschlusses keine Leichen im Index
+    verbleiben. Match ueber ``metadata->>'path'`` (der gespeicherte Elternpfad).
+    Gibt die Anzahl geloeschter Chunk-Zeilen zurueck.
+    """
+    total = 0
+    for prefix in excluded:
+        pref = _normalize_drive_path(prefix)
+        if not pref:
+            continue
+        # Praefix-Match gegen den normalisierten Drive-Pfad. ``metadata->>'path'``
+        # beginnt mit ``/drive/root:`` -- wir vergleichen den Teil danach.
+        res = await db.execute(
+            text(
+                """
+                DELETE FROM semantic_documents
+                WHERE source_type = 'onedrive'
+                  AND lower(
+                        substring(metadata->>'path' from position(:root in metadata->>'path') + :rootlen)
+                      ) LIKE :like
+                """
+            ),
+            {
+                "root": _DRIVE_ROOT_PREFIX,
+                "rootlen": len(_DRIVE_ROOT_PREFIX),
+                "like": pref.rstrip("/") + "%",
+            },
+        )
+        total += res.rowcount or 0
+    return total
 
 
 def chunk_text(body: str, size: int, overlap: int) -> list[str]:
@@ -259,12 +347,18 @@ async def _index_email(db: AsyncSession, client, message_id: str) -> int:
     )
 
 
-async def _index_document(db: AsyncSession, client, item: dict) -> int:
+async def _index_document(
+    db: AsyncSession, client, item: dict, excluded: list[str] | None = None
+) -> int:
     """Indexiert ein OneDrive-Dokument. Skip, wenn unverändert (lastModifiedDateTime)."""
     cfg = get_settings()
     item_id = item.get("id")
     name = item.get("name") or ""
     if not item_id or not is_indexable_file(name):
+        return 0
+    # Defense-in-depth: ausgeschlossene Pfade auch hier hart abweisen (der Walk
+    # filtert bereits vorher -- dies schuetzt bei Direktaufruf/Race).
+    if excluded and _path_is_excluded((item.get("parentReference") or {}).get("path"), excluded):
         return 0
     size = item.get("size") or 0
     if size > cfg.search_index_max_file_mb * 1024 * 1024:
@@ -323,43 +417,73 @@ async def sync_semantic_index(
         logger.info("Semantic-Index-Sync übersprungen: Graph nicht konfiguriert")
         return stats
 
-    limit = mail_top or cfg.search_index_mail_top
+    # Ausschlussliste (Owner-Settings) laden und bestehende Leichen bereinigen --
+    # so verschwinden ausgeschlossene Pfade auch aus einem bereits gefuellten Index.
+    async with async_session() as db:
+        excluded = await _load_excluded_paths(db)
+        if excluded:
+            try:
+                purged = await purge_excluded_documents(db, excluded)
+                await db.commit()
+                if purged:
+                    logger.info("Ausschluss-Purge: %d Zeilen entfernt (%s)", purged, excluded)
+            except Exception as exc:  # noqa: BLE001
+                await db.rollback()
+                logger.warning("Ausschluss-Purge fehlgeschlagen: %s", exc)
+
+    # Seitengroesse/Cap fuer die E-Mail-Pagination. ``mail_top`` (One-Off) begrenzt je
+    # Ordner; im Daemon-Betrieb ist der Cap 0 (unbegrenzt = Voll-Archiv).
+    page_size = cfg.search_index_mail_page_size
+    per_folder_cap = mail_top if mail_top is not None else cfg.search_index_mail_max_per_folder
     try:
-        # 1) E-Mails (neueste je Ordner)
+        # 1) E-Mails: ALLE Ordner (ausser Junk/Geloescht), vollstaendig paginiert.
         if index_mails:
             seen_ids: set[str] = set()
-            for folder in _MAIL_FOLDERS:
+            try:
+                folders = await client.iter_all_mail_folders()
+            except Exception as exc:  # noqa: BLE001
+                logger.info("Ordner-Enumeration fehlgeschlagen: %s", exc)
+                folders = []
+            logger.info("Backfill E-Mails: %d Ordner (ohne Junk/Geloescht)", len(folders))
+            for folder in folders:
                 if _stop.is_set():
                     break
-                try:
-                    data = await client.list_emails(folder=folder, top=limit)
-                except Exception as exc:  # noqa: BLE001
-                    logger.info("Ordner %s nicht lesbar: %s", folder, exc)
+                fid = folder.get("id")
+                fname = folder.get("displayName") or fid
+                if not fid:
                     continue
-                msgs = data.get("value", [])
-                logger.info("Backfill E-Mails: Ordner '%s' -> %d Kandidaten", folder, len(msgs))
-                for i, msg in enumerate(msgs, 1):
-                    mid = msg.get("id")
-                    if not mid or mid in seen_ids:
-                        continue
-                    seen_ids.add(mid)
-                    async with async_session() as db:
-                        try:
-                            n = await _index_email(db, client, mid)
-                            await db.commit()
-                        except Exception as exc:  # noqa: BLE001
-                            await db.rollback()
-                            logger.warning("E-Mail %s nicht indexierbar: %s: %s",
-                                           mid, type(exc).__name__, exc)
-                            n = 0
-                    if n:
-                        stats["emails"] += 1
-                        stats["chunks"] += n
-                    if i % 50 == 0:
-                        logger.info(
-                            "  … %s: %d/%d verarbeitet (neu indexiert: %d, Chunks: %d)",
-                            folder, i, len(msgs), stats["emails"], stats["chunks"],
-                        )
+                processed = 0
+                try:
+                    async for msg in client.iter_folder_messages(
+                        fid, page_size=page_size, max_total=per_folder_cap or 0
+                    ):
+                        if _stop.is_set():
+                            break
+                        processed += 1
+                        mid = msg.get("id")
+                        if not mid or mid in seen_ids:
+                            continue
+                        seen_ids.add(mid)
+                        async with async_session() as db:
+                            try:
+                                n = await _index_email(db, client, mid)
+                                await db.commit()
+                            except Exception as exc:  # noqa: BLE001
+                                await db.rollback()
+                                logger.warning("E-Mail %s nicht indexierbar: %s: %s",
+                                               mid, type(exc).__name__, exc)
+                                n = 0
+                        if n:
+                            stats["emails"] += 1
+                            stats["chunks"] += n
+                        if processed % 200 == 0:
+                            logger.info(
+                                "  … Ordner '%s': %d gesichtet (neu: %d, Chunks: %d)",
+                                fname, processed, stats["emails"], stats["chunks"],
+                            )
+                except Exception as exc:  # noqa: BLE001
+                    logger.info("Ordner '%s' nicht (vollstaendig) lesbar: %s", fname, exc)
+                logger.info("  Ordner '%s' fertig: %d gesichtet", fname, processed)
 
         # 2) Dokumente (rekursiver Drive-Walk, Whitelist + Change-Detection)
         if index_docs and not _stop.is_set():
@@ -369,6 +493,13 @@ async def sync_semantic_index(
                 logger.info("Drive-Walk fehlgeschlagen: %s", exc)
                 files = []
             indexable = [f for f in files if is_indexable_file(f.get("name") or "")]
+            # Ausgeschlossene Pfade VOR dem Download entfernen (spart ggf. Tausende Downloads).
+            before_excl = len(indexable)
+            indexable = [
+                f for f in indexable
+                if not _path_is_excluded((f.get("parentReference") or {}).get("path"), excluded)
+            ]
+            skipped_excluded = before_excl - len(indexable)
             # In-Run-Dedup: Dieselbe Datei liegt im OneDrive oft physisch mehrfach
             # (verschiedene driveItem-IDs, gleicher Name + Grösse in mehreren Ordnern,
             # privat + geteilt). Ohne Dedup würde jede Kopie als eigenes Dokument
@@ -385,15 +516,15 @@ async def sync_semantic_index(
             skipped_dupes = len(indexable) - len(deduped)
             indexable = deduped
             logger.info(
-                "Backfill Dokumente: %d Dateien gesamt, %d indexierbar, %d Duplikate übersprungen",
-                len(files), len(indexable), skipped_dupes,
+                "Backfill Dokumente: %d gesamt, %d indexierbar, %d ausgeschlossen, %d Duplikate uebersprungen",
+                len(files), len(indexable), skipped_excluded, skipped_dupes,
             )
             for i, item in enumerate(indexable, 1):
                 if _stop.is_set():
                     break
                 async with async_session() as db:
                     try:
-                        n = await _index_document(db, client, item)
+                        n = await _index_document(db, client, item, excluded)
                         await db.commit()
                     except Exception as exc:  # noqa: BLE001
                         await db.rollback()
@@ -442,9 +573,17 @@ async def _loop() -> None:
 
 
 async def start_semantic_index() -> None:
-    """Startet den periodischen Ingest (Lifespan-Hook)."""
+    """Startet den periodischen Ingest (Lifespan-Hook).
+
+    Standardmaessig deaktiviert (``search_index_in_process=False``): die Indexierung
+    laeuft als dedizierter Daemon-Container (``app.scripts.index_daemon``). Nur wenn
+    das Flag explizit gesetzt ist, uebernimmt der Backend-Prozess selbst.
+    """
     global _task
     cfg = get_settings()
+    if not cfg.search_index_in_process:
+        logger.info("Semantic-Index-Scheduler in-process AUS (Daemon uebernimmt)")
+        return
     if not cfg.search_index_enabled or not cfg.integrations_active:
         logger.info("Semantic-Index-Scheduler inaktiv (enabled=%s, integrations=%s)",
                     cfg.search_index_enabled, cfg.integrations_active)
