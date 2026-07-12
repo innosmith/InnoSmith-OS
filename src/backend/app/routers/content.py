@@ -17,8 +17,8 @@ from pydantic import BaseModel
 
 from app.auth.deps import get_current_user, require_role
 from app.models import User
-from app.services import content_converter as cc
-from app.services import mapping_store
+from ai9 import content_converter as cc
+from ai9 import mapping_store
 from app.services.document_export import ConvertOptions, convert_markdown
 
 logger = logging.getLogger(__name__)

@@ -55,7 +55,7 @@ from app.routers import (
 from app.routers import settings as user_settings
 from app.routers.auth import ensure_owner_exists
 from app.services.briefing import start_briefing_scheduler, stop_briefing_scheduler
-from app.services.content_converter import start_content_converter, stop_content_converter
+from ai9.content_converter import start_content_converter, stop_content_converter
 from app.services.hermes_worker import start_hermes_worker, stop_hermes_worker
 from app.services.meetings import start_meeting_poller, stop_meeting_poller
 from app.services.notification import start_notification_scheduler, stop_notification_scheduler

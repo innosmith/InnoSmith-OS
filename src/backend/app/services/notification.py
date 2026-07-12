@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import async_session
 from app.models import AgentJob, Notification, Task, User
+from app.core.principal import get_owner
 
 logger = logging.getLogger("taskpilot.notifications")
 
@@ -259,10 +260,7 @@ async def notify_meeting_summary_ready(
 
 
 async def _get_owner(db: AsyncSession) -> User | None:
-    result = await db.execute(
-        select(User).where(User.role == "owner", User.is_active.is_(True)).limit(1)
-    )
-    return result.scalar_one_or_none()
+    return await get_owner(db, active_only=True)
 
 
 def _strip_mention_markup(text: str) -> str:

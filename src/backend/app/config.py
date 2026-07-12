@@ -19,11 +19,12 @@ class Settings(BaseSettings):
     def mfa_issuer(self) -> str:
         """Issuer-Name für TOTP (Google Authenticator etc.).
 
-        Prod → 'TaskPilot', sonst 'TaskPilot-Dev' / 'TaskPilot-Int'.
+        Leitet sich vom konfigurierbaren ``app_name`` ab (Branding pro Deployment):
+        Prod → '<app_name>', sonst '<app_name>-Dev' / '<app_name>-Int'.
         """
         if self.app_env in ("prod", "production"):
-            return "TaskPilot"
-        return f"TaskPilot-{self.app_env.capitalize()}"
+            return self.app_name
+        return f"{self.app_name}-{self.app_env.capitalize()}"
 
     # PostgreSQL
     db_host: str = "localhost"

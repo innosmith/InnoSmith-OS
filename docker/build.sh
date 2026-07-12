@@ -29,6 +29,24 @@ echo "  contentConverter: $CONTENTCONVERTER_SRC"
 cp -r "$CONTENTCONVERTER_SRC" "$VENDOR_DIR/contentconverter"
 rm -rf "$VENDOR_DIR/contentconverter/.git"
 
+# AI9-Core (privates Schwester-Repo, InnoSmith-IP). Wird wie contentConverter
+# vendored, damit das Docker-Image ohne Git-Credentials/Registry gebaut werden
+# kann. Dev nutzt stattdessen den Editable-Install (siehe requirements.txt).
+AI9_SRC="${AI9_PATH:-$HOME/dev/github/AI9}"
+
+if [ ! -d "$AI9_SRC" ]; then
+    echo "FEHLER: AI9-Core nicht gefunden unter $AI9_SRC"
+    echo "Setze AI9_PATH auf den korrekten Pfad."
+    exit 1
+fi
+
+echo "  AI9-Core: $AI9_SRC"
+cp -r "$AI9_SRC" "$VENDOR_DIR/ai9"
+rm -rf "$VENDOR_DIR/ai9/.git" \
+       "$VENDOR_DIR/ai9/.venv" \
+       "$VENDOR_DIR/ai9/.pytest_cache" \
+       "$VENDOR_DIR/ai9/.ruff_cache"
+
 echo "==> Vendor-Verzeichnis bereit."
 
 # Sandbox-Image bauen (falls Dockerfile vorhanden)

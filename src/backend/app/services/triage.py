@@ -25,7 +25,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.database import async_session
-from app.models import AgentJob, ChatTriage, EmailTriage, User
+from app.models import AgentJob, ChatTriage, EmailTriage
+from app.core.principal import get_owner
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "..", "email-graph"))
 from graph_client import GraphClient, GraphConfig  # noqa: E402
@@ -50,11 +51,7 @@ async def _is_triage_enabled_in_db() -> bool:
     """Prüft triage_enabled im Owner-Settings-JSONB (Stufe 2: Runtime-Toggle)."""
     try:
         async with async_session() as db:
-            owner = (
-                await db.execute(
-                    select(User).where(User.role == "owner").limit(1)
-                )
-            ).scalar_one_or_none()
+            owner = await get_owner(db)
             if owner is None:
                 return True
             return (owner.settings or {}).get("triage_enabled", True)

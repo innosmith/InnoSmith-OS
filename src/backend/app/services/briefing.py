@@ -22,6 +22,7 @@ from sqlalchemy import select
 
 from app.database import async_session
 from app.models import AgentJob, User
+from app.core.principal import get_owner
 
 logger = logging.getLogger("taskpilot.briefing")
 
@@ -128,11 +129,6 @@ async def _job_exists_since(db, briefing_type: str, since: datetime) -> bool:
     return result.scalar_one_or_none() is not None
 
 
-async def _get_owner(db) -> User | None:
-    result = await db.execute(select(User).where(User.role == "owner").limit(1))
-    return result.scalar_one_or_none()
-
-
 async def create_briefing_job(
     briefing_type: str,
     owner: User,
@@ -193,7 +189,7 @@ async def check_briefings_due() -> int:
     created = 0
 
     async with async_session() as db:
-        owner = await _get_owner(db)
+        owner = await get_owner(db)
         if owner is None:
             return 0
         settings = dict(owner.settings or {})

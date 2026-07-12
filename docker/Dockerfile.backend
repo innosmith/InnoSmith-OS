@@ -66,6 +66,16 @@ RUN if [ -d /opt/vendor/contentconverter ]; then \
       pip install --no-cache-dir -e "/opt/vendor/contentconverter[all]"; \
     fi
 
+# AI9-Core (privates Schwester-Repo). Wird als normales (nicht-editable) Package
+# installiert; die Laufzeit-Deps (httpx, cachetools, sqlalchemy, mcp) sind bereits
+# ueber requirements.txt gedeckt. Fehlt es, bricht der Import in app/__init__.py.
+RUN if [ -d /opt/vendor/ai9 ]; then \
+      pip install --no-cache-dir "/opt/vendor/ai9"; \
+    else \
+      echo "FEHLER: /opt/vendor/ai9 fehlt -- 'make vendor' bzw. docker/build.sh zuerst ausfuehren." >&2; \
+      exit 1; \
+    fi
+
 # NLP-Modelle fuer Anonymisierung vorabladen (vermeidet Laufzeit-Downloads)
 # spaCy: de (Primaersprache) + en (Fallback)
 RUN python -m spacy download de_core_news_lg \

@@ -74,6 +74,36 @@ interface TriageTestResult {
 
 type SettingsTab = 'profile' | 'display' | 'cockpit' | 'finance' | 'finance_analysis' | 'llm' | 'integrations' | 'triage' | 'search_index' | 'team' | 'intelligence';
 
+interface IndexSourceTotals {
+  source_type: string;
+  documents: number;
+  chunks: number;
+  last_indexed_at: string | null;
+}
+
+interface IndexStatusData {
+  running: boolean;
+  phase: string | null;
+  detail: string | null;
+  run_started_at: string | null;
+  run_finished_at: string | null;
+  heartbeat_at: string | null;
+  folders_total: number;
+  folders_done: number;
+  docs_total: number;
+  docs_done: number;
+  last_emails: number;
+  last_documents: number;
+  last_chunks: number;
+  last_error: string | null;
+  last_error_at: string | null;
+  interval_seconds: number;
+  next_run_at: string | null;
+  stale: boolean;
+  totals: IndexSourceTotals[];
+  last_indexed_at: string | null;
+}
+
 export function SettingsPage() {
   const [searchParams] = useSearchParams();
   const initialTab = (searchParams.get('tab') as SettingsTab) || 'profile';
@@ -113,6 +143,7 @@ export function SettingsPage() {
   const [excludedPaths, setExcludedPaths] = useState<string[]>([]);
   const [excludedInput, setExcludedInput] = useState('');
   const [searchIndexMsg, setSearchIndexMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
+  const [indexStatus, setIndexStatus] = useState<IndexStatusData | null>(null);
   const [integrationsActiveEnv, setIntegrationsActiveEnv] = useState(true);
   const [appEnv, setAppEnv] = useState('prod');
 
@@ -173,6 +204,22 @@ export function SettingsPage() {
   }, []);
 
   useEffect(() => { fetchData(); }, [fetchData]);
+
+  // Suchindex-Status live pollen, solange der Tab offen ist (Owner). Der Daemon
+  // schreibt den Status, das Backend liest nur -- daher genuegt einfaches Polling.
+  useEffect(() => {
+    if (tab !== 'search_index' || profile?.role !== 'owner') return;
+    let active = true;
+    const load = async () => {
+      try {
+        const st = await api.get<IndexStatusData>('/api/settings/search-index/status');
+        if (active) setIndexStatus(st);
+      } catch { /* still */ }
+    };
+    load();
+    const id = setInterval(load, 8000);
+    return () => { active = false; clearInterval(id); };
+  }, [tab, profile?.role]);
 
   useEffect(() => {
     if (tab !== 'integrations') return;
@@ -369,6 +416,36 @@ export function SettingsPage() {
       setSearchIndexMsg({ type: 'err', text: 'Fehler beim Speichern' });
     }
   };
+
+  const fmtDateTime = (s: string | null | undefined): string => {
+    if (!s) return '--';
+    const d = new Date(s);
+    if (isNaN(d.getTime())) return '--';
+    return d.toLocaleString('de-CH', {
+      day: '2-digit', month: '2-digit', year: 'numeric',
+      hour: '2-digit', minute: '2-digit',
+    });
+  };
+
+  const fmtRelative = (s: string | null | undefined): string => {
+    if (!s) return '';
+    const then = new Date(s).getTime();
+    if (isNaN(then)) return '';
+    const diff = Math.round((Date.now() - then) / 1000);
+    const abs = Math.abs(diff);
+    const past = diff >= 0;
+    let val: string;
+    if (abs < 60) val = 'gerade eben';
+    else if (abs < 3600) val = `${Math.round(abs / 60)} min`;
+    else if (abs < 86400) val = `${Math.round(abs / 3600)} h`;
+    else val = `${Math.round(abs / 86400)} Tg.`;
+    if (val === 'gerade eben') return val;
+    return past ? `vor ${val}` : `in ${val}`;
+  };
+
+  const sourceLabel = (t: string): string => (
+    { email: 'E-Mails', onedrive: 'OneDrive', upload: 'Uploads', transcript: 'Transkripte' }[t] || t
+  );
 
   const testTriage = async () => {
     setTriageTesting(true);
@@ -1830,6 +1907,127 @@ export function SettingsPage() {
                   vollständiges E-Mail-Archiv (alle Ordner ausser Junk und Gelöschte Elemente)
                   sowie deine OneDrive-Dokumente. Über die Ausschlussliste hältst du grosse,
                   themenfremde Ordner aus der Suche heraus.
+                </div>
+
+                {/* ── Verarbeitungsstatus (Live) ── */}
+                <div className="rounded-lg border border-gray-200 bg-white/60 p-4 dark:border-gray-700 dark:bg-gray-800/40">
+                  <div className="mb-3 flex items-center justify-between">
+                    <h3 className="text-sm font-semibold text-gray-900 dark:text-white">Verarbeitungsstatus</h3>
+                    {(() => {
+                      const st = indexStatus;
+                      if (!st) return <span className="text-xs text-gray-400">lädt …</span>;
+                      if (st.running && st.stale) {
+                        return <span className="inline-flex items-center gap-1.5 rounded-full bg-amber-100 px-2.5 py-0.5 text-xs font-medium text-amber-700 dark:bg-amber-900/40 dark:text-amber-300"><span className="h-1.5 w-1.5 rounded-full bg-amber-500" />Reagiert nicht</span>;
+                      }
+                      if (st.running) {
+                        return <span className="inline-flex items-center gap-1.5 rounded-full bg-indigo-100 px-2.5 py-0.5 text-xs font-medium text-indigo-700 dark:bg-indigo-900/40 dark:text-indigo-300"><span className="h-1.5 w-1.5 animate-pulse rounded-full bg-indigo-500" />Läuft</span>;
+                      }
+                      if (st.last_error) {
+                        return <span className="inline-flex items-center gap-1.5 rounded-full bg-red-100 px-2.5 py-0.5 text-xs font-medium text-red-700 dark:bg-red-900/40 dark:text-red-300"><span className="h-1.5 w-1.5 rounded-full bg-red-500" />Problem</span>;
+                      }
+                      return <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-100 px-2.5 py-0.5 text-xs font-medium text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300"><span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />Bereit</span>;
+                    })()}
+                  </div>
+
+                  {!indexStatus ? (
+                    <p className="text-sm text-gray-400">Status wird geladen …</p>
+                  ) : (
+                    <div className="space-y-4 text-sm text-gray-600 dark:text-gray-300">
+                      {/* Laufender Fortschritt */}
+                      {indexStatus.running && (
+                        <div className="space-y-3">
+                          {indexStatus.phase === 'purge' && (
+                            <p className="text-gray-500 dark:text-gray-400">Bereinige ausgeschlossene Pfade …</p>
+                          )}
+                          {indexStatus.phase === 'mails' && (
+                            <div>
+                              <div className="mb-1 flex items-center justify-between">
+                                <span>E-Mail-Ordner{indexStatus.detail ? <span className="text-gray-400"> — {indexStatus.detail}</span> : null}</span>
+                                <span className="tabular-nums text-gray-500 dark:text-gray-400">{indexStatus.folders_done} / {indexStatus.folders_total}</span>
+                              </div>
+                              <div className="h-1.5 w-full overflow-hidden rounded-full bg-gray-200 dark:bg-gray-700">
+                                <div className="h-full rounded-full bg-indigo-500 transition-all" style={{ width: `${indexStatus.folders_total > 0 ? Math.min(100, Math.round((indexStatus.folders_done / indexStatus.folders_total) * 100)) : 0}%` }} />
+                              </div>
+                            </div>
+                          )}
+                          {indexStatus.phase === 'documents' && (
+                            <div>
+                              <div className="mb-1 flex items-center justify-between">
+                                <span>OneDrive-Dokumente{indexStatus.detail ? <span className="text-gray-400"> — {indexStatus.detail}</span> : null}</span>
+                                <span className="tabular-nums text-gray-500 dark:text-gray-400">{indexStatus.docs_done} / {indexStatus.docs_total}</span>
+                              </div>
+                              <div className="h-1.5 w-full overflow-hidden rounded-full bg-gray-200 dark:bg-gray-700">
+                                <div className="h-full rounded-full bg-indigo-500 transition-all" style={{ width: `${indexStatus.docs_total > 0 ? Math.min(100, Math.round((indexStatus.docs_done / indexStatus.docs_total) * 100)) : 0}%` }} />
+                              </div>
+                            </div>
+                          )}
+                          {indexStatus.run_started_at && (
+                            <p className="text-xs text-gray-400">Lauf gestartet {fmtRelative(indexStatus.run_started_at)}</p>
+                          )}
+                          {indexStatus.stale && (
+                            <p className="text-xs text-amber-600 dark:text-amber-400">
+                              Kein Lebenszeichen seit über 15 Minuten — der Indexer-Dienst hängt möglicherweise. Logs prüfen (<code>make logs-indexer</code>).
+                            </p>
+                          )}
+                        </div>
+                      )}
+
+                      {/* Letzter Abschluss + nächste Prüfung */}
+                      {!indexStatus.running && (
+                        <div className="flex flex-wrap gap-x-8 gap-y-1">
+                          <div>
+                            <span className="text-gray-500 dark:text-gray-400">Zuletzt abgeschlossen: </span>
+                            {indexStatus.run_finished_at
+                              ? <span>{fmtDateTime(indexStatus.run_finished_at)} <span className="text-gray-400">({fmtRelative(indexStatus.run_finished_at)})</span></span>
+                              : <span className="text-gray-400">noch kein Lauf abgeschlossen</span>}
+                          </div>
+                          {indexStatus.run_finished_at && (
+                            <div className="text-gray-500 dark:text-gray-400">
+                              Letzter Lauf: {indexStatus.last_emails} E-Mails · {indexStatus.last_documents} Dokumente · {indexStatus.last_chunks} Chunks neu/aktualisiert
+                            </div>
+                          )}
+                          <div>
+                            <span className="text-gray-500 dark:text-gray-400">Nächste Prüfung: </span>
+                            {indexStatus.next_run_at
+                              ? <span>{fmtRelative(indexStatus.next_run_at)} <span className="text-gray-400">({fmtDateTime(indexStatus.next_run_at)})</span></span>
+                              : <span className="text-gray-400">--</span>}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Fehler des letzten Laufs */}
+                      {indexStatus.last_error && (
+                        <div className="rounded-md border border-red-200 bg-red-50 p-3 text-xs text-red-700 dark:border-red-900/50 dark:bg-red-950/30 dark:text-red-300">
+                          <span className="font-medium">Letzter Fehler {fmtRelative(indexStatus.last_error_at)}:</span> {indexStatus.last_error}
+                        </div>
+                      )}
+
+                      {/* Totals je Quelle */}
+                      <div>
+                        <p className="mb-2 text-xs font-medium uppercase tracking-wide text-gray-400">Bestand im Index</p>
+                        {indexStatus.totals.length === 0 ? (
+                          <p className="text-xs text-gray-400">Noch nichts indexiert.</p>
+                        ) : (
+                          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                            {indexStatus.totals.map(t => (
+                              <div key={t.source_type} className="rounded-md border border-gray-200 bg-white/50 p-2.5 dark:border-gray-700 dark:bg-gray-800/40">
+                                <div className="text-xs text-gray-500 dark:text-gray-400">{sourceLabel(t.source_type)}</div>
+                                <div className="text-base font-semibold text-gray-900 dark:text-white tabular-nums">{t.documents.toLocaleString('de-CH')}</div>
+                                <div className="text-[11px] text-gray-400">{t.chunks.toLocaleString('de-CH')} Chunks</div>
+                                {t.last_indexed_at && (
+                                  <div className="mt-0.5 text-[11px] text-gray-400">zuletzt {fmtRelative(t.last_indexed_at)}</div>
+                                )}
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+
+                      <p className="text-xs text-gray-400">
+                        Der Dienst prüft {indexStatus.interval_seconds >= 86400 ? 'täglich' : `alle ${Math.round(indexStatus.interval_seconds / 3600)} h`} automatisch auf neue E-Mails und Dateien. Jeder Lauf ist idempotent (bereits Indexiertes wird übersprungen), und es läuft immer nur ein Lauf gleichzeitig.
+                      </p>
+                    </div>
+                  )}
                 </div>
 
                 <div>

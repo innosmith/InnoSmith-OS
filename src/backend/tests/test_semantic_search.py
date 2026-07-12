@@ -5,8 +5,8 @@
 - rrf_fuse: Reciprocal Rank Fusion (deterministische Rangkombination)
 """
 
+from ai9.semantic_search import rrf_fuse
 from app.services.semantic_index import chunk_text, is_indexable_file
-from app.services.semantic_search import rrf_fuse
 
 
 class TestChunkText:

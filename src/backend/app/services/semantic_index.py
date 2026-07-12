@@ -24,14 +24,14 @@ import os
 import re
 from datetime import datetime, timezone
 
-from sqlalchemy import select, text
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.database import async_session
-from app.models import User
+from ai9.embeddings import embed_text, to_pgvector
+from app.core.principal import get_owner_settings
 from app.services.context_resolver import _extract_text
-from app.services.embeddings import embed_text, to_pgvector
 from app.services.learning import html_to_text, strip_quoted_history
 
 logger = logging.getLogger("taskpilot.semantic_index")
@@ -139,8 +139,7 @@ async def _load_excluded_paths(db: AsyncSession) -> list[str]:
     Fehlt der Key ``search_excluded_paths`` vollstaendig, gelten die Defaults; ist er
     vorhanden (auch als leere Liste), wird die explizite Owner-Wahl respektiert.
     """
-    row = await db.execute(select(User.settings).where(User.role == "owner").limit(1))
-    settings = row.scalar_one_or_none() or {}
+    settings = await get_owner_settings(db)
     if "search_excluded_paths" not in settings:
         return list(_DEFAULT_EXCLUDED_PATHS)
     val = settings.get("search_excluded_paths")
@@ -395,6 +394,114 @@ async def _index_document(
     )
 
 
+# --- Laufstatus-Reporter (schreibt in die Singleton-Zeile ``index_status``) --------
+# Best-effort: ein Status-Update darf einen Index-Lauf niemals stoppen. Genau EIN
+# Writer (dieser Prozess/Daemon), das Backend liest nur. Jede Funktion oeffnet eine
+# eigene, kurzlebige Session, damit Status-Writes unabhaengig von den Ingest-
+# Transaktionen committen (und ein Rollback dort den Status nicht mitreisst).
+
+async def _status_write(**cols) -> None:
+    """Setzt die uebergebenen Spalten der Singleton-Zeile (id=1); Heartbeat immer."""
+    if not cols:
+        return
+    params = dict(cols)
+    params["_hb"] = datetime.now(timezone.utc)
+    set_parts = [f"{k} = :{k}" for k in cols]
+    set_parts.append("heartbeat_at = :_hb")
+    set_parts.append("updated_at = now()")
+    sql = "UPDATE index_status SET " + ", ".join(set_parts) + " WHERE id = 1"
+    try:
+        async with async_session() as db:
+            await db.execute(text(sql), params)
+            await db.commit()
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Status-Update fehlgeschlagen: %s", exc)
+
+
+async def _status_begin() -> None:
+    """Markiert Laufbeginn (upsert -- legt die Zeile bei Bedarf an) und setzt zurueck."""
+    now = datetime.now(timezone.utc)
+    try:
+        async with async_session() as db:
+            await db.execute(
+                text(
+                    """
+                    INSERT INTO index_status
+                        (id, state, phase, detail, run_started_at, heartbeat_at,
+                         folders_total, folders_done, docs_total, docs_done,
+                         last_error, last_error_at, updated_at)
+                    VALUES
+                        (1, 'running', 'purge', NULL, :now, :now,
+                         0, 0, 0, 0, NULL, NULL, now())
+                    ON CONFLICT (id) DO UPDATE SET
+                        state = 'running', phase = 'purge', detail = NULL,
+                        run_started_at = :now, heartbeat_at = :now,
+                        folders_total = 0, folders_done = 0,
+                        docs_total = 0, docs_done = 0,
+                        last_error = NULL, last_error_at = NULL, updated_at = now()
+                    """
+                ),
+                {"now": now},
+            )
+            await db.commit()
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Status-Begin fehlgeschlagen: %s", exc)
+
+
+async def _status_phase(
+    phase: str,
+    *,
+    folders_total: int | None = None,
+    docs_total: int | None = None,
+    detail: str | None = None,
+) -> None:
+    cols: dict = {"phase": phase}
+    if folders_total is not None:
+        cols["folders_total"] = folders_total
+    if docs_total is not None:
+        cols["docs_total"] = docs_total
+    if detail is not None:
+        cols["detail"] = detail
+    await _status_write(**cols)
+
+
+async def _status_progress(
+    *,
+    folders_done: int | None = None,
+    docs_done: int | None = None,
+    detail: str | None = None,
+) -> None:
+    cols: dict = {}
+    if folders_done is not None:
+        cols["folders_done"] = folders_done
+    if docs_done is not None:
+        cols["docs_done"] = docs_done
+    if detail is not None:
+        cols["detail"] = detail
+    await _status_write(**cols)
+
+
+async def _status_finish(stats: dict) -> None:
+    await _status_write(
+        state="idle",
+        phase=None,
+        detail=None,
+        run_finished_at=datetime.now(timezone.utc),
+        last_emails=int(stats.get("emails", 0)),
+        last_documents=int(stats.get("documents", 0)),
+        last_chunks=int(stats.get("chunks", 0)),
+    )
+
+
+async def _status_error(msg: str) -> None:
+    await _status_write(
+        state="idle",
+        phase=None,
+        last_error=msg[:2000],
+        last_error_at=datetime.now(timezone.utc),
+    )
+
+
 async def sync_semantic_index(
     *,
     mail_top: int | None = None,
@@ -416,6 +523,8 @@ async def sync_semantic_index(
     if client is None:
         logger.info("Semantic-Index-Sync übersprungen: Graph nicht konfiguriert")
         return stats
+
+    await _status_begin()
 
     # Ausschlussliste (Owner-Settings) laden und bestehende Leichen bereinigen --
     # so verschwinden ausgeschlossene Pfade auch aus einem bereits gefuellten Index.
@@ -445,6 +554,8 @@ async def sync_semantic_index(
                 logger.info("Ordner-Enumeration fehlgeschlagen: %s", exc)
                 folders = []
             logger.info("Backfill E-Mails: %d Ordner (ohne Junk/Geloescht)", len(folders))
+            await _status_phase("mails", folders_total=len(folders))
+            folders_done = 0
             for folder in folders:
                 if _stop.is_set():
                     break
@@ -452,6 +563,7 @@ async def sync_semantic_index(
                 fname = folder.get("displayName") or fid
                 if not fid:
                     continue
+                await _status_progress(detail=fname)
                 processed = 0
                 try:
                     async for msg in client.iter_folder_messages(
@@ -484,6 +596,8 @@ async def sync_semantic_index(
                 except Exception as exc:  # noqa: BLE001
                     logger.info("Ordner '%s' nicht (vollstaendig) lesbar: %s", fname, exc)
                 logger.info("  Ordner '%s' fertig: %d gesichtet", fname, processed)
+                folders_done += 1
+                await _status_progress(folders_done=folders_done)
 
         # 2) Dokumente (rekursiver Drive-Walk, Whitelist + Change-Detection)
         if index_docs and not _stop.is_set():
@@ -519,6 +633,7 @@ async def sync_semantic_index(
                 "Backfill Dokumente: %d gesamt, %d indexierbar, %d ausgeschlossen, %d Duplikate uebersprungen",
                 len(files), len(indexable), skipped_excluded, skipped_dupes,
             )
+            await _status_phase("documents", docs_total=len(indexable), detail=None)
             for i, item in enumerate(indexable, 1):
                 if _stop.is_set():
                     break
@@ -539,14 +654,17 @@ async def sync_semantic_index(
                         "  … Dokumente %d/%d (neu/aktualisiert: %d, Chunks: %d)",
                         i, len(indexable), stats["documents"], stats["chunks"],
                     )
+                    await _status_progress(docs_done=i, detail=item.get("name"))
 
         logger.info(
             "Semantic-Index-Sync fertig: %d E-Mails, %d Dokumente, %d Chunks",
             stats["emails"], stats["documents"], stats["chunks"],
         )
+        await _status_finish(stats)
         return stats
-    except Exception:  # noqa: BLE001 - best-effort, darf Scheduler nie stoppen
+    except Exception as exc:  # noqa: BLE001 - best-effort, darf Scheduler nie stoppen
         logger.exception("Semantic-Index-Sync fehlgeschlagen")
+        await _status_error(f"{type(exc).__name__}: {exc}")
         return stats
     finally:
         try:

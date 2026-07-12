@@ -15,7 +15,8 @@ from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import async_session
-from app.models import PipelineColumn, Task, User
+from app.models import PipelineColumn, Task
+from app.core.principal import get_owner_id
 
 logger = logging.getLogger("taskpilot.pipeline_promoter")
 
@@ -29,10 +30,7 @@ async def _get_owner_id(db: AsyncSession) -> uuid.UUID | None:
     global _owner_id
     if _owner_id is not None:
         return _owner_id
-    result = await db.execute(
-        select(User.id).where(User.role == "owner").limit(1)
-    )
-    _owner_id = result.scalar_one_or_none()
+    _owner_id = await get_owner_id(db)
     return _owner_id
 
 COLUMN_NAME_ORDER = [

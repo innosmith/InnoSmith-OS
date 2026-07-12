@@ -47,6 +47,16 @@ hermes-agent==0.18.0
 # ── MCP (Model Context Protocol) ──
 mcp>=1.27
 
+# ── AI9 Core (privates Package, InnoSmith-IP) ──
+# Wiederverwendbarer, app-neutraler Kern (Schwester-Repo ../AI9). Wird wie
+# contentconverter NICHT als harte -e-Zeile geführt (bräche den Docker-Build),
+# sondern separat installiert:
+#   Dev:    pip install -e /home/innosmith/dev/github/AI9
+#   Docker: docker/build.sh kopiert ../AI9 nach src/backend/vendor/ai9,
+#           Dockerfile.backend installiert es von dort (pip install /opt/vendor/ai9).
+# Laufzeit-Deps von ai9 (httpx, cachetools, sqlalchemy, mcp) sind oben bereits
+# deklariert.
+
 # ── Markdown & Content ──
 Markdown>=3.10
 

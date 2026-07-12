@@ -1,5 +1,5 @@
 import secrets
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import bcrypt
 from fastapi import APIRouter, Depends, HTTPException
@@ -245,6 +245,142 @@ async def update_search_index_settings(
     except Exception:  # noqa: BLE001 - Speichern der Liste darf trotzdem gelingen
         await db.rollback()
     return SearchIndexUpdateResponse(excluded_paths=paths, purged=purged)
+
+
+# --- Suchindex-Status (Laufstatus des Indexer-Daemons + Totals) ---
+
+# Gilt der Daemon als haengend, wenn er zwar "running" meldet, aber der Heartbeat
+# aelter als dieser Schwellwert ist (Prozess tot / Etappe blockiert).
+_STATUS_STALE_SECONDS = 15 * 60
+
+
+class IndexSourceTotals(BaseModel):
+    source_type: str
+    documents: int
+    chunks: int
+    last_indexed_at: datetime | None = None
+
+
+class SearchIndexStatus(BaseModel):
+    running: bool
+    phase: str | None = None
+    detail: str | None = None
+    run_started_at: datetime | None = None
+    run_finished_at: datetime | None = None
+    heartbeat_at: datetime | None = None
+    folders_total: int = 0
+    folders_done: int = 0
+    docs_total: int = 0
+    docs_done: int = 0
+    last_emails: int = 0
+    last_documents: int = 0
+    last_chunks: int = 0
+    last_error: str | None = None
+    last_error_at: datetime | None = None
+    interval_seconds: int = 0
+    next_run_at: datetime | None = None
+    stale: bool = False
+    totals: list[IndexSourceTotals] = []
+    last_indexed_at: datetime | None = None
+
+
+@router.get("/search-index/status", response_model=SearchIndexStatus)
+async def get_search_index_status(
+    user: User = Depends(require_role("owner")),
+    db: AsyncSession = Depends(get_db),
+) -> SearchIndexStatus:
+    """Aktueller Laufstatus des Indexer-Daemons plus Totals aus ``semantic_documents``.
+
+    Read-only: das Backend liest nur, geschrieben wird die Statuszeile ausschliesslich
+    vom Indexer-Daemon (Single-Writer -> keine Race Condition). Das Frontend pollt.
+    """
+    from sqlalchemy import text as _text
+
+    now = datetime.now(timezone.utc)
+    interval = get_app_settings().search_index_interval_seconds
+
+    row = (
+        await db.execute(
+            _text(
+                """
+                SELECT state, phase, detail, run_started_at, run_finished_at,
+                       heartbeat_at, folders_total, folders_done, docs_total, docs_done,
+                       last_emails, last_documents, last_chunks, last_error, last_error_at
+                FROM index_status WHERE id = 1
+                """
+            )
+        )
+    ).mappings().first()
+
+    running = bool(row and row["state"] == "running")
+    heartbeat = row["heartbeat_at"] if row else None
+    finished = row["run_finished_at"] if row else None
+
+    stale = False
+    if running and heartbeat is not None:
+        stale = (now - heartbeat).total_seconds() > _STATUS_STALE_SECONDS
+
+    next_run_at = None
+    if not running and finished is not None and interval > 0:
+        next_run_at = finished + timedelta(seconds=interval)
+
+    # Totals je Quelle: eindeutige Dokumente (source_id), Chunks, letzte Indexierung.
+    totals_rows = (
+        await db.execute(
+            _text(
+                """
+                SELECT source_type,
+                       COUNT(DISTINCT source_id) AS documents,
+                       COUNT(*) AS chunks,
+                       MAX(indexed_at) AS last_indexed_at
+                FROM semantic_documents
+                GROUP BY source_type
+                ORDER BY source_type
+                """
+            )
+        )
+    ).mappings().all()
+    totals = [
+        IndexSourceTotals(
+            source_type=r["source_type"],
+            documents=int(r["documents"] or 0),
+            chunks=int(r["chunks"] or 0),
+            last_indexed_at=r["last_indexed_at"],
+        )
+        for r in totals_rows
+    ]
+    last_indexed_at = max((t.last_indexed_at for t in totals if t.last_indexed_at), default=None)
+
+    if not row:
+        return SearchIndexStatus(
+            running=False,
+            interval_seconds=interval,
+            totals=totals,
+            last_indexed_at=last_indexed_at,
+        )
+
+    return SearchIndexStatus(
+        running=running,
+        phase=row["phase"],
+        detail=row["detail"],
+        run_started_at=row["run_started_at"],
+        run_finished_at=finished,
+        heartbeat_at=heartbeat,
+        folders_total=int(row["folders_total"] or 0),
+        folders_done=int(row["folders_done"] or 0),
+        docs_total=int(row["docs_total"] or 0),
+        docs_done=int(row["docs_done"] or 0),
+        last_emails=int(row["last_emails"] or 0),
+        last_documents=int(row["last_documents"] or 0),
+        last_chunks=int(row["last_chunks"] or 0),
+        last_error=row["last_error"],
+        last_error_at=row["last_error_at"],
+        interval_seconds=interval,
+        next_run_at=next_run_at,
+        stale=stale,
+        totals=totals,
+        last_indexed_at=last_indexed_at,
+    )
 
 
 # --- Integrations-Einstellungen (Pipedrive etc.) ---

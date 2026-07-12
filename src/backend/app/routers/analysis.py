@@ -27,10 +27,10 @@ from app.config import get_settings
 from app.database import async_session, get_db
 from app.models import FinanceAnalysis, FinanceDocument, User
 from app.routers.uploads import _scan_with_clamav
+from ai9 import content_converter as cc
+from ai9 import mapping_store
 from app.services import analysis_prompts as ap
-from app.services import content_converter as cc
 from app.services import financial_snapshot as fs
-from app.services import mapping_store
 
 litellm.drop_params = True
 

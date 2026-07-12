@@ -24,7 +24,7 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import AgentFeedback, AgentJob
-from app.services.embeddings import embed_text, to_pgvector
+from ai9.embeddings import embed_text, to_pgvector
 
 logger = logging.getLogger("taskpilot.learning")
 

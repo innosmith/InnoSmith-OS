@@ -20,10 +20,10 @@ import sys
 from pathlib import Path
 
 import yaml
-from sqlalchemy import select
 
 from app.config import get_settings
 from app.database import async_session
+from app.core.principal import get_owner_settings
 
 logger = logging.getLogger("taskpilot.hermes_config")
 
@@ -197,12 +197,7 @@ async def populate_hermes_env() -> None:
     db_settings: dict = {}
     try:
         async with async_session() as db:
-            from app.models import User
-
-            result = await db.execute(
-                select(User.settings).where(User.role == "owner").limit(1)
-            )
-            db_settings = result.scalar_one_or_none() or {}
+            db_settings = await get_owner_settings(db)
     except Exception:
         logger.warning("Hermes-Env: DB-Settings nicht lesbar — nutze .env-Fallback")
 

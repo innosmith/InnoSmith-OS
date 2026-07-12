@@ -23,7 +23,8 @@ from sqlalchemy import select
 
 from app.config import get_settings
 from app.database import async_session
-from app.models import FollowupSuggestion, Task, User
+from app.models import FollowupSuggestion, Task
+from app.core.principal import get_owner
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "..", "email-graph"))
 from graph_client import GraphClient, GraphConfig  # noqa: E402
@@ -171,9 +172,7 @@ async def check_followups_due() -> int:
     own_email = cfg.graph_user_email.strip().lower()
 
     async with async_session() as db:
-        owner = (
-            await db.execute(select(User).where(User.role == "owner").limit(1))
-        ).scalar_one_or_none()
+        owner = await get_owner(db)
         settings = dict((owner.settings if owner else None) or {})
     if settings.get("followup_enabled") is False:
         return 0

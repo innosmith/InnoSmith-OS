@@ -67,6 +67,7 @@ from app.services.notification import (
     notify_chat_triage_task,
     notify_task_suggested,
 )
+from app.core.principal import get_owner_settings
 
 logger = logging.getLogger("taskpilot.hermes_worker")
 
@@ -838,10 +839,7 @@ async def _build_triage_prompt(job: AgentJob) -> str:
     custom_triage_prompt = ""
     try:
         async with async_session() as db:
-            result = await db.execute(
-                select(User.settings).where(User.role == "owner").limit(1)
-            )
-            owner_settings = result.scalar_one_or_none() or {}
+            owner_settings = await get_owner_settings(db)
         custom_triage_prompt = (owner_settings.get("triage_prompt") or "").strip()
     except Exception:
         logger.warning("Konnte triage_prompt nicht aus User-Settings laden")
@@ -1233,54 +1231,28 @@ _ACTION_ITEMS_FENCE = re.compile(r"```(?:json)?\s*(\{[^`]*\"action_items\"[^`]*\
 
 
 async def _post_process_meeting_summary(job_id, content: str, meta: dict | None = None) -> str:
-    """Persistiert das Meeting-Protokoll und erstellt Action-Item-Vorschläge.
+    """Persistiert das Meeting-Protokoll (ohne automatische Task-Erstellung).
 
     - ``protocol_md`` = LLM-Output ohne den Action-Item-JSON-Block.
-    - Pro Action-Item mit Owner Anthony (oder ohne Owner) ein ``needs_review``-Task
-      (HITL) via ``_create_review_task``.
     - Notification ``meeting_summary_ready`` mit Link auf den Meetings-Tab.
+
+    Hinweis: Die automatische Erstellung von Aufgaben aus Action-Items wurde
+    bewusst ausgebaut -- die Trefferqualität war noch nicht gut genug (zu viele
+    manuell abzulehnende Tasks). Der Action-Item-JSON-Block wird weiterhin aus dem
+    Protokoll entfernt, damit kein Roh-JSON im Text landet. Eine Reaktivierung mit
+    verbesserter Logik ist möglich (siehe Git-Historie).
     """
     meta = meta or {}
     transcript_id = meta.get("meeting_transcript_id")
-    try:
-        transcript_uuid = uuid.UUID(transcript_id) if transcript_id else None
-    except ValueError:
-        transcript_uuid = None
 
-    action_items: list[dict] = []
     protocol_md = (content or "").strip()
     m = _ACTION_ITEMS_FENCE.search(protocol_md)
     if m:
-        parsed = _loads_lenient(m.group(1))
-        if isinstance(parsed, dict) and isinstance(parsed.get("action_items"), list):
-            action_items = [ai for ai in parsed["action_items"] if isinstance(ai, dict)]
+        # JSON-Block nur noch entfernen (nicht mehr in Tasks überführen).
         protocol_md = (protocol_md[: m.start()] + protocol_md[m.end():]).strip()
 
-    subject = meta.get("subject") or "Meeting"
     created_count = 0
     async with async_session() as db:
-        for item in action_items[:10]:
-            title = (item.get("title") or "").strip()
-            if not title:
-                continue
-            owner = (item.get("owner") or "").strip().lower()
-            # Nur eigene Aufgaben vorschlagen; fremde Zusagen bleiben im Protokoll.
-            if owner and owner not in ("anthony", "anthony smith", "ich", "me"):
-                continue
-            desc = (item.get("description") or "").strip()
-            source_block = f"\n\n---\n**Quelle:** Meeting «{subject}»"
-            task = await _create_review_task(
-                db,
-                job_id,
-                title=title,
-                description=(desc or "Aus Meeting-Protokoll.") + source_block,
-                suggested_project=item.get("suggested_project"),
-                deadline=item.get("deadline"),
-                meeting_transcript_id=transcript_uuid,
-            )
-            if task is not None:
-                created_count += 1
-
         if transcript_id:
             try:
                 record = await db.get(MeetingTranscript, uuid.UUID(transcript_id))
@@ -1299,10 +1271,7 @@ async def _post_process_meeting_summary(job_id, content: str, meta: dict | None 
                 )
         await db.commit()
 
-    logger.info(
-        "Job %s: Meeting-Protokoll gespeichert (%d Action-Item-Vorschläge)",
-        job_id, created_count,
-    )
+    logger.info("Job %s: Meeting-Protokoll gespeichert (Task-Erstellung deaktiviert)", job_id)
     return "completed"
 
 

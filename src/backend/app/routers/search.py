@@ -17,7 +17,7 @@ from app.auth.deps import get_current_user, require_role
 from app.config import get_settings as _get_settings
 from app.database import get_db
 from app.models import Project, Tag, Task, User
-from app.services.semantic_search import hybrid_search
+from ai9.semantic_search import hybrid_search
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "pipedrive"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "email-graph"))

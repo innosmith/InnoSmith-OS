@@ -717,3 +717,27 @@ CREATE INDEX idx_semantic_documents_embedding
     ON semantic_documents USING hnsw (embedding halfvec_cosine_ops);
 CREATE INDEX idx_semantic_documents_tsv
     ON semantic_documents USING gin (content_tsv);
+
+-- Laufstatus des semantischen Indexer-Daemons (Singleton, id=1). Genau EIN Writer
+-- (der Daemon), das Backend liest nur -> Transparenz im Suchindex-Tab ohne Kopplung.
+CREATE TABLE index_status (
+    id               INT PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+    state            TEXT NOT NULL DEFAULT 'idle'
+                     CHECK (state IN ('idle', 'running')),
+    phase            TEXT,
+    detail           TEXT,
+    run_started_at   TIMESTAMPTZ,
+    run_finished_at  TIMESTAMPTZ,
+    heartbeat_at     TIMESTAMPTZ,
+    folders_total    INT NOT NULL DEFAULT 0,
+    folders_done     INT NOT NULL DEFAULT 0,
+    docs_total       INT NOT NULL DEFAULT 0,
+    docs_done        INT NOT NULL DEFAULT 0,
+    last_emails      INT NOT NULL DEFAULT 0,
+    last_documents   INT NOT NULL DEFAULT 0,
+    last_chunks      INT NOT NULL DEFAULT 0,
+    last_error       TEXT,
+    last_error_at    TIMESTAMPTZ,
+    updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+INSERT INTO index_status (id) VALUES (1) ON CONFLICT (id) DO NOTHING;

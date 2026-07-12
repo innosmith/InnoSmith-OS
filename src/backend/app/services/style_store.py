@@ -23,7 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.database import async_session
-from app.services.embeddings import embed_text, to_pgvector
+from ai9.embeddings import embed_text, to_pgvector
 from app.services.learning import (
     extract_salutation_signature,
     html_to_text,

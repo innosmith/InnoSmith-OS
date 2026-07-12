@@ -1,0 +1,18 @@
+{
+  "folders": [
+    {
+      "name": "TaskPilot (App)",
+      "path": "."
+    },
+    {
+      "name": "AI9 (Core)",
+      "path": "../AI9"
+    }
+  ],
+  "settings": {
+    "files.exclude": {
+      "**/__pycache__": true,
+      "**/*.egg-info": true
+    }
+  }
+}
