@@ -175,9 +175,13 @@ async def list_agent_jobs(
     job_type: str | None = Query(None, description="Job-Typ oder kommagetrennte Liste (z.B. daily_briefing,weekly_briefing)"),
     limit: int = Query(100, ge=1, le=500),
     db: AsyncSession = Depends(get_db),
-    _user: User = Depends(require_role("owner")),
+    user: User = Depends(require_role("owner")),
 ) -> list[AgentJobWithTask]:
-    query = select(AgentJob, Task.title).outerjoin(Task, AgentJob.task_id == Task.id)
+    query = (
+        select(AgentJob, Task.title)
+        .outerjoin(Task, AgentJob.task_id == Task.id)
+        .where(AgentJob.user_id == user.id)
+    )
     if status:
         query = query.where(AgentJob.status == status)
     if task_id:
@@ -326,14 +330,14 @@ async def update_draft(
 async def create_agent_job(
     body: AgentJobCreate,
     db: AsyncSession = Depends(get_db),
-    _user: User = Depends(require_role("owner")),
+    user: User = Depends(require_role("owner")),
 ) -> AgentJobOut:
     task_result = await db.execute(select(Task).where(Task.id == body.task_id))
     task = task_result.scalar_one_or_none()
     if task is None:
         raise HTTPException(status_code=404, detail="Task not found")
 
-    job = AgentJob(task_id=body.task_id, llm_model=body.llm_model)
+    job = AgentJob(user_id=user.id, task_id=body.task_id, llm_model=body.llm_model)
     db.add(job)
     await db.flush()
     return job

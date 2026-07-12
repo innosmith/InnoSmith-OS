@@ -10,6 +10,7 @@ from sqlalchemy import (
     Numeric,
     String,
     Text,
+    UniqueConstraint,
     func,
     text,
 )
@@ -177,6 +178,7 @@ class AgentJob(Base):
     __tablename__ = "agent_jobs"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
+    user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
     task_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("tasks.id", ondelete="CASCADE"))
     job_type: Mapped[str | None] = mapped_column(Text)
     status: Mapped[str] = mapped_column(Text, nullable=False, server_default="queued")
@@ -218,9 +220,11 @@ class BoardMember(Base):
 
 class EmailTriage(Base):
     __tablename__ = "email_triage"
+    __table_args__ = (UniqueConstraint("user_id", "message_id", name="uq_email_triage_user_message"),)
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
-    message_id: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
+    user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    message_id: Mapped[str] = mapped_column(Text, nullable=False)
     subject: Mapped[str | None] = mapped_column(Text)
     from_address: Mapped[str | None] = mapped_column(Text)
     from_name: Mapped[str | None] = mapped_column(Text)
@@ -237,10 +241,12 @@ class EmailTriage(Base):
 
 class ChatTriage(Base):
     __tablename__ = "chat_triage"
+    __table_args__ = (UniqueConstraint("user_id", "message_id", name="uq_chat_triage_user_message"),)
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
+    user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
     chat_id: Mapped[str] = mapped_column(Text, nullable=False)
-    message_id: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
+    message_id: Mapped[str] = mapped_column(Text, nullable=False)
     from_name: Mapped[str | None] = mapped_column(Text)
     from_id: Mapped[str | None] = mapped_column(Text)
     body_preview: Mapped[str | None] = mapped_column(Text)
@@ -262,10 +268,12 @@ class MeetingTranscript(Base):
     """
 
     __tablename__ = "meeting_transcripts"
+    __table_args__ = (UniqueConstraint("user_id", "transcript_id", name="uq_meeting_transcripts_user_transcript"),)
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
+    user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
     meeting_id: Mapped[str] = mapped_column(Text, nullable=False)
-    transcript_id: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
+    transcript_id: Mapped[str] = mapped_column(Text, nullable=False)
     subject: Mapped[str | None] = mapped_column(Text)
     organizer: Mapped[str | None] = mapped_column(Text)
     started_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
@@ -292,9 +300,11 @@ class FollowupSuggestion(Base):
     """
 
     __tablename__ = "followup_suggestions"
+    __table_args__ = (UniqueConstraint("user_id", "conversation_id", name="uq_followup_suggestions_user_conversation"),)
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
-    conversation_id: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
+    user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    conversation_id: Mapped[str] = mapped_column(Text, nullable=False)
     task_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("tasks.id", ondelete="SET NULL"))
     subject: Mapped[str | None] = mapped_column(Text)
     recipient: Mapped[str | None] = mapped_column(Text)
@@ -305,9 +315,11 @@ class FollowupSuggestion(Base):
 
 class SenderProfile(Base):
     __tablename__ = "sender_profiles"
+    __table_args__ = (UniqueConstraint("user_id", "email", name="uq_sender_profiles_user_email"),)
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
-    email: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
+    user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    email: Mapped[str] = mapped_column(Text, nullable=False)
     display_name: Mapped[str | None] = mapped_column(Text)
     organization: Mapped[str | None] = mapped_column(Text)
     relationship: Mapped[str | None] = mapped_column(Text)
@@ -333,6 +345,7 @@ class AgentFeedback(Base):
     __tablename__ = "agent_feedback"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
+    user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
     agent_job_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("agent_jobs.id", ondelete="SET NULL"))
     sender_email: Mapped[str | None] = mapped_column(Text)
     source: Mapped[str] = mapped_column(Text, nullable=False, server_default="cockpit")
@@ -355,6 +368,7 @@ class AgentEpisode(Base):
     __tablename__ = "agent_episodes"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
+    user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
     agent_job_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("agent_jobs.id", ondelete="SET NULL"))
     job_type: Mapped[str | None] = mapped_column(Text)
     sender_email: Mapped[str | None] = mapped_column(Text)
@@ -373,9 +387,11 @@ class SentMailExample(Base):
     """
 
     __tablename__ = "sent_mail_examples"
+    __table_args__ = (UniqueConstraint("user_id", "graph_id", name="uq_sent_mail_examples_user_graph"),)
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
-    graph_id: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
+    user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    graph_id: Mapped[str] = mapped_column(Text, nullable=False)
     recipient: Mapped[str | None] = mapped_column(Text)
     subject: Mapped[str | None] = mapped_column(Text)
     body_text: Mapped[str] = mapped_column(Text, nullable=False)
@@ -394,8 +410,15 @@ class SemanticDocument(Base):
     """
 
     __tablename__ = "semantic_documents"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id", "source_type", "source_id", "chunk_index",
+            name="uq_semantic_documents_user_source_chunk",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
+    user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
     source_type: Mapped[str] = mapped_column(Text, nullable=False)
     source_id: Mapped[str] = mapped_column(Text, nullable=False)
     chunk_index: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
@@ -421,6 +444,7 @@ class LearnedRule(Base):
     __tablename__ = "learned_rules"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
+    user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
     scope: Mapped[str] = mapped_column(Text, nullable=False, server_default="triage")
     rule_text: Mapped[str] = mapped_column(Text, nullable=False)
     evidence: Mapped[dict] = mapped_column(JSONB, server_default="{}")

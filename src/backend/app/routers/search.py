@@ -609,7 +609,7 @@ async def semantic_search(
     """
     logger.info("Semantic-Search: q=%r mode=%s sources=%s user=%s", q, mode, sources, user.email)
     src_list = [s.strip() for s in sources.split(",") if s.strip()] if sources else None
-    hits = await hybrid_search(db, q, sources=src_list, k=limit, mode=mode)
+    hits = await hybrid_search(db, q, sources=src_list, k=limit, mode=mode, user_id=str(user.id))
     return SemanticSearchResults(
         query=q, mode=mode, results=[SemanticHit(**h) for h in hits]
     )
@@ -765,9 +765,9 @@ async def search_documents(
     live_drive, live_mail, idx_drive, idx_mail, idx_other = await asyncio.gather(
         _search_onedrive(q),
         _search_emails_live(q),
-        hybrid_search(db, q, mode="hybrid", sources=["onedrive"], k=limit),
-        hybrid_search(db, q, mode="hybrid", sources=["email"], k=limit),
-        hybrid_search(db, q, mode="hybrid", sources=["upload", "transcript"], k=limit),
+        hybrid_search(db, q, mode="hybrid", sources=["onedrive"], k=limit, user_id=str(user.id)),
+        hybrid_search(db, q, mode="hybrid", sources=["email"], k=limit, user_id=str(user.id)),
+        hybrid_search(db, q, mode="hybrid", sources=["upload", "transcript"], k=limit, user_id=str(user.id)),
         return_exceptions=True,
     )
     labelled = {

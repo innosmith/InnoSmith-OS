@@ -37,11 +37,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.database import async_session
 from app.models import AgentFeedback, LearnedRule
+from app.core.principal import system_principal_id
 
 logger = logging.getLogger("taskpilot.reflection")
 
 
-async def _existing_rule_signatures(db: AsyncSession) -> set[str]:
+async def _existing_rule_signatures(db: AsyncSession, user_id=None) -> set[str]:
     """Signaturen bereits vorhandener Regeln (ueber ALLE Status).
 
     Bevorzugt der semantische ``evidence['key']`` (stabil gegen Zaehler-
@@ -49,7 +50,11 @@ async def _existing_rule_signatures(db: AsyncSession) -> set[str]:
     zurueck. So wird eine bereits verworfene Regel nicht erneut vorgeschlagen,
     auch wenn der Beleg-Zaehler inzwischen gestiegen ist.
     """
-    rows = await db.execute(select(LearnedRule.rule_text, LearnedRule.evidence))
+    rows = await db.execute(
+        select(LearnedRule.rule_text, LearnedRule.evidence).where(
+            LearnedRule.user_id == user_id
+        )
+    )
     signatures: set[str] = set()
     for rule_text, evidence in rows.all():
         key = evidence.get("key") if isinstance(evidence, dict) else None
@@ -175,16 +180,20 @@ async def run_reflection(
     if min_occurrences is None:
         min_occurrences = get_settings().agent_reflection_min_occurrences
     try:
+        principal_id = await system_principal_id(db)
         cutoff = datetime.now(timezone.utc) - timedelta(days=lookback_days)
         rows = await db.execute(
-            select(AgentFeedback).where(AgentFeedback.created_at >= cutoff)
+            select(AgentFeedback).where(
+                AgentFeedback.created_at >= cutoff,
+                AgentFeedback.user_id == principal_id,
+            )
         )
         feedback = list(rows.scalars().all())
         proposals = _build_proposals(feedback, min_occurrences)
         if not proposals:
             return 0
 
-        existing = await _existing_rule_signatures(db)
+        existing = await _existing_rule_signatures(db, principal_id)
         created = 0
         for scope, rule_text, evidence, hint in proposals:
             key = evidence.get("key")
@@ -192,6 +201,7 @@ async def run_reflection(
                 continue
             db.add(
                 LearnedRule(
+                    user_id=principal_id,
                     scope=scope,
                     rule_text=rule_text,
                     evidence=evidence,

@@ -378,6 +378,7 @@ async def send_draft(
     ]
 
     job = AgentJob(
+        user_id=user.id,
         task_id=None,
         job_type="send_email",
         status="awaiting_approval",

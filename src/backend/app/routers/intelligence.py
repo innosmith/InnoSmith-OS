@@ -43,7 +43,7 @@ class SenderProfilesResponse(BaseModel):
 async def get_sender_profiles(
     limit: int = 20,
     db: AsyncSession = Depends(get_db),
-    _user: User = Depends(require_role("owner")),
+    user: User = Depends(require_role("owner")),
 ) -> SenderProfilesResponse:
     """Top-Absender mit Triage-Verteilung."""
     query = (
@@ -57,7 +57,7 @@ async def get_sender_profiles(
             func.count().filter(EmailTriage.reply_expected.is_(True)).label("reply_expected"),
             func.max(EmailTriage.created_at).label("last_seen"),
         )
-        .where(EmailTriage.sender_email.isnot(None))
+        .where(EmailTriage.sender_email.isnot(None), EmailTriage.user_id == user.id)
         .group_by(EmailTriage.sender_email, EmailTriage.sender_name)
         .order_by(func.count().desc())
         .limit(limit)
@@ -83,7 +83,7 @@ async def get_sender_profiles(
 
     total_q = await db.execute(
         select(func.count(func.distinct(EmailTriage.sender_email)))
-        .where(EmailTriage.sender_email.isnot(None))
+        .where(EmailTriage.sender_email.isnot(None), EmailTriage.user_id == user.id)
     )
     total_senders = total_q.scalar_one_or_none() or 0
 
@@ -106,7 +106,7 @@ class TriageStats(BaseModel):
 async def get_triage_stats(
     days: int = 30,
     db: AsyncSession = Depends(get_db),
-    _user: User = Depends(require_role("owner")),
+    user: User = Depends(require_role("owner")),
 ) -> TriageStats:
     """Triage-Statistiken der letzten N Tage."""
     cutoff = datetime.now(timezone.utc) - timedelta(days=days)
@@ -117,7 +117,7 @@ async def get_triage_stats(
         func.count().filter(EmailTriage.triage_class == "task").label("task"),
         func.count().filter(EmailTriage.triage_class == "fyi").label("fyi"),
         func.count().filter(EmailTriage.reply_expected.is_(True)).label("reply_expected"),
-    ).where(EmailTriage.created_at >= cutoff)
+    ).where(EmailTriage.created_at >= cutoff, EmailTriage.user_id == user.id)
 
     result = await db.execute(query)
     row = result.one()
@@ -172,7 +172,7 @@ async def get_learning_overview(
     days: int = 7,
     recent_limit: int = 15,
     db: AsyncSession = Depends(get_db),
-    _user: User = Depends(require_role("owner")),
+    user: User = Depends(require_role("owner")),
 ) -> LearningOverview:
     """Aggregierte Lern-KPIs + jüngste Lernsignale.
 
@@ -190,7 +190,7 @@ async def get_learning_overview(
             func.count().filter(AgentFeedback.feedback_type == "rejected").label("rejected"),
             func.count().filter(AgentFeedback.feedback_type == "thumbs_up").label("thumbs_up"),
             func.count().filter(AgentFeedback.feedback_type == "thumbs_down").label("thumbs_down"),
-        ).where(AgentFeedback.created_at >= cutoff)
+        ).where(AgentFeedback.created_at >= cutoff, AgentFeedback.user_id == user.id)
     )
     fb = fb_q.one()
 
@@ -203,7 +203,7 @@ async def get_learning_overview(
         select(
             func.count().label("total"),
             func.count().filter(AgentEpisode.was_corrected.is_(True)).label("corrected"),
-        ).where(AgentEpisode.created_at >= cutoff)
+        ).where(AgentEpisode.created_at >= cutoff, AgentEpisode.user_id == user.id)
     )
     ep = ep_q.one()
 
@@ -211,13 +211,13 @@ async def get_learning_overview(
         select(
             func.count().filter(LearnedRule.status == "proposed").label("proposed"),
             func.count().filter(LearnedRule.status == "active").label("active"),
-        )
+        ).where(LearnedRule.user_id == user.id)
     )
     rules = rules_q.one()
 
     recent_q = await db.execute(
         select(AgentFeedback)
-        .where(AgentFeedback.created_at >= cutoff)
+        .where(AgentFeedback.created_at >= cutoff, AgentFeedback.user_id == user.id)
         .order_by(AgentFeedback.created_at.desc())
         .limit(recent_limit)
     )
@@ -378,10 +378,10 @@ async def list_learned_rules(
     rule_type: str | None = None,
     limit: int = 100,
     db: AsyncSession = Depends(get_db),
-    _user: User = Depends(require_role("owner")),
+    user: User = Depends(require_role("owner")),
 ) -> LearnedRulesResponse:
     """Listet gelernte/gepflegte Regeln (optional nach Status/Typ gefiltert)."""
-    stmt = select(LearnedRule)
+    stmt = select(LearnedRule).where(LearnedRule.user_id == user.id)
     if status:
         stmt = stmt.where(LearnedRule.status == status)
     if rule_type:
@@ -397,7 +397,7 @@ async def list_learned_rules(
 async def create_learned_rule(
     payload: LearnedRuleCreate,
     db: AsyncSession = Depends(get_db),
-    _user: User = Depends(require_role("owner")),
+    user: User = Depends(require_role("owner")),
 ) -> LearnedRuleOut:
     """Legt eine Regel manuell an (LLM-Leitregel oder deterministische Override)."""
     if not payload.rule_text.strip():
@@ -409,6 +409,7 @@ async def create_learned_rule(
         payload.match_conditions, payload.action,
     )
     rule = LearnedRule(
+        user_id=user.id,
         rule_text=payload.rule_text.strip(),
         rule_type=payload.rule_type,
         scope=payload.scope,
@@ -695,7 +696,7 @@ class SkillUsageResponse(BaseModel):
 async def get_skill_usage(
     jobs_limit: int = 500,
     db: AsyncSession = Depends(get_db),
-    _user: User = Depends(require_role("owner")),
+    user: User = Depends(require_role("owner")),
 ) -> SkillUsageResponse:
     """Echte Skill-Nutzung des Agenten, abgeleitet aus den Job-Traces.
 
@@ -737,6 +738,7 @@ async def get_skill_usage(
 
     rows = await db.execute(
         select(AgentJob.metadata_json, AgentJob.completed_at, AgentJob.created_at)
+        .where(AgentJob.user_id == user.id)
         .order_by(AgentJob.created_at.desc())
         .limit(jobs_limit)
     )

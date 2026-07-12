@@ -158,6 +158,7 @@ async def create_briefing_job(
 
     async with async_session() as db:
         job = AgentJob(
+            user_id=owner.id if owner else None,
             job_type=briefing_type,
             status="queued",
             metadata_json={

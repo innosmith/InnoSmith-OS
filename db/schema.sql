@@ -129,6 +129,7 @@ CREATE TABLE attachments (
 -- Agent-Jobs
 CREATE TABLE agent_jobs (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id         UUID REFERENCES users(id) ON DELETE CASCADE,
     task_id         UUID REFERENCES tasks(id) ON DELETE CASCADE,
     job_type        TEXT,
     status          TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued', 'running', 'awaiting_approval', 'completed', 'failed')),
@@ -183,7 +184,8 @@ CREATE TABLE board_members (
 -- E-Mail-Triage
 CREATE TABLE email_triage (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    message_id      TEXT NOT NULL UNIQUE,
+    user_id         UUID REFERENCES users(id) ON DELETE CASCADE,
+    message_id      TEXT NOT NULL,
     subject         TEXT,
     from_address    TEXT,
     from_name       TEXT,
@@ -195,13 +197,15 @@ CREATE TABLE email_triage (
     suggested_action JSONB,
     agent_job_id    UUID REFERENCES agent_jobs(id),
     status          TEXT DEFAULT 'pending' CHECK (status IN ('pending', 'processing', 'acted', 'dismissed')),
-    created_at      TIMESTAMPTZ DEFAULT now()
+    created_at      TIMESTAMPTZ DEFAULT now(),
+    CONSTRAINT uq_email_triage_user_message UNIQUE (user_id, message_id)
 );
 
 -- Absender-Profile (Beziehungsgedaechtnis)
 CREATE TABLE sender_profiles (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    email           TEXT NOT NULL UNIQUE,
+    user_id         UUID REFERENCES users(id) ON DELETE CASCADE,
+    email           TEXT NOT NULL,
     display_name    TEXT,
     organization    TEXT,
     relationship    TEXT CHECK (relationship IN ('kunde', 'partner', 'lieferant', 'intern', 'hochschule', 'behoerde', 'unbekannt')),
@@ -215,7 +219,8 @@ CREATE TABLE sender_profiles (
     style_notes     TEXT,
     correction_count INT DEFAULT 0,
     created_at      TIMESTAMPTZ DEFAULT now(),
-    updated_at      TIMESTAMPTZ DEFAULT now()
+    updated_at      TIMESTAMPTZ DEFAULT now(),
+    CONSTRAINT uq_sender_profiles_user_email UNIQUE (user_id, email)
 );
 
 -- Indizes
@@ -370,8 +375,9 @@ CREATE TRIGGER llm_conversations_updated_at BEFORE UPDATE ON llm_conversations
 -- Teams-Chat-Triage
 CREATE TABLE chat_triage (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id         UUID REFERENCES users(id) ON DELETE CASCADE,
     chat_id         TEXT NOT NULL,
-    message_id      TEXT NOT NULL UNIQUE,
+    message_id      TEXT NOT NULL,
     from_name       TEXT,
     from_id         TEXT,
     body_preview    TEXT,
@@ -382,7 +388,8 @@ CREATE TABLE chat_triage (
     suggested_action JSONB,
     agent_job_id    UUID REFERENCES agent_jobs(id),
     status          TEXT DEFAULT 'pending' CHECK (status IN ('pending', 'processing', 'acted', 'dismissed')),
-    created_at      TIMESTAMPTZ DEFAULT now()
+    created_at      TIMESTAMPTZ DEFAULT now(),
+    CONSTRAINT uq_chat_triage_user_message UNIQUE (user_id, message_id)
 );
 
 CREATE INDEX idx_chat_triage_status ON chat_triage(status);
@@ -395,14 +402,16 @@ CREATE TRIGGER chat_triage_notify AFTER INSERT OR UPDATE ON chat_triage
 -- Follow-up-Erkennung: Dedupe-Anker pro Sent-Konversation
 CREATE TABLE followup_suggestions (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    conversation_id TEXT NOT NULL UNIQUE,
+    user_id         UUID REFERENCES users(id) ON DELETE CASCADE,
+    conversation_id TEXT NOT NULL,
     task_id         UUID REFERENCES tasks(id) ON DELETE SET NULL,
     subject         TEXT,
     recipient       TEXT,
     sent_at         TIMESTAMPTZ,
     status          TEXT DEFAULT 'suggested'
         CHECK (status IN ('suggested', 'answered', 'skipped')),
-    created_at      TIMESTAMPTZ DEFAULT now()
+    created_at      TIMESTAMPTZ DEFAULT now(),
+    CONSTRAINT uq_followup_suggestions_user_conversation UNIQUE (user_id, conversation_id)
 );
 
 CREATE INDEX idx_followup_suggestions_status ON followup_suggestions(status);
@@ -410,8 +419,9 @@ CREATE INDEX idx_followup_suggestions_status ON followup_suggestions(status);
 -- Teams-Meeting-Transkripte (Original + Protokoll + Anonymisierung)
 CREATE TABLE meeting_transcripts (
     id                      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id                 UUID REFERENCES users(id) ON DELETE CASCADE,
     meeting_id              TEXT NOT NULL,
-    transcript_id           TEXT NOT NULL UNIQUE,
+    transcript_id           TEXT NOT NULL,
     subject                 TEXT,
     organizer               TEXT,
     started_at              TIMESTAMPTZ,
@@ -427,7 +437,8 @@ CREATE TABLE meeting_transcripts (
     agent_job_id            UUID REFERENCES agent_jobs(id),
     error_message           TEXT,
     created_at              TIMESTAMPTZ DEFAULT now(),
-    updated_at              TIMESTAMPTZ DEFAULT now()
+    updated_at              TIMESTAMPTZ DEFAULT now(),
+    CONSTRAINT uq_meeting_transcripts_user_transcript UNIQUE (user_id, transcript_id)
 );
 
 CREATE INDEX idx_meeting_transcripts_status ON meeting_transcripts(status);
@@ -592,6 +603,7 @@ CREATE TRIGGER capacity_allocations_updated_at BEFORE UPDATE ON capacity_allocat
 -- Erfasste Korrektursignale (Draft-Edits, Reklassifikation, Daumen, Chat-Teach)
 CREATE TABLE agent_feedback (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id         UUID REFERENCES users(id) ON DELETE CASCADE,
     agent_job_id    UUID REFERENCES agent_jobs(id) ON DELETE SET NULL,
     sender_email    TEXT,
     source          TEXT NOT NULL DEFAULT 'cockpit'
@@ -616,6 +628,7 @@ CREATE INDEX idx_agent_feedback_created ON agent_feedback(created_at DESC);
 -- Episodisches Gedaechtnis mit lokalem Embedding (pgvector-Recall)
 CREATE TABLE agent_episodes (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id         UUID REFERENCES users(id) ON DELETE CASCADE,
     agent_job_id    UUID REFERENCES agent_jobs(id) ON DELETE SET NULL,
     job_type        TEXT,
     sender_email    TEXT,
@@ -639,6 +652,7 @@ CREATE INDEX idx_agent_episodes_embedding
 --   rule_type='deterministic' -> match_conditions -> action, im Code vor dem LLM
 CREATE TABLE learned_rules (
     id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id          UUID REFERENCES users(id) ON DELETE CASCADE,
     scope            TEXT NOT NULL DEFAULT 'triage'
                      CHECK (scope IN ('triage', 'draft', 'task', 'calendar', 'general', 'chat')),
     rule_text        TEXT NOT NULL,
@@ -663,14 +677,16 @@ CREATE INDEX idx_learned_rules_type ON learned_rules(rule_type);
 -- Style-Store: gesendete Antworten als Few-Shot-Stil-Anker fuer Entwuerfe (pgvector)
 CREATE TABLE sent_mail_examples (
     id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    graph_id    TEXT UNIQUE NOT NULL,
+    user_id     UUID REFERENCES users(id) ON DELETE CASCADE,
+    graph_id    TEXT NOT NULL,
     recipient   TEXT,
     subject     TEXT,
     body_text   TEXT NOT NULL,
     sent_at     TIMESTAMPTZ,
     language    TEXT,
     embedding   vector(1024),
-    created_at  TIMESTAMPTZ DEFAULT now()
+    created_at  TIMESTAMPTZ DEFAULT now(),
+    CONSTRAINT uq_sent_mail_examples_user_graph UNIQUE (user_id, graph_id)
 );
 
 CREATE INDEX idx_sent_mail_examples_recipient ON sent_mail_examples(recipient);
@@ -692,6 +708,7 @@ CREATE TRIGGER learned_rules_notify AFTER INSERT OR UPDATE ON learned_rules
 -- Passage; ``content_tsv`` (generiert) traegt den lexikalen Hybrid-Anteil.
 CREATE TABLE semantic_documents (
     id                 UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id            UUID REFERENCES users(id) ON DELETE CASCADE,
     source_type        TEXT NOT NULL
                        CHECK (source_type IN ('email', 'onedrive', 'upload', 'transcript')),
     source_id          TEXT NOT NULL,
@@ -708,7 +725,7 @@ CREATE TABLE semantic_documents (
                        ) STORED,
     source_modified_at TIMESTAMPTZ,
     indexed_at         TIMESTAMPTZ DEFAULT now(),
-    UNIQUE (source_type, source_id, chunk_index)
+    CONSTRAINT uq_semantic_documents_user_source_chunk UNIQUE (user_id, source_type, source_id, chunk_index)
 );
 
 CREATE INDEX idx_semantic_documents_source ON semantic_documents(source_type, source_id);
@@ -717,6 +734,20 @@ CREATE INDEX idx_semantic_documents_embedding
     ON semantic_documents USING hnsw (embedding halfvec_cosine_ops);
 CREATE INDEX idx_semantic_documents_tsv
     ON semantic_documents USING gin (content_tsv);
+
+-- User-Scope-Indizes (Mehrbenutzer-Fundament): jede persoenliche Tabelle traegt
+-- eine user_id und wird nach Principal gefiltert.
+CREATE INDEX idx_agent_jobs_user ON agent_jobs(user_id);
+CREATE INDEX idx_email_triage_user ON email_triage(user_id);
+CREATE INDEX idx_chat_triage_user ON chat_triage(user_id);
+CREATE INDEX idx_sender_profiles_user ON sender_profiles(user_id);
+CREATE INDEX idx_learned_rules_user ON learned_rules(user_id);
+CREATE INDEX idx_sent_mail_examples_user ON sent_mail_examples(user_id);
+CREATE INDEX idx_agent_feedback_user ON agent_feedback(user_id);
+CREATE INDEX idx_agent_episodes_user ON agent_episodes(user_id);
+CREATE INDEX idx_followup_suggestions_user ON followup_suggestions(user_id);
+CREATE INDEX idx_meeting_transcripts_user ON meeting_transcripts(user_id);
+CREATE INDEX idx_semantic_documents_user ON semantic_documents(user_id);
 
 -- Laufstatus des semantischen Indexer-Daemons (Singleton, id=1). Genau EIN Writer
 -- (der Daemon), das Backend liest nur -> Transparenz im Suchindex-Tab ohne Kopplung.

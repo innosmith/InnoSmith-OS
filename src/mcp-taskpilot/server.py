@@ -491,6 +491,15 @@ async def _semantic_search_documents(p: asyncpg.Pool, arguments: dict) -> list[T
     sources = arguments.get("sources") or None
     cand = max(limit, 300)
 
+    # Scope pro Principal: entweder explizit uebergeben oder (Ein-Personen-System)
+    # der Owner. So sieht der Agent nur die Dokumente seines Principals.
+    principal = arguments.get("user_id")
+    if not principal:
+        owner_row = await p.fetchrow(
+            "SELECT id FROM users WHERE role = 'owner' ORDER BY created_at LIMIT 1"
+        )
+        principal = str(owner_row["id"]) if owner_row else None
+
     semantic: list[dict] = []
     keyword: list[dict] = []
 
@@ -498,15 +507,18 @@ async def _semantic_search_documents(p: asyncpg.Pool, arguments: dict) -> list[T
         vec = await _embed_query(query)
         if vec is not None:
             params = [_vec_literal(vec)]
-            src = ""
+            filt = " WHERE embedding IS NOT NULL"
             if sources:
-                src = " AND source_type = ANY($2)"
                 params.append(sources)
+                filt += f" AND source_type = ANY(${len(params)})"
+            if principal:
+                params.append(principal)
+                filt += f" AND user_id = ${len(params)}::uuid"
             rows = await p.fetch(
                 "SELECT source_type, source_id, title, url, mime, "
                 "left(content_text, 260) AS snippet, "
                 "1 - (embedding <=> $1::halfvec) AS similarity "
-                "FROM semantic_documents WHERE embedding IS NOT NULL" + src +
+                "FROM semantic_documents" + filt +
                 " ORDER BY embedding <=> $1::halfvec LIMIT " + str(cand),
                 *params,
             )
@@ -520,16 +532,19 @@ async def _semantic_search_documents(p: asyncpg.Pool, arguments: dict) -> list[T
 
     if mode in ("hybrid", "exact"):
         params = [query]
-        src = ""
+        filt = ""
         if sources:
-            src = " AND source_type = ANY($2)"
             params.append(sources)
+            filt += f" AND source_type = ANY(${len(params)})"
+        if principal:
+            params.append(principal)
+            filt += f" AND user_id = ${len(params)}::uuid"
         rows = await p.fetch(
             "SELECT source_type, source_id, title, url, mime, "
             "ts_headline('german', content_text, q, "
             "'MaxFragments=2,MinWords=5,MaxWords=22,StartSel=<b>,StopSel=</b>') AS snippet "
             "FROM semantic_documents, websearch_to_tsquery('german', $1) q "
-            "WHERE content_tsv @@ q" + src +
+            "WHERE content_tsv @@ q" + filt +
             " ORDER BY ts_rank_cd(content_tsv, q) DESC LIMIT " + str(cand),
             *params,
         )

@@ -214,6 +214,7 @@ async def create_task(
     # der Umweg über PATCH einen Job -- POST mit assignee='agent' lief leer.
     if task.assignee == "agent" and user.role == "owner":
         db.add(AgentJob(
+            user_id=user.id,
             task_id=task.id,
             job_type="task",
             status="planned",
@@ -514,6 +515,7 @@ async def update_task(
         # Snapshot fürs spätere Enforcement; die Beschreibung lädt der Worker zur
         # Laufzeit frisch aus der Task (voller Kontext inkl. Checkliste/Anhänge).
         job = AgentJob(
+            user_id=user.id,
             task_id=task.id,
             job_type="task",
             status="planned",

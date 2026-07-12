@@ -67,7 +67,7 @@ from app.services.notification import (
     notify_chat_triage_task,
     notify_task_suggested,
 )
-from app.core.principal import get_owner_settings
+from app.core.principal import get_owner_settings, system_principal_id
 
 logger = logging.getLogger("taskpilot.hermes_worker")
 
@@ -581,6 +581,7 @@ async def _build_rules_block(*contexts: str) -> str:
                     LearnedRule.status == "active",
                     LearnedRule.rule_type == "llm",
                     LearnedRule.scope.in_(tuple(wanted)),
+                    LearnedRule.user_id == await system_principal_id(db),
                 )
                 .order_by(LearnedRule.approved_at.desc())
                 .limit(20)
@@ -613,7 +614,10 @@ async def _build_sender_style_block(from_addr: str) -> str:
 
         async with async_session() as db:
             row = await db.execute(
-                select(SenderProfile).where(SenderProfile.email == from_addr.lower())
+                select(SenderProfile).where(
+                    SenderProfile.email == from_addr.lower(),
+                    SenderProfile.user_id == await system_principal_id(db),
+                )
             )
             p = row.scalar_one_or_none()
         if p is None:
@@ -680,7 +684,8 @@ async def _build_style_anchor_block(meta: dict) -> str:
         query = f"Betreff: {subject}\n{preview}"
         async with async_session() as db:
             anchors = await find_style_anchors(
-                db, query_text=query, recipient=from_addr, k=3
+                db, query_text=query, recipient=from_addr, k=3,
+                user_id=await system_principal_id(db),
             )
         blocks: list[str] = []
         for a in anchors:
@@ -766,6 +771,7 @@ async def _build_project_routing_hint(from_addr: str) -> str:
                 select(AgentFeedback.corrected).where(
                     AgentFeedback.feedback_type == "task_moved",
                     func.lower(AgentFeedback.sender_email) == from_addr.lower(),
+                    AgentFeedback.user_id == await system_principal_id(db),
                 )
             )
             targets: _Counter = _Counter()
@@ -3830,6 +3836,7 @@ async def _resweep_unclassified_triages(limit: int = 20) -> int:
             new_meta["resweep_count"] = resweep_count + 1
             new_meta["resweep_of"] = str(job.id)
             new_job = AgentJob(
+                user_id=job.user_id,
                 task_id=None,
                 job_type="email_triage",
                 status="queued",

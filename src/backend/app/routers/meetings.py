@@ -209,6 +209,7 @@ async def reanalyze_meeting(
     override = (body.llm_override if body else None) or None
     async with async_session() as db:
         job = AgentJob(
+            user_id=m.user_id,
             job_type="meeting_summary",
             status="queued",
             metadata_json={

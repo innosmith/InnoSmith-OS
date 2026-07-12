@@ -57,7 +57,11 @@ async def list_triage_items(
     user: User = Depends(get_current_user),
 ) -> list[EmailTriageOut]:
     _require_owner(user)
-    query = select(EmailTriage).order_by(EmailTriage.created_at.desc())
+    query = (
+        select(EmailTriage)
+        .where(EmailTriage.user_id == user.id)
+        .order_by(EmailTriage.created_at.desc())
+    )
     if status_filter:
         query = query.where(EmailTriage.status == status_filter)
     if triage_class:
@@ -75,13 +79,14 @@ async def triage_stats(
     _require_owner(user)
     result = await db.execute(
         select(EmailTriage.status, func.count(EmailTriage.id))
+        .where(EmailTriage.user_id == user.id)
         .group_by(EmailTriage.status)
     )
     by_status = {row[0]: row[1] for row in result.all()}
 
     result2 = await db.execute(
         select(EmailTriage.triage_class, func.count(EmailTriage.id))
-        .where(EmailTriage.status == "pending")
+        .where(EmailTriage.status == "pending", EmailTriage.user_id == user.id)
         .group_by(EmailTriage.triage_class)
     )
     by_class = {row[0] or "unclassified": row[1] for row in result2.all()}
@@ -205,6 +210,7 @@ async def _enqueue_corrective_triage_job(
         meta = _build_corrective_meta(orig_meta, item, forced_class, reason)
 
         job = AgentJob(
+            user_id=item.user_id,
             task_id=None,
             job_type="email_triage",
             status="queued",
@@ -419,6 +425,7 @@ async def replay_single(
     conversation_id = msg.get("conversationId", "")
 
     job = AgentJob(
+        user_id=user.id,
         task_id=None,
         job_type="email_triage",
         status="queued",
@@ -438,6 +445,7 @@ async def replay_single(
     await db.flush()
 
     triage = EmailTriage(
+        user_id=user.id,
         message_id=f"replay_{job.id}_{body.message_id[:40]}",
         subject=subject,
         from_address=from_address,
@@ -473,7 +481,10 @@ async def replay_batch(
 
     query = (
         select(EmailTriage)
-        .where(EmailTriage.message_id.not_like("replay_%"))
+        .where(
+            EmailTriage.message_id.not_like("replay_%"),
+            EmailTriage.user_id == user.id,
+        )
         .order_by(EmailTriage.created_at.desc())
     )
     if body.triage_class:
@@ -489,6 +500,7 @@ async def replay_batch(
     jobs_created = []
     for item in items:
         job = AgentJob(
+            user_id=user.id,
             task_id=None,
             job_type="email_triage",
             status="queued",

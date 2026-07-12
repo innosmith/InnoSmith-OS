@@ -24,6 +24,7 @@ from sqlalchemy import select
 from app.config import get_settings
 from app.database import async_session
 from app.models import AgentJob, MeetingTranscript
+from app.core.principal import system_principal_id
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "..", "email-graph"))
 from graph_client import GraphClient, GraphConfig  # noqa: E402
@@ -152,9 +153,16 @@ async def poll_meeting_transcripts() -> int:
         return 0
 
     async with async_session() as db:
+        principal_id = await system_principal_id(db)
         known = {
             row[0]
-            for row in (await db.execute(select(MeetingTranscript.transcript_id))).all()
+            for row in (
+                await db.execute(
+                    select(MeetingTranscript.transcript_id).where(
+                        MeetingTranscript.user_id == principal_id
+                    )
+                )
+            ).all()
         }
 
     stored = 0
@@ -193,6 +201,7 @@ async def poll_meeting_transcripts() -> int:
 
         async with async_session() as db:
             record = MeetingTranscript(
+                user_id=principal_id,
                 meeting_id=meeting_id,
                 transcript_id=transcript_id,
                 subject=subject,
@@ -206,6 +215,7 @@ async def poll_meeting_transcripts() -> int:
             db.add(record)
             await db.flush()
             job = AgentJob(
+                user_id=principal_id,
                 job_type="meeting_summary",
                 status="queued",
                 metadata_json={

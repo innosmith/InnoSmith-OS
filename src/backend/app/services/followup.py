@@ -174,6 +174,8 @@ async def check_followups_due() -> int:
     async with async_session() as db:
         owner = await get_owner(db)
         settings = dict((owner.settings if owner else None) or {})
+    # Hintergrund-Lauf ohne Request-Kontext -> System-Principal (heute == Owner).
+    principal_id = owner.id if owner else None
     if settings.get("followup_enabled") is False:
         return 0
     try:
@@ -203,7 +205,13 @@ async def check_followups_due() -> int:
     async with async_session() as db:
         known_convs = {
             row[0]
-            for row in (await db.execute(select(FollowupSuggestion.conversation_id))).all()
+            for row in (
+                await db.execute(
+                    select(FollowupSuggestion.conversation_id).where(
+                        FollowupSuggestion.user_id == principal_id
+                    )
+                )
+            ).all()
         }
         task_convs = {
             row[0]
@@ -244,6 +252,7 @@ async def check_followups_due() -> int:
             # Bewusst kein Nachfassen -> dauerhaft als 'skipped' merken.
             async with async_session() as db:
                 db.add(FollowupSuggestion(
+                    user_id=principal_id,
                     conversation_id=conv,
                     subject=subject,
                     recipient=recipient,
@@ -263,6 +272,7 @@ async def check_followups_due() -> int:
         if _has_reply(thread, own_email, sent_at):
             async with async_session() as db:
                 db.add(FollowupSuggestion(
+                    user_id=principal_id,
                     conversation_id=conv,
                     subject=subject,
                     recipient=recipient,
@@ -297,6 +307,7 @@ async def check_followups_due() -> int:
                 email_conversation_id=conv,
             )
             db.add(FollowupSuggestion(
+                user_id=principal_id,
                 conversation_id=conv,
                 task_id=task.id if task else None,
                 subject=subject,

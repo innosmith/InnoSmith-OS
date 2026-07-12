@@ -24,9 +24,22 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import AgentFeedback, AgentJob
+from app.core.principal import system_principal_id
 from ai9.embeddings import embed_text, to_pgvector
 
 logger = logging.getLogger("taskpilot.learning")
+
+
+async def _resolve_principal(db: AsyncSession, user_id: uuid.UUID | str | None):
+    """Liefert den handelnden Principal fuer eine Schreiboperation.
+
+    Wird kein ``user_id`` uebergeben (die meisten Background-Aufrufer), faellt die
+    Funktion auf den System-Principal (heute == Owner) zurueck. So ist jede
+    gelernte Zeile einem Principal zugeordnet und fuer diesen sichtbar.
+    """
+    if user_id is not None:
+        return uuid.UUID(user_id) if isinstance(user_id, str) else user_id
+    return await system_principal_id(db)
 
 # Marker, ab denen der zitierte Original-Thread beginnt -- alles danach wird beim
 # Diff ignoriert, damit nur die echte inhaltliche/stilistische Aenderung zaehlt.
@@ -147,6 +160,7 @@ async def update_learned_tone(
     *,
     email: str | None,
     tone: dict | None,
+    user_id: uuid.UUID | str | None = None,
     commit: bool = False,
 ) -> None:
     """Merged Anrede/Register/Schlussformel in ``sender_profiles.learned_tone``.
@@ -159,18 +173,19 @@ async def update_learned_tone(
     try:
         import json as _json
 
+        principal = await _resolve_principal(db, user_id)
         await db.execute(
             text(
                 """
-                INSERT INTO sender_profiles (email, learned_tone, language)
-                VALUES (:email, CAST(:tone AS jsonb), 'de')
-                ON CONFLICT (email) DO UPDATE SET
+                INSERT INTO sender_profiles (user_id, email, learned_tone, language)
+                VALUES (:uid, :email, CAST(:tone AS jsonb), 'de')
+                ON CONFLICT (user_id, email) DO UPDATE SET
                     learned_tone = COALESCE(sender_profiles.learned_tone, '{}'::jsonb)
                                    || CAST(:tone AS jsonb),
                     updated_at = now()
                 """
             ),
-            {"email": email.lower(), "tone": _json.dumps(tone)},
+            {"uid": principal, "email": email.lower(), "tone": _json.dumps(tone)},
         )
         if commit:
             await db.commit()
@@ -246,6 +261,7 @@ async def record_chat_teach(
     *,
     content: str,
     conversation_id: str | None = None,
+    user_id: uuid.UUID | str | None = None,
     commit: bool = False,
 ) -> bool:
     """Erfasst eine Chat-Lehr-Absicht: ``chat_teach``-Feedback + Regel-Vorschlag.
@@ -256,23 +272,27 @@ async def record_chat_teach(
     try:
         from app.models import LearnedRule
 
+        principal = await _resolve_principal(db, user_id)
         await record_feedback(
             db,
             feedback_type="chat_teach",
             source="chat",
             reason=content[:500],
             original={"conversation_id": conversation_id} if conversation_id else None,
+            user_id=principal,
         )
         # Idempotenz ueber ALLE Status (auch ``rejected``): eine einmal verworfene
-        # Chat-Lektion wird nicht erneut vorgeschlagen (analog Reflexion).
+        # Chat-Lektion wird nicht erneut vorgeschlagen (analog Reflexion). Pro Principal.
         existing = await db.execute(
             select(LearnedRule.id).where(
                 LearnedRule.rule_text == content[:2000],
+                LearnedRule.user_id == principal,
             )
         )
         if existing.first() is None:
             db.add(
                 LearnedRule(
+                    user_id=principal,
                     scope="general",
                     rule_text=content[:2000],
                     status="proposed",
@@ -301,13 +321,16 @@ async def record_feedback(
     corrected: dict | None = None,
     diff_text: str | None = None,
     reason: str | None = None,
+    user_id: uuid.UUID | str | None = None,
     commit: bool = False,
 ) -> AgentFeedback | None:
     """Schreibt ein Korrektursignal. Best-effort -- darf nie den Aufrufer stoppen."""
     try:
         if isinstance(agent_job_id, str):
             agent_job_id = uuid.UUID(agent_job_id)
+        principal = await _resolve_principal(db, user_id)
         fb = AgentFeedback(
+            user_id=principal,
             agent_job_id=agent_job_id,
             sender_email=(sender_email or None),
             source=source,
@@ -423,6 +446,7 @@ async def bump_sender_correction(
     *,
     email: str | None,
     diff_text: str | None = None,
+    user_id: uuid.UUID | str | None = None,
     commit: bool = False,
 ) -> None:
     """Schreibt das per-Absender-Lernsignal nach einer Draft-Korrektur fort.
@@ -436,12 +460,13 @@ async def bump_sender_correction(
     try:
         note = _summarize_diff_for_style(diff_text)
         bullet = f"- {note}" if note else None
+        principal = await _resolve_principal(db, user_id)
         await db.execute(
             text(
                 """
-                INSERT INTO sender_profiles (email, correction_count, style_notes, language)
-                VALUES (:email, 1, :bullet, 'de')
-                ON CONFLICT (email) DO UPDATE SET
+                INSERT INTO sender_profiles (user_id, email, correction_count, style_notes, language)
+                VALUES (:uid, :email, 1, :bullet, 'de')
+                ON CONFLICT (user_id, email) DO UPDATE SET
                     correction_count = sender_profiles.correction_count + 1,
                     style_notes = CASE
                         WHEN :bullet IS NULL THEN sender_profiles.style_notes
@@ -453,7 +478,7 @@ async def bump_sender_correction(
                     updated_at = now()
                 """
             ),
-            {"email": email.lower(), "bullet": bullet},
+            {"uid": principal, "email": email.lower(), "bullet": bullet},
         )
         if commit:
             await db.commit()
@@ -471,6 +496,7 @@ async def record_episode(
     decision: dict | None = None,
     was_corrected: bool = False,
     lesson: str | None = None,
+    user_id: uuid.UUID | str | None = None,
     commit: bool = False,
 ) -> bool:
     """Legt eine Episode mit lokalem Embedding ab (rohes SQL wegen pgvector).
@@ -481,20 +507,22 @@ async def record_episode(
     try:
         import json as _json
 
+        principal = await _resolve_principal(db, user_id)
         vec = await embed_text(summary)
         emb_literal = to_pgvector(vec) if vec else None
         await db.execute(
             text(
                 """
                 INSERT INTO agent_episodes
-                    (agent_job_id, job_type, sender_email, summary, decision,
+                    (user_id, agent_job_id, job_type, sender_email, summary, decision,
                      was_corrected, lesson, embedding)
                 VALUES
-                    (:job_id, :job_type, :sender, :summary, CAST(:decision AS jsonb),
+                    (:uid, :job_id, :job_type, :sender, :summary, CAST(:decision AS jsonb),
                      :was_corrected, :lesson, CAST(:emb AS vector))
                 """
             ),
             {
+                "uid": principal,
                 "job_id": str(agent_job_id) if agent_job_id else None,
                 "job_type": job_type,
                 "sender": sender_email,
@@ -546,17 +574,20 @@ async def recall_similar_episodes(
     job_type: str | None = None,
     k: int = 4,
     corrected_only: bool = False,
+    user_id: uuid.UUID | str | None = None,
 ) -> list[dict]:
     """Findet die ``k`` aehnlichsten frueheren Episoden via pgvector (Cosine).
 
-    Best-effort: ohne Embedding oder bei Fehler -> leere Liste.
+    Best-effort: ohne Embedding oder bei Fehler -> leere Liste. Ohne expliziten
+    ``user_id`` wird auf den System-Principal gescoped (Recall bleibt pro Principal).
     """
     try:
+        principal = await _resolve_principal(db, user_id)
         vec = await embed_text(query, is_query=True)
         if not vec:
             return []
-        conditions = ["embedding IS NOT NULL"]
-        params: dict = {"emb": to_pgvector(vec), "k": k}
+        conditions = ["embedding IS NOT NULL", "user_id = :uid"]
+        params: dict = {"emb": to_pgvector(vec), "k": k, "uid": principal}
         if job_type:
             conditions.append("job_type = :job_type")
             params["job_type"] = job_type

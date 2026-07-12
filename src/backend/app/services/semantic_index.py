@@ -30,7 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.database import async_session
 from ai9.embeddings import embed_text, to_pgvector
-from app.core.principal import get_owner_settings
+from app.core.principal import get_owner_settings, system_principal_id
 from app.services.context_resolver import _extract_text
 from app.services.learning import html_to_text, strip_quoted_history
 
@@ -148,14 +148,16 @@ async def _load_excluded_paths(db: AsyncSession) -> list[str]:
     return [str(p) for p in val if str(p).strip()]
 
 
-async def purge_excluded_documents(db: AsyncSession, excluded: list[str]) -> int:
+async def purge_excluded_documents(db: AsyncSession, excluded: list[str], user_id=None) -> int:
     """Loescht bereits indexierte OneDrive-Zeilen, die unter einem Ausschlusspfad liegen.
 
     Sorgt dafuer, dass nach Aktivierung eines Ausschlusses keine Leichen im Index
     verbleiben. Match ueber ``metadata->>'path'`` (der gespeicherte Elternpfad).
-    Gibt die Anzahl geloeschter Chunk-Zeilen zurueck.
+    Gibt die Anzahl geloeschter Chunk-Zeilen zurueck. Auf ``user_id`` gescoped, falls
+    uebergeben.
     """
     total = 0
+    scope = "AND user_id = :uid" if user_id is not None else ""
     for prefix in excluded:
         pref = _normalize_drive_path(prefix)
         if not pref:
@@ -164,9 +166,9 @@ async def purge_excluded_documents(db: AsyncSession, excluded: list[str]) -> int
         # beginnt mit ``/drive/root:`` -- wir vergleichen den Teil danach.
         res = await db.execute(
             text(
-                """
+                f"""
                 DELETE FROM semantic_documents
-                WHERE source_type = 'onedrive'
+                WHERE source_type = 'onedrive' {scope}
                   AND lower(
                         substring(metadata->>'path' from position(:root in metadata->>'path') + :rootlen)
                       ) LIKE :like
@@ -176,6 +178,7 @@ async def purge_excluded_documents(db: AsyncSession, excluded: list[str]) -> int
                 "root": _DRIVE_ROOT_PREFIX,
                 "rootlen": len(_DRIVE_ROOT_PREFIX),
                 "like": pref.rstrip("/") + "%",
+                "uid": user_id,
             },
         )
         total += res.rowcount or 0
@@ -218,6 +221,7 @@ def chunk_text(body: str, size: int, overlap: int) -> list[str]:
 async def _upsert_chunks(
     db: AsyncSession,
     *,
+    user_id,
     source_type: str,
     source_id: str,
     title: str | None,
@@ -232,12 +236,16 @@ async def _upsert_chunks(
     Löscht zuerst bestehende Zeilen (damit eine geschrumpfte Chunk-Zahl keine
     Leichen hinterlässt), embeddet dann jeden Chunk und fügt ihn ein. Ein Chunk
     ohne Embedding (Ollama offline) wird trotzdem gespeichert (tsvector-Keyword
-    bleibt nutzbar), damit der Index nicht bei LLM-Ausfall bricht.
+    bleibt nutzbar), damit der Index nicht bei LLM-Ausfall bricht. Alles pro
+    ``user_id`` gescoped.
     """
     cfg = get_settings()
     await db.execute(
-        text("DELETE FROM semantic_documents WHERE source_type = :st AND source_id = :sid"),
-        {"st": source_type, "sid": source_id},
+        text(
+            "DELETE FROM semantic_documents "
+            "WHERE user_id = :uid AND source_type = :st AND source_id = :sid"
+        ),
+        {"uid": user_id, "st": source_type, "sid": source_id},
     )
     written = 0
     for idx, chunk in enumerate(chunks):
@@ -247,13 +255,13 @@ async def _upsert_chunks(
             text(
                 """
                 INSERT INTO semantic_documents
-                    (source_type, source_id, chunk_index, title, content_text,
+                    (user_id, source_type, source_id, chunk_index, title, content_text,
                      url, mime, metadata, embedding, source_modified_at)
                 VALUES
-                    (:st, :sid, :idx, :title, :body, :url, :mime,
+                    (:uid, :st, :sid, :idx, :title, :body, :url, :mime,
                      CAST(:meta AS jsonb), CAST(:emb AS halfvec),
                      CAST(:modified AS timestamptz))
-                ON CONFLICT (source_type, source_id, chunk_index) DO UPDATE SET
+                ON CONFLICT (user_id, source_type, source_id, chunk_index) DO UPDATE SET
                     title = EXCLUDED.title,
                     content_text = EXCLUDED.content_text,
                     url = EXCLUDED.url,
@@ -265,6 +273,7 @@ async def _upsert_chunks(
                 """
             ),
             {
+                "uid": user_id,
                 "st": source_type,
                 "sid": source_id,
                 "idx": idx,
@@ -300,20 +309,22 @@ def _parse_graph_dt(value: str | None) -> datetime | None:
         return None
 
 
-async def _existing_modified(db: AsyncSession, source_type: str, source_id: str) -> datetime | None:
+async def _existing_modified(
+    db: AsyncSession, source_type: str, source_id: str, user_id
+) -> datetime | None:
     row = await db.execute(
         text(
             "SELECT max(source_modified_at) FROM semantic_documents "
-            "WHERE source_type = :st AND source_id = :sid"
+            "WHERE user_id = :uid AND source_type = :st AND source_id = :sid"
         ),
-        {"st": source_type, "sid": source_id},
+        {"uid": user_id, "st": source_type, "sid": source_id},
     )
     return row.scalar()
 
 
-async def _index_email(db: AsyncSession, client, message_id: str) -> int:
+async def _index_email(db: AsyncSession, client, message_id: str, user_id) -> int:
     """Indexiert eine einzelne E-Mail (voller Body). Skip, wenn bereits vorhanden."""
-    existing = await _existing_modified(db, "email", message_id)
+    existing = await _existing_modified(db, "email", message_id, user_id)
     if existing is not None:
         return 0  # E-Mails sind unveränderlich -> bereits indexiert
     msg = await client.get_email(message_id)
@@ -335,6 +346,7 @@ async def _index_email(db: AsyncSession, client, message_id: str) -> int:
     }
     return await _upsert_chunks(
         db,
+        user_id=user_id,
         source_type="email",
         source_id=message_id,
         title=subject,
@@ -347,7 +359,7 @@ async def _index_email(db: AsyncSession, client, message_id: str) -> int:
 
 
 async def _index_document(
-    db: AsyncSession, client, item: dict, excluded: list[str] | None = None
+    db: AsyncSession, client, item: dict, user_id, excluded: list[str] | None = None
 ) -> int:
     """Indexiert ein OneDrive-Dokument. Skip, wenn unverändert (lastModifiedDateTime)."""
     cfg = get_settings()
@@ -363,7 +375,7 @@ async def _index_document(
     if size > cfg.search_index_max_file_mb * 1024 * 1024:
         return 0
     modified = _parse_graph_dt(item.get("lastModifiedDateTime"))
-    existing = await _existing_modified(db, "onedrive", item_id)
+    existing = await _existing_modified(db, "onedrive", item_id, user_id)
     if existing is not None and modified is not None and existing >= modified:
         return 0  # unverändert
     try:
@@ -383,6 +395,7 @@ async def _index_document(
     meta = {"size": size, "path": parent}
     return await _upsert_chunks(
         db,
+        user_id=user_id,
         source_type="onedrive",
         source_id=item_id,
         title=name,
@@ -529,10 +542,11 @@ async def sync_semantic_index(
     # Ausschlussliste (Owner-Settings) laden und bestehende Leichen bereinigen --
     # so verschwinden ausgeschlossene Pfade auch aus einem bereits gefuellten Index.
     async with async_session() as db:
+        principal = await system_principal_id(db)
         excluded = await _load_excluded_paths(db)
         if excluded:
             try:
-                purged = await purge_excluded_documents(db, excluded)
+                purged = await purge_excluded_documents(db, excluded, principal)
                 await db.commit()
                 if purged:
                     logger.info("Ausschluss-Purge: %d Zeilen entfernt (%s)", purged, excluded)
@@ -578,7 +592,7 @@ async def sync_semantic_index(
                         seen_ids.add(mid)
                         async with async_session() as db:
                             try:
-                                n = await _index_email(db, client, mid)
+                                n = await _index_email(db, client, mid, principal)
                                 await db.commit()
                             except Exception as exc:  # noqa: BLE001
                                 await db.rollback()
@@ -639,7 +653,7 @@ async def sync_semantic_index(
                     break
                 async with async_session() as db:
                     try:
-                        n = await _index_document(db, client, item, excluded)
+                        n = await _index_document(db, client, item, principal, excluded)
                         await db.commit()
                     except Exception as exc:  # noqa: BLE001
                         await db.rollback()

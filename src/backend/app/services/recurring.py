@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.database import async_session
 from app.models import AgentJob, ChecklistItem, Tag, Task, TaskTag
+from app.core.principal import system_principal_id
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "..", "email-graph"))
 from graph_client import GraphClient, GraphConfig  # noqa: E402
@@ -189,6 +190,7 @@ async def _copy_template(
     # bei Recurring-Instanzen komplett ins Leere (kein Job, keine Ausführung).
     if instance.assignee == "agent":
         db.add(AgentJob(
+            user_id=await system_principal_id(db),
             task_id=instance.id,
             job_type="task",
             status="planned",

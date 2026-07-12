@@ -17,11 +17,13 @@ from __future__ import annotations
 import logging
 import os
 import re
+from datetime import datetime
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
+from app.core.principal import system_principal_id
 from app.database import async_session
 from ai9.embeddings import embed_text, to_pgvector
 from app.services.learning import (
@@ -93,8 +95,25 @@ def _is_noise(subject: str, body_text: str, recipient: str | None) -> bool:
     return False
 
 
-async def _existing_graph_ids(db: AsyncSession) -> set[str]:
-    rows = await db.execute(text("SELECT graph_id FROM sent_mail_examples"))
+def _parse_graph_dt(value: str | None) -> datetime | None:
+    """Graph-ISO-Zeitstempel (z. B. ``2026-07-11T16:26:28Z``) -> ``datetime``.
+
+    asyncpg leitet den Parametertyp in ``CAST(:sent_at AS timestamptz)`` als
+    ``timestamptz`` ab und erwartet daher ein ``datetime``-Objekt statt eines Strings.
+    """
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (ValueError, AttributeError):
+        return None
+
+
+async def _existing_graph_ids(db: AsyncSession, user_id) -> set[str]:
+    rows = await db.execute(
+        text("SELECT graph_id FROM sent_mail_examples WHERE user_id = :uid"),
+        {"uid": user_id},
+    )
     return {r[0] for r in rows}
 
 
@@ -119,7 +138,8 @@ async def sync_style_store(top: int | None = None) -> int:
     try:
         messages = await client.list_sent_messages(top=limit)
         async with async_session() as db:
-            known = await _existing_graph_ids(db)
+            principal = await system_principal_id(db)
+            known = await _existing_graph_ids(db, principal)
             for msg in messages:
                 gid = msg.get("id")
                 if not gid:
@@ -133,7 +153,7 @@ async def sync_style_store(top: int | None = None) -> int:
                 if recipient and recipient not in tone_seen:
                     tone = extract_salutation_signature(body_text)
                     if tone:
-                        await update_learned_tone(db, email=recipient, tone=tone)
+                        await update_learned_tone(db, email=recipient, tone=tone, user_id=principal)
                     tone_seen.add(recipient)
 
                 if gid in known or _is_noise(subject, body_text, recipient):
@@ -147,19 +167,20 @@ async def sync_style_store(top: int | None = None) -> int:
                     text(
                         """
                         INSERT INTO sent_mail_examples
-                            (graph_id, recipient, subject, body_text, sent_at, language, embedding)
+                            (user_id, graph_id, recipient, subject, body_text, sent_at, language, embedding)
                         VALUES
-                            (:gid, :rec, :subj, :body,
+                            (:uid, :gid, :rec, :subj, :body,
                              CAST(:sent_at AS timestamptz), :lang, CAST(:emb AS vector))
-                        ON CONFLICT (graph_id) DO NOTHING
+                        ON CONFLICT (user_id, graph_id) DO NOTHING
                         """
                     ),
                     {
+                        "uid": principal,
                         "gid": gid,
                         "rec": recipient,
                         "subj": subject[:500],
                         "body": body_text,
-                        "sent_at": msg.get("sentDateTime"),
+                        "sent_at": _parse_graph_dt(msg.get("sentDateTime")),
                         "lang": _detect_language(body_text),
                         "emb": emb_literal,
                     },
@@ -184,15 +205,18 @@ async def find_style_anchors(
     query_text: str,
     recipient: str | None = None,
     k: int = 3,
+    user_id=None,
 ) -> list[dict]:
     """Hybrid-Retrieval der besten Stil-Anker fuer einen neuen Entwurf.
 
     Zuerst (bis zu 1) die neueste eigene Antwort an DENSELBEN Empfaenger, dann die
     semantisch aehnlichsten ueber ALLE Kontakte (pgvector Cosine). Dedupliziert und
-    auf ``k`` begrenzt. Best-effort: leere Liste bei Fehler/ohne Embedding.
+    auf ``k`` begrenzt. Best-effort: leere Liste bei Fehler/ohne Embedding. Wird ein
+    ``user_id`` uebergeben, bleiben die Anker auf diesen Principal beschraenkt.
     """
     if k <= 0:
         return []
+    scope = "AND user_id = :uid" if user_id is not None else ""
     results: list[dict] = []
     seen: set[str] = set()
     try:
@@ -200,15 +224,15 @@ async def find_style_anchors(
         if recipient:
             rows = await db.execute(
                 text(
-                    """
+                    f"""
                     SELECT graph_id, recipient, subject, body_text
                     FROM sent_mail_examples
-                    WHERE recipient = :rec AND length(body_text) >= :minlen
+                    WHERE recipient = :rec AND length(body_text) >= :minlen {scope}
                     ORDER BY sent_at DESC NULLS LAST
                     LIMIT 1
                     """
                 ),
-                {"rec": recipient.lower(), "minlen": _MIN_BODY_CHARS},
+                {"rec": recipient.lower(), "minlen": _MIN_BODY_CHARS, "uid": user_id},
             )
             for r in rows.mappings():
                 gid = r["graph_id"]
@@ -222,16 +246,16 @@ async def find_style_anchors(
             remaining = max(0, k - len(results)) + 2  # Puffer fuer Dedup
             rows = await db.execute(
                 text(
-                    """
+                    f"""
                     SELECT graph_id, recipient, subject, body_text,
                            1 - (embedding <=> CAST(:emb AS vector)) AS similarity
                     FROM sent_mail_examples
-                    WHERE embedding IS NOT NULL AND length(body_text) >= :minlen
+                    WHERE embedding IS NOT NULL AND length(body_text) >= :minlen {scope}
                     ORDER BY embedding <=> CAST(:emb AS vector)
                     LIMIT :lim
                     """
                 ),
-                {"emb": to_pgvector(vec), "minlen": _MIN_BODY_CHARS, "lim": remaining},
+                {"emb": to_pgvector(vec), "minlen": _MIN_BODY_CHARS, "lim": remaining, "uid": user_id},
             )
             for r in rows.mappings():
                 gid = r["graph_id"]

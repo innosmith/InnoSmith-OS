@@ -1347,6 +1347,7 @@ async def send_agent_message(
     full_prompt = await _build_agent_prompt(user_content, task_id=conv.task_id)
 
     agent_job = AgentJob(
+        user_id=user.id,
         job_type="chat_agent",
         status="running",
         llm_model=selected_model,

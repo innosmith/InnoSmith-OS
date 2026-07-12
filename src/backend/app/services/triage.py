@@ -26,7 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.database import async_session
 from app.models import AgentJob, ChatTriage, EmailTriage
-from app.core.principal import get_owner
+from app.core.principal import get_owner, system_principal_id
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "..", "email-graph"))
 from graph_client import GraphClient, GraphConfig  # noqa: E402
@@ -73,7 +73,11 @@ def _get_graph_client() -> GraphClient | None:
 
 
 async def _get_known_message_ids(db: AsyncSession) -> set[str]:
-    result = await db.execute(select(EmailTriage.message_id))
+    result = await db.execute(
+        select(EmailTriage.message_id).where(
+            EmailTriage.user_id == await system_principal_id(db)
+        )
+    )
     return {row[0] for row in result.all()}
 
 
@@ -181,6 +185,7 @@ async def _handle_meeting_response(db: AsyncSession, client: GraphClient, email_
     message_id = email_data["id"]
 
     triage_record = EmailTriage(
+        user_id=await system_principal_id(db),
         message_id=message_id,
         subject=subject,
         from_address=from_addr,
@@ -232,6 +237,7 @@ async def _load_active_deterministic_rules(db: AsyncSession) -> list:
         .where(
             LearnedRule.status == "active",
             LearnedRule.rule_type == "deterministic",
+            LearnedRule.user_id == await system_principal_id(db),
         )
         .order_by(LearnedRule.priority, LearnedRule.created_at)
     )
@@ -284,6 +290,7 @@ async def _execute_deterministic_action(
     message_id = email_data["id"]
 
     triage_record = EmailTriage(
+        user_id=await system_principal_id(db),
         message_id=message_id,
         subject=subject,
         from_address=from_addr,
@@ -387,7 +394,9 @@ async def _create_triage_job(db: AsyncSession, email_data: dict) -> None:
     inference = email_data.get("inferenceClassification", "")
     recipient_type = _determine_recipient_type(email_data)
 
+    principal = await system_principal_id(db)
     triage_record = EmailTriage(
+        user_id=principal,
         message_id=email_data["id"],
         subject=subject,
         from_address=from_addr,
@@ -404,6 +413,7 @@ async def _create_triage_job(db: AsyncSession, email_data: dict) -> None:
     local_model = await get_default_local_model(db)
 
     agent_job = AgentJob(
+        user_id=principal,
         task_id=None,
         job_type="email_triage",
         status="queued",
@@ -696,7 +706,11 @@ MAX_CHAT_MESSAGES_PER_CYCLE = 30
 
 
 async def _get_known_chat_message_ids(db: AsyncSession) -> set[str]:
-    result = await db.execute(select(ChatTriage.message_id))
+    result = await db.execute(
+        select(ChatTriage.message_id).where(
+            ChatTriage.user_id == await system_principal_id(db)
+        )
+    )
     return {row[0] for row in result.all()}
 
 
@@ -711,7 +725,9 @@ async def _create_chat_triage_job(
     from_id = sender.get("id", "")
     body = (msg.get("body") or {}).get("content", "")[:500]
 
+    principal = await system_principal_id(db)
     triage_record = ChatTriage(
+        user_id=principal,
         chat_id=chat_id,
         message_id=msg["id"],
         from_name=from_name,
@@ -729,6 +745,7 @@ async def _create_chat_triage_job(
     local_model = await get_default_local_model(db)
 
     agent_job = AgentJob(
+        user_id=principal,
         task_id=None,
         job_type="chat_triage",
         status="queued",
