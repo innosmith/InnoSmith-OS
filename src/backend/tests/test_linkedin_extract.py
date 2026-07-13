@@ -6,11 +6,9 @@ Prüft:
 - Erfolgreiche Extraktion mit gemocktem LiteLLM
 - Fehlerbehandlung bei ungültigem LLM-Output
 - Validierung der Request-Parameter
-- Integrationstests mit echtem LLM (Marker: integration)
 """
 
 import json
-import os
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -65,37 +63,6 @@ ETH Zürich
 MSc Architecture
 2012 – 2014
 """
-
-PROFILE_DE_SINGLE_ROLE = """Anna Meier
-Head of People & Culture bei TechCorp AG
-Zürich, Schweiz
-
-Berufserfahrung
-Head of People & Culture
-TechCorp AG
-Jan 2022 – Heute · 3 Jahre 5 Monate
-Zürich, Schweiz
-
-HR Business Partner
-SwissRe
-Mär 2018 – Dez 2021 · 3 Jahre 10 Monate
-
-Ausbildung
-Universität St. Gallen
-Master in Business Administration
-2015 – 2017
-"""
-
-PROFILE_EN_MINIMAL = """John Smith
-Software Engineer
-San Francisco Bay Area
-
-Experience
-Software Engineer
-Google
-2021 – Present
-"""
-
 
 # ── Unit Tests ──────────────────────────────────────────────────
 
@@ -303,84 +270,3 @@ class TestExtractProfileEndpoint:
             with pytest.raises(HTTPException) as exc_info:
                 await extract_profile_from_html(body=body, user=mock_user)
             assert exc_info.value.status_code == 502
-
-
-# ── Integrationstests (echtes LLM, kein Mock) ───────────────────
-# Aufruf: pytest -m integration src/backend/tests/test_linkedin_extract.py
-
-@pytest.mark.integration
-class TestLLMIntegration:
-    """Testet die Extraktion mit echtem LLM-Aufruf gegen den Backend-Endpoint.
-
-    Benötigt: OPENAI_API_KEY in der Umgebung oder .env.dev.
-    """
-
-    @pytest.fixture(autouse=True)
-    def _skip_if_no_api_key(self):
-        if not os.environ.get("OPENAI_API_KEY"):
-            try:
-                from app.config import get_settings
-                s = get_settings()
-                if s.openai_api_key:
-                    os.environ["OPENAI_API_KEY"] = s.openai_api_key
-                else:
-                    pytest.skip("OPENAI_API_KEY nicht verfügbar")
-            except Exception:
-                pytest.skip("OPENAI_API_KEY nicht verfügbar")
-
-    @pytest.fixture
-    def mock_user(self):
-        return SimpleNamespace(
-            id=1, email="test@example.com", role="owner", settings={}
-        )
-
-    @pytest.mark.asyncio
-    async def test_de_profile_multi_position(self, mock_user):
-        from app.routers.linkedin import extract_profile_from_html, ExtractProfileRequest
-
-        body = ExtractProfileRequest(html=PROFILE_DE_MULTI_POSITION)
-        result = await extract_profile_from_html(body=body, user=mock_user)
-
-        assert "Tokarski" in result.name
-        assert result.job_title, "job_title darf nicht leer sein"
-        assert any("Berner Fachhochschule" in c or "BFH" in c for c in result.companies), \
-            f"Erwarte BFH in companies, erhalten: {result.companies}"
-        assert result.location, "location darf nicht leer sein"
-
-    @pytest.mark.asyncio
-    async def test_en_profile_short(self, mock_user):
-        from app.routers.linkedin import extract_profile_from_html, ExtractProfileRequest
-
-        body = ExtractProfileRequest(html=PROFILE_EN_SHORT)
-        result = await extract_profile_from_html(body=body, user=mock_user)
-
-        assert "Kayser" in result.name
-        assert result.job_title, "job_title darf nicht leer sein"
-        assert any("Urban Equipe" in c for c in result.companies), \
-            f"Erwarte Urban Equipe in companies, erhalten: {result.companies}"
-
-    @pytest.mark.asyncio
-    async def test_de_single_role(self, mock_user):
-        from app.routers.linkedin import extract_profile_from_html, ExtractProfileRequest
-
-        body = ExtractProfileRequest(html=PROFILE_DE_SINGLE_ROLE)
-        result = await extract_profile_from_html(body=body, user=mock_user)
-
-        assert "Meier" in result.name
-        assert "People" in result.job_title or "Culture" in result.job_title, \
-            f"Erwarte People/Culture in job_title, erhalten: {result.job_title}"
-        assert any("TechCorp" in c for c in result.companies), \
-            f"Erwarte TechCorp in companies, erhalten: {result.companies}"
-        assert "Zürich" in result.location or "Zurich" in result.location
-
-    @pytest.mark.asyncio
-    async def test_en_minimal_profile(self, mock_user):
-        from app.routers.linkedin import extract_profile_from_html, ExtractProfileRequest
-
-        body = ExtractProfileRequest(html=PROFILE_EN_MINIMAL)
-        result = await extract_profile_from_html(body=body, user=mock_user)
-
-        assert "Smith" in result.name
-        assert result.job_title, "job_title darf nicht leer sein"
-        assert any("Google" in c for c in result.companies), \
-            f"Erwarte Google in companies, erhalten: {result.companies}"

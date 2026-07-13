@@ -42,6 +42,41 @@ _DB_NAME = "taskpilot_test"
 import pytest
 
 
+def _install_nullpool_engine() -> None:
+    """Test-Harness: App-Engine auf ``NullPool`` umstellen.
+
+    ``pytest-asyncio`` fuehrt jeden async-Test in einem eigenen (funktions-scoped)
+    Event-Loop aus. Der modulweite Connection-Pool aus ``app.database`` wuerde
+    asyncpg-Connections ueber Loop-Grenzen hinweg wiederverwenden -- die dann an
+    einen bereits geschlossenen Loop gebunden sind (``got Future attached to a
+    different loop`` / ``Event loop is closed``). ``NullPool`` erzeugt pro Checkout
+    eine frische Connection im aktuellen Loop und schliesst sie beim Zurueckgeben,
+    wodurch kein Loop-uebergreifender Zustand entsteht.
+
+    Betrifft ausschliesslich den Testlauf; der Produktivcode bleibt unveraendert.
+    Muss vor dem Import von ``app.main``/Routern laufen (einige Router binden
+    ``async_session`` beim Import), deshalb hier auf Modulebene der conftest.
+    """
+    from sqlalchemy.ext.asyncio import (
+        AsyncSession,
+        async_sessionmaker,
+        create_async_engine,
+    )
+    from sqlalchemy.pool import NullPool
+
+    import app.database as database
+
+    database.engine = create_async_engine(
+        database.settings.database_url, poolclass=NullPool
+    )
+    database.async_session = async_sessionmaker(
+        database.engine, class_=AsyncSession, expire_on_commit=False
+    )
+
+
+_install_nullpool_engine()
+
+
 def pytest_configure(config):
     config.addinivalue_line(
         "markers", "integration: Tests die echte externe Dienste aufrufen (LLM, APIs)"
