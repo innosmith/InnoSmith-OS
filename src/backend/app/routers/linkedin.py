@@ -2,10 +2,15 @@
 
 Nimmt den Plaintext einer LinkedIn-Profilseite entgegen (via Content
 Script innerText) und extrahiert strukturierte Profildaten via LLM.
-Das ist die primäre und einzige Extraktionsmethode — kein Fallback.
+Primärmodell ist Gemini Flash-Lite; bei Ausfall einmaliger Fallback
+auf die vorherige Flash-Lite-Generation.
 
-LinkedIn-Profildaten sind öffentlich → Cloud-LLMs (GPT-4.1-nano)
-sind erlaubt und massiv schneller als lokale Modelle.
+LinkedIn-Profildaten sind öffentlich → Cloud-LLMs sind erlaubt und
+massiv schneller als lokale Modelle.
+
+Hinweis: Der Aufruf geht bewusst in-process via litellm.acompletion
+direkt an Google (nicht über den LiteLLM-Proxy). So bleibt die
+Extraktion unabhängig vom Proxy-Image-Stand und dessen Modellkatalog.
 """
 
 import json
@@ -15,6 +20,7 @@ import re
 
 import litellm
 from fastapi import APIRouter, Depends, HTTPException
+from litellm.exceptions import APIConnectionError, RateLimitError, Timeout
 from pydantic import BaseModel, Field
 
 from app.auth.deps import get_current_user, require_role
@@ -26,7 +32,9 @@ litellm.drop_params = True
 
 router = APIRouter(prefix="/api/linkedin", tags=["linkedin"])
 
-LINKEDIN_EXTRACT_MODEL = "openai/gpt-4.1-nano"
+# Primär: günstigstes aktuelles Extraktions-Modell. Fallback: stabile Vorgänger-Generation.
+LINKEDIN_EXTRACT_MODEL = "gemini/gemini-3.1-flash-lite"
+LINKEDIN_EXTRACT_FALLBACK_MODEL = "gemini/gemini-2.5-flash-lite"
 
 RESPONSE_FORMAT = {
     "type": "json_schema",
@@ -91,6 +99,35 @@ def _extract_json(text: str) -> dict:
     raise json.JSONDecodeError("Kein JSON gefunden", text, 0)
 
 
+def _http_detail_for_llm_error(exc: Exception) -> str:
+    """Übersetzt LLM-Fehler in eine sichere, verständliche Detail-Meldung."""
+    if isinstance(exc, RateLimitError):
+        return "LLM-Kontingent aufgebraucht oder Rate-Limit erreicht"
+    if isinstance(exc, Timeout):
+        return "LLM-Timeout bei der Profil-Extraktion"
+    if isinstance(exc, APIConnectionError):
+        return "LLM-Anbieter nicht erreichbar"
+    if isinstance(exc, ValueError):
+        return str(exc) or "LLM hat keinen Inhalt zurückgegeben"
+    return "LinkedIn-Profil-Extraktion fehlgeschlagen"
+
+
+async def _call_extract_model(model: str, clean_text: str):
+    """Einzelner Extraktions-Call gegen ein Cloud-Modell (in-process, ohne Proxy)."""
+    return await litellm.acompletion(
+        model=model,
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": clean_text},
+        ],
+        response_format=RESPONSE_FORMAT,
+        temperature=0,
+        timeout=30,
+        # Thinking-Tokens zählen bei Gemini als Output — für Extraktion ausschalten.
+        reasoning_effort="none",
+    )
+
+
 class ExtractProfileRequest(BaseModel):
     html: str = Field(..., min_length=50, max_length=500_000, description="Plaintext der LinkedIn-Profilseite (via innerText)")
 
@@ -116,36 +153,56 @@ async def extract_profile_from_html(
     if len(clean_text) > 100_000:
         clean_text = clean_text[:100_000]
 
-    try:
-        response = await litellm.acompletion(
-            model=LINKEDIN_EXTRACT_MODEL,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": clean_text},
-            ],
-            response_format=RESPONSE_FORMAT,
-            temperature=0,
-            timeout=30,
-        )
+    models = [LINKEDIN_EXTRACT_MODEL, LINKEDIN_EXTRACT_FALLBACK_MODEL]
+    last_exc: Exception | None = None
 
-        content = response.choices[0].message.content
-        if not content:
-            raise ValueError("LLM hat keinen Inhalt zurückgegeben")
+    for idx, model in enumerate(models):
+        try:
+            response = await _call_extract_model(model, clean_text)
 
-        data = _extract_json(content)
+            content = response.choices[0].message.content
+            if not content:
+                raise ValueError("LLM hat keinen Inhalt zurückgegeben")
 
-        return ExtractedProfile(
-            name=data.get("name", ""),
-            headline=data.get("headline", ""),
-            location=data.get("location", ""),
-            job_title=data.get("job_title", ""),
-            companies=data.get("companies", []),
-            extraction_method="llm",
-        )
+            data = _extract_json(content)
 
-    except json.JSONDecodeError as exc:
-        logger.warning("LLM-Antwort war kein valides JSON: %s", exc)
-        raise HTTPException(status_code=502, detail="LLM-Antwort konnte nicht als JSON geparst werden")
-    except Exception as exc:
-        logger.exception("LinkedIn-Profil-Extraktion fehlgeschlagen")
-        raise HTTPException(status_code=502, detail="LinkedIn-Profil-Extraktion fehlgeschlagen")
+            if idx > 0:
+                logger.info("LinkedIn-Extraktion via Fallback-Modell %s", model)
+
+            return ExtractedProfile(
+                name=data.get("name", ""),
+                headline=data.get("headline", ""),
+                location=data.get("location", ""),
+                job_title=data.get("job_title", ""),
+                companies=data.get("companies", []),
+                extraction_method="llm",
+            )
+
+        except json.JSONDecodeError as exc:
+            # JSON-Parse-Fehler: kein Modell-Fallback — Antwort war da, aber unbrauchbar.
+            logger.warning("LLM-Antwort war kein valides JSON (%s): %s", model, exc)
+            raise HTTPException(
+                status_code=503,
+                detail="LLM-Antwort konnte nicht als JSON geparst werden",
+            )
+        except Exception as exc:
+            last_exc = exc
+            is_last = idx == len(models) - 1
+            if is_last:
+                logger.exception("LinkedIn-Profil-Extraktion fehlgeschlagen (Modell %s)", model)
+                raise HTTPException(
+                    status_code=503,
+                    detail=_http_detail_for_llm_error(exc),
+                )
+            logger.warning(
+                "LinkedIn-Extraktion mit %s fehlgeschlagen (%s), versuche Fallback %s",
+                model,
+                type(exc).__name__,
+                models[idx + 1],
+            )
+
+    # Defensiv — die Schleife wirft immer; für den Typ-Checker.
+    raise HTTPException(
+        status_code=503,
+        detail=_http_detail_for_llm_error(last_exc or RuntimeError("unbekannt")),
+    )

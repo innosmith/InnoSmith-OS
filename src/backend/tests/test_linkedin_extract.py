@@ -225,7 +225,7 @@ class TestExtractProfileEndpoint:
             body = ExtractProfileRequest(html=PROFILE_DE_MULTI_POSITION)
             with pytest.raises(HTTPException) as exc_info:
                 await extract_profile_from_html(body=body, user=mock_user)
-            assert exc_info.value.status_code == 502
+            assert exc_info.value.status_code == 503
 
     @pytest.mark.asyncio
     async def test_llm_connection_error(self):
@@ -244,7 +244,8 @@ class TestExtractProfileEndpoint:
             body = ExtractProfileRequest(html=PROFILE_DE_MULTI_POSITION)
             with pytest.raises(HTTPException) as exc_info:
                 await extract_profile_from_html(body=body, user=mock_user)
-            assert exc_info.value.status_code == 502
+            assert exc_info.value.status_code == 503
+            assert "fehlgeschlagen" in exc_info.value.detail.lower() or "nicht erreichbar" in exc_info.value.detail.lower()
 
     @pytest.mark.asyncio
     async def test_llm_empty_content(self):
@@ -269,4 +270,46 @@ class TestExtractProfileEndpoint:
             body = ExtractProfileRequest(html=PROFILE_DE_MULTI_POSITION)
             with pytest.raises(HTTPException) as exc_info:
                 await extract_profile_from_html(body=body, user=mock_user)
-            assert exc_info.value.status_code == 502
+            assert exc_info.value.status_code == 503
+
+    @pytest.mark.asyncio
+    async def test_uses_gemini_model_and_fallback(self):
+        from app.routers.linkedin import (
+            LINKEDIN_EXTRACT_FALLBACK_MODEL,
+            LINKEDIN_EXTRACT_MODEL,
+            extract_profile_from_html,
+            ExtractProfileRequest,
+        )
+
+        mock_user = SimpleNamespace(
+            id=1, email="test@example.com", role="owner", settings={}
+        )
+        expected_output = {
+            "name": "Max Mustermann",
+            "headline": "Consultant",
+            "location": "Bern",
+            "job_title": "Consultant",
+            "companies": ["InnoSmith"],
+        }
+
+        assert LINKEDIN_EXTRACT_MODEL.startswith("gemini/")
+        assert LINKEDIN_EXTRACT_FALLBACK_MODEL.startswith("gemini/")
+
+        with patch("app.routers.linkedin.litellm") as mock_litellm:
+            mock_litellm.acompletion = AsyncMock(
+                side_effect=[
+                    ConnectionError("primary down"),
+                    _mock_litellm_response(expected_output),
+                ]
+            )
+
+            body = ExtractProfileRequest(html=PROFILE_DE_MULTI_POSITION)
+            result = await extract_profile_from_html(body=body, user=mock_user)
+
+            assert result.name == "Max Mustermann"
+            assert mock_litellm.acompletion.await_count == 2
+            first_model = mock_litellm.acompletion.await_args_list[0].kwargs["model"]
+            second_model = mock_litellm.acompletion.await_args_list[1].kwargs["model"]
+            assert first_model == LINKEDIN_EXTRACT_MODEL
+            assert second_model == LINKEDIN_EXTRACT_FALLBACK_MODEL
+            assert mock_litellm.acompletion.await_args_list[0].kwargs["reasoning_effort"] == "none"

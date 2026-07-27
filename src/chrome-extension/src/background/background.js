@@ -65,7 +65,19 @@ async function apiRequest(method, path, body) {
       if (response.status === 403) {
         return { error: cfAccessError() };
       }
-      return { error: `Unerwartete Antwort (${response.status}). Prüfe die Backend-URL.` };
+      // Cloudflare ersetzt bei 502/503 oft die Origin-JSON durch HTML —
+      // den Antworttext mitliefern, damit die Diagnose nicht irreführend ist.
+      let bodyHint = '';
+      try {
+        const raw = (await response.text()).replace(/\s+/g, ' ').trim();
+        if (raw) {
+          bodyHint = raw.length > 180 ? `${raw.slice(0, 180)}…` : raw;
+        }
+      } catch (_) {
+        // ignore
+      }
+      const suffix = bodyHint ? ` Antwort: ${bodyHint}` : ' Prüfe Backend-URL und Cloudflare-Zugang.';
+      return { error: `Unerwartete Antwort (${response.status}).${suffix}` };
     }
 
     const data = await response.json();

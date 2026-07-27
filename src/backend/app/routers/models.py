@@ -1,6 +1,7 @@
 """Router für verfügbare LLM-Modelle — dynamisch von Ollama + Cloud-APIs."""
 
 import logging
+import re
 import time
 
 import httpx
@@ -90,13 +91,16 @@ def _get_capabilities(model_id: str, litellm_caps: dict | None = None) -> list[s
             pass
 
     # Heuristik fuer brandneue Modelle, die LiteLLM noch nicht kennt.
-    # Moderne Claude-Modelle (3.7 und alle 4.x) unterstuetzen Extended Thinking.
+    # Claude: Extended Thinking ab 3.7 sowie alle Opus/Sonnet/Haiku ab Generation 4
+    # (opus-4, opus-5, sonnet-4.5, haiku-4.5, …) — generationsunabhaengig.
     if provider == "anthropic" and "thinking" not in caps:
-        if any(k in model for k in ("opus-4", "sonnet-4", "haiku-4", "3-7-", "3.7")):
+        if "3-7-" in model or "3.7" in model or re.search(
+            r"(?:opus|sonnet|haiku)-(?:[4-9]|\d{2,})", model
+        ):
             caps.append("thinking")
-    # Moderne OpenAI-Reasoning-Modelle (o-Serie, gpt-5+).
+    # Moderne OpenAI-Reasoning-Modelle (o-Serie, gpt-5 und neuere Generationen).
     if provider == "openai" and "thinking" not in caps:
-        if model.startswith(("o1", "o3", "o4")) or model.startswith("gpt-5"):
+        if model.startswith(("o1", "o3", "o4")) or re.match(r"gpt-([5-9]|\d{2,})", model):
             caps.append("thinking")
 
     # Duplikate entfernen, Reihenfolge erhalten
@@ -135,13 +139,23 @@ async def _fetch_ollama_models(litellm_caps: dict | None = None) -> list[dict]:
 
 
 async def _fetch_openai_models(litellm_caps: dict | None = None) -> list[dict]:
-    """OpenAI-Modelle via /v1/models abfragen (kostenloser API-Call)."""
+    """OpenAI-Modelle via /v1/models abfragen (kostenloser API-Call).
+
+    Negativliste statt Prefix-Whitelist — neue Generationen (gpt-5, gpt-5.5, …)
+    erscheinen automatisch, ohne die Config bei jedem Release nachzuziehen.
+    """
     settings = get_settings()
     if not settings.openai_api_key:
         return []
 
-    RELEVANT_PREFIXES = ("gpt-4", "gpt-3.5", "o1", "o3", "o4")
-    EXCLUDE = ("instruct", "audio", "realtime", "search", "tts", "dall-e", "whisper", "embed", "moderation", "transcribe", "diarize")
+    # Chat-/Reasoning-Modelle behalten; Spezial-APIs und Embeddings ausblenden.
+    EXCLUDE = (
+        "instruct", "audio", "realtime", "search", "tts", "dall-e", "whisper",
+        "embed", "moderation", "transcribe", "diarize", "image", "codex",
+        "babbage", "davinci", "curie", "ada",
+    )
+    # Nur Chat-taugliche IDs: gpt-*, o1/o3/o4, chatgpt-*
+    INCLUDE_PREFIXES = ("gpt-", "o1", "o3", "o4", "chatgpt-")
 
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
@@ -154,7 +168,7 @@ async def _fetch_openai_models(litellm_caps: dict | None = None) -> list[dict]:
                 models = []
                 for m in data.get("data", []):
                     mid = m["id"]
-                    if not any(mid.startswith(p) for p in RELEVANT_PREFIXES):
+                    if not any(mid.startswith(p) for p in INCLUDE_PREFIXES):
                         continue
                     if any(x in mid for x in EXCLUDE):
                         continue

@@ -201,6 +201,11 @@ class PipedriveClient:
         data = await self._get_v2(f"/organizations/{org_id}")
         return data.get("data", {})
 
+    async def create_organization(self, name: str, **kwargs) -> dict:
+        body = {"name": name, **kwargs}
+        data = await self._post_v2("/organizations", body)
+        return data.get("data", {})
+
     # ── Activities ───────────────────────────────────────────
 
     async def list_activities(

@@ -798,32 +798,72 @@ async def linkedin_sync(
         return None
 
     async def _resolve_org_id(org_name: str) -> int | None:
+        """Organisation in Pipedrive finden — und bei Bedarf neu anlegen.
+
+        Früher wurde ein unbekannter Firmenname stillschweigend verworfen:
+        Die Person entstand ohne Organisation, die Antwort meldete das Feld
+        aber trotzdem als gesetzt.
+        """
+        wanted = (org_name or "").strip()
+        if not wanted:
+            return None
+
         try:
-            orgs = await client.search_items(org_name, "organization", 1)
-            if orgs:
-                return orgs[0].get("item", orgs[0]).get("id")
-        except Exception:
-            pass
+            orgs = await client.search_items(wanted, "organization", 10)
+        except Exception as exc:
+            logger.warning("Organisationssuche fehlgeschlagen (%r): %s", wanted, exc)
+            orgs = []
+
+        # itemSearch ist unscharf — nur einen echten Namenstreffer übernehmen,
+        # sonst landet die Person bei einer ähnlich benannten fremden Firma.
+        for item in orgs:
+            data = item.get("item", item)
+            if (data.get("name") or "").strip().lower() == wanted.lower():
+                return data.get("id")
+
+        try:
+            created = await client.create_organization(wanted)
+            org_id = created.get("id")
+            if org_id:
+                logger.info("Pipedrive-Organisation neu angelegt: %r (id=%s)", wanted, org_id)
+                return org_id
+            logger.warning("Organisation %r angelegt, aber keine ID erhalten", wanted)
+        except Exception as exc:
+            logger.warning("Organisation %r konnte nicht angelegt werden: %s", wanted, exc)
         return None
 
     if body.action == "create":
         kwargs: dict = {}
+        org_resolved = False
 
         if body.org_name:
             org_id = await _resolve_org_id(body.org_name)
             if org_id:
                 kwargs["org_id"] = org_id
+                org_resolved = True
+            else:
+                logger.warning(
+                    "Organisation %r konnte weder gefunden noch angelegt werden", body.org_name
+                )
 
-        if linkedin_key and body.linkedin_url:
-            kwargs[linkedin_key] = body.linkedin_url
-        if role_key and body.job_title:
-            kwargs[role_key] = body.job_title
+        if body.linkedin_url:
+            if linkedin_key:
+                kwargs[linkedin_key] = body.linkedin_url
+            else:
+                logger.warning("linkedin_key ist None — LinkedIn-URL kann nicht geschrieben werden")
+        if body.job_title:
+            if role_key:
+                kwargs[role_key] = body.job_title
+            else:
+                logger.warning("role_key ist None — Rolle kann nicht geschrieben werden")
 
         person = await client.create_person(body.name, **kwargs)
         person_id = person.get("id", 0)
 
+        # Nur melden, was wirklich geschrieben wurde — sonst zeigt die Extension
+        # Erfolg für Felder an, die leer geblieben sind.
         fields_created = ["name"]
-        if body.org_name:
+        if org_resolved:
             fields_created.append("org")
         if linkedin_key and body.linkedin_url:
             fields_created.append("linkedin_url")
@@ -866,6 +906,10 @@ async def linkedin_sync(
             if org_id:
                 kwargs["org_id"] = org_id
                 updated.append("org_name")
+            else:
+                logger.warning(
+                    "Organisation %r konnte weder gefunden noch angelegt werden", body.org_name
+                )
 
         if "linkedin_url" in update_fields and body.linkedin_url:
             if linkedin_key:

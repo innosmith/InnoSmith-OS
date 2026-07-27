@@ -24,7 +24,9 @@ services:
     restart: unless-stopped
 
   litellm:
-    image: ghcr.io/berriai/litellm:main-latest
+    # Gepinnt auf Backend-litellm-Version (1.92.0) — main-latest ist deprecated
+    # und hing auf 1.82.6 mit veralteten Capability-/Preisdaten.
+    image: ghcr.io/berriai/litellm:v1.92.0
     container_name: taskpilot-litellm
     ports:
       - "127.0.0.1:4000:4000"
