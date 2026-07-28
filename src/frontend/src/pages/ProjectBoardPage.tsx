@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef, type KeyboardEvent } from 'react';
 import { useParams, useNavigate, useOutletContext } from 'react-router-dom';
 import {
   DndContext,
@@ -54,8 +54,12 @@ export function ProjectBoardPage() {
   const [selectedUserId, setSelectedUserId] = useState('');
   const [inviteLoading, setInviteLoading] = useState(false);
   const [inviteMsg, setInviteMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
+  const [renaming, setRenaming] = useState(false);
+  const [renameValue, setRenameValue] = useState('');
   const settingsRef = useRef<HTMLDivElement>(null);
   const iconUploadRef = useRef<HTMLInputElement>(null);
+  const renameRef = useRef<HTMLInputElement>(null);
+  const renameActiveRef = useRef(false);
 
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
@@ -115,6 +119,13 @@ export function ProjectBoardPage() {
       return () => document.removeEventListener('mousedown', handleClickOutside);
     }
   }, [settingsOpen]);
+
+  useEffect(() => {
+    if (renaming && renameRef.current) {
+      renameRef.current.focus();
+      renameRef.current.select();
+    }
+  }, [renaming]);
 
   const handleCreateTask = useCallback(
     async (boardColumnId: string, title: string) => {
@@ -305,6 +316,49 @@ export function ProjectBoardPage() {
     setSettingsOpen(false);
   };
 
+  const startRename = () => {
+    if (!board) return;
+    setRenameValue(board.project.name);
+    renameActiveRef.current = true;
+    setRenaming(true);
+    setSettingsOpen(false);
+  };
+
+  const handleRenameSubmit = async () => {
+    if (!renameActiveRef.current) return;
+    renameActiveRef.current = false;
+    if (!id || !board) {
+      setRenaming(false);
+      return;
+    }
+    const trimmed = renameValue.trim();
+    if (!trimmed || trimmed === board.project.name) {
+      setRenaming(false);
+      return;
+    }
+    try {
+      await api.patch(`/api/projects/${id}`, { name: trimmed });
+      setBoard({ ...board, project: { ...board.project, name: trimmed } });
+      refreshSidebar();
+    } catch {
+      /* API-Fehler: Edit-Modus trotzdem schliessen */
+    } finally {
+      setRenaming(false);
+    }
+  };
+
+  const handleRenameKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      handleRenameSubmit();
+    }
+    if (e.key === 'Escape') {
+      renameActiveRef.current = false;
+      setRenameValue(board?.project.name ?? '');
+      setRenaming(false);
+    }
+  };
+
   const handleDelete = async () => {
     if (!id) return;
     await api.delete(`/api/projects/${id}`);
@@ -379,13 +433,30 @@ export function ProjectBoardPage() {
               size={24}
             />
           )}
-          <h1
-            className={`text-xl font-bold ${
-              hasBg ? 'text-white' : 'text-gray-900 dark:text-white'
-            }`}
-          >
-            {board.project.name}
-          </h1>
+          {renaming ? (
+            <input
+              ref={renameRef}
+              value={renameValue}
+              onChange={(e) => setRenameValue(e.target.value)}
+              onKeyDown={handleRenameKeyDown}
+              onBlur={handleRenameSubmit}
+              className={`min-w-0 flex-1 rounded-lg border border-gray-300 bg-white/90 px-2 py-1 text-xl font-bold text-gray-900 outline-none focus:border-blue-500 dark:border-gray-600 dark:bg-gray-800 dark:text-white ${
+                hasBg ? 'shadow-sm' : ''
+              }`}
+            />
+          ) : (
+            <h1
+              className={`text-xl font-bold ${
+                hasBg ? 'text-white' : 'text-gray-900 dark:text-white'
+              } ${isOwner ? 'cursor-pointer' : ''}`}
+              onDoubleClick={() => {
+                if (isOwner) startRename();
+              }}
+              title={isOwner ? 'Doppelklick zum Umbenennen' : undefined}
+            >
+              {board.project.name}
+            </h1>
+          )}
           <div className="ml-auto flex items-center gap-1">
             {isOwner && <div className="relative" ref={settingsRef}>
               <button
@@ -401,6 +472,13 @@ export function ProjectBoardPage() {
               </button>
               {settingsOpen && (
                 <div className="absolute right-0 top-10 z-[100] w-64 rounded-xl border border-gray-200 bg-white py-1 shadow-xl dark:border-gray-700 dark:bg-gray-900">
+                  <button
+                    onClick={startRename}
+                    className="flex w-full items-center gap-2 px-4 py-2.5 text-left text-sm text-gray-700 transition-colors hover:bg-gray-50 dark:text-gray-300 dark:hover:bg-gray-800"
+                  >
+                    <PencilIcon className="h-4 w-4" />
+                    Umbenennen
+                  </button>
                   <button
                     onClick={() => { setIconMenuOpen(!iconMenuOpen); setSettingsOpen(false); }}
                     className="flex w-full items-center gap-2 px-4 py-2.5 text-left text-sm text-gray-700 transition-colors hover:bg-gray-50 dark:text-gray-300 dark:hover:bg-gray-800"
@@ -757,6 +835,14 @@ function CameraIcon({ className }: { className?: string }) {
   return (
     <svg className={className} fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
       <path strokeLinecap="round" strokeLinejoin="round" d="m2.25 15.75 5.159-5.159a2.25 2.25 0 0 1 3.182 0l5.159 5.159m-1.5-1.5 1.409-1.409a2.25 2.25 0 0 1 3.182 0l2.909 2.909M3.75 21h16.5A2.25 2.25 0 0 0 22.5 18.75V5.25A2.25 2.25 0 0 0 20.25 3H3.75A2.25 2.25 0 0 0 1.5 5.25v13.5A2.25 2.25 0 0 0 3.75 21Zm16.5-13.5h.008v.008h-.008V7.5Zm0 0a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0Z" />
+    </svg>
+  );
+}
+
+function PencilIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
+      <path strokeLinecap="round" strokeLinejoin="round" d="m16.862 4.487 1.687-1.688a1.875 1.875 0 1 1 2.652 2.652L10.582 16.07a4.5 4.5 0 0 1-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 0 1 1.13-1.897l8.932-8.931Zm0 0L19.5 7.125M18 14v4.75A2.25 2.25 0 0 1 15.75 21H5.25A2.25 2.25 0 0 1 3 18.75V8.25A2.25 2.25 0 0 1 5.25 6H10" />
     </svg>
   );
 }
