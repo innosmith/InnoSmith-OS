@@ -381,6 +381,41 @@ def _determine_recipient_type(email_data: dict) -> str:
     return "unknown"
 
 
+async def _enrich_auto_submitted(client: GraphClient, emails: list[dict]) -> None:
+    """Ergaenzt neue Mails um den RFC-3834-Header ``Auto-Submitted``.
+
+    Das ist ein Fakt aus dem Umschlag, keine Textdeutung: der Absender-Server
+    deklariert damit selbst, dass die Mail automatisch erzeugt wurde
+    (``auto-generated``) bzw. eine automatische Antwort ist (``auto-replied``).
+
+    Der Header wird dem LLM als Kontext mitgegeben, damit es nicht mehr auf fremde
+    Abwesenheitsnotizen antwortet. Bewusst KEINE deterministische Regel daraus: eine
+    Messung am Postfach zeigte, dass nur 2 von 22 Abwesenheitsnotizen
+    ``auto-replied`` tragen -- die uebrigen 20 tragen ``auto-generated``, genau wie
+    Ticketsysteme und eine Lieferantenrechnung. Der Header trennt Autoresponder also
+    nicht sauber von handlungsrelevanter Maschinenpost; das ist eine
+    Bedeutungsfrage und damit Sache des LLM.
+
+    Ein Aufruf pro NEUER Mail (typisch 0-5 pro Zyklus), nicht pro Listenabruf.
+    Best-effort: bei Fehlern fehlt das Feld und der Prompt bleibt unveraendert.
+    """
+    for msg in emails:
+        mid = msg.get("id")
+        if not mid:
+            continue
+        try:
+            detail = await client.get_message_headers(mid)
+        except Exception:  # noqa: BLE001 - Kontext ist Beigabe
+            logger.debug("Auto-Submitted nicht lesbar (mid=%s)", str(mid)[:30])
+            continue
+        for header in detail:
+            if (header.get("name") or "").lower() == "auto-submitted":
+                value = (header.get("value") or "").strip()
+                if value and value.lower() != "no":
+                    msg["autoSubmitted"] = value
+                break
+
+
 async def _create_triage_job(db: AsyncSession, email_data: dict) -> None:
     """Erstellt einen EmailTriage-Record und einen AgentJob für eine neue E-Mail.
 
@@ -428,6 +463,7 @@ async def _create_triage_job(db: AsyncSession, email_data: dict) -> None:
             "categories": email_data.get("categories", []),
             "conversation_id": email_data.get("conversationId", ""),
             "recipient_type": recipient_type,
+            "auto_submitted": email_data.get("autoSubmitted", ""),
         },
     )
     db.add(agent_job)
@@ -449,6 +485,7 @@ async def _triage_cycle() -> int:
             known_ids = await _get_known_message_ids(db)
 
             new_emails = await _fetch_new_inbox_emails(client, known_ids, cutoff)
+            await _enrich_auto_submitted(client, new_emails)
 
             # Deterministische Regeln einmal pro Zyklus laden (klein, kein Per-Mail-Query).
             det_rules = await _load_active_deterministic_rules(db)
@@ -491,6 +528,7 @@ async def run_triage_now(top: int = 50) -> int:
             known_ids = await _get_known_message_ids(db)
 
             new_emails = await _fetch_new_inbox_emails(client, known_ids, cutoff)
+            await _enrich_auto_submitted(client, new_emails)
 
             det_rules = await _load_active_deterministic_rules(db)
 

@@ -8,6 +8,7 @@ Prüft:
 
 import re
 import uuid
+from datetime import date, timedelta
 from types import SimpleNamespace
 from unittest.mock import patch, AsyncMock
 
@@ -579,15 +580,22 @@ class TestFinalizeEmailState:
         assert [c[0] for c in manager.mock_calls][-1] == "unread"
 
     @pytest.mark.asyncio
-    async def test_category_not_overwritten_when_present(self):
+    async def test_category_always_set_even_when_one_exists(self):
+        """Die Kategorie ist kein Luecken-Fueller mehr, sondern die Wahrheit.
+
+        Vorher wurde eine bestehende Kategorie nie ueberschrieben -- weil sie
+        typischerweise vom LLM selbst stammte. Genau daher kamen die 80 erfundenen
+        Kategorien: das Backend validierte die Meldung statt die Tat. Jetzt schreibt
+        ausschliesslich das Backend, und zwar das validierte Label.
+        """
         from unittest.mock import AsyncMock, patch
         from app.services import hermes_worker as hw
 
-        client = self._client(categories=["Finanzen"])
+        client = self._client(categories=["Irgendwas Erfundenes"])
         with patch.object(hw, "_build_graph_client", AsyncMock(return_value=client)):
-            await hw._finalize_email_state({"email_message_id": "M1"}, "Wichtig", None)
+            await hw._finalize_email_state({"email_message_id": "M1"}, "Finanzen", None)
 
-        client.set_categories.assert_not_awaited()
+        client.set_categories.assert_awaited_once_with("M1", ["Finanzen"])
         client.mark_as_unread.assert_awaited_once_with("M1")
 
     @pytest.mark.asyncio
@@ -643,3 +651,374 @@ class TestFinalizeEmailState:
             await hw._finalize_email_state({}, "Wichtig", None)
 
         build.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_move_happens_before_category_on_new_id(self):
+        """Move zuerst, dann Kategorie auf der NEUEN ID, ungelesen zuletzt.
+
+        Ein Move aendert die Graph-Message-ID. Genau diese Reihenfolge war fruher die
+        Aufgabe des LLM und die Hauptquelle stillschweigend fehlender Kategorien
+        (404 auf der alten ID).
+        """
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from app.services import hermes_worker as hw
+
+        client = self._client()
+        client.move_to_folder.return_value = {"id": "NEU"}
+        manager = MagicMock()
+        manager.attach_mock(client.move_to_folder, "move")
+        manager.attach_mock(client.set_categories, "set_cat")
+        manager.attach_mock(client.mark_as_unread, "unread")
+
+        meta = {"email_message_id": "ALT", "inference_classification": "other"}
+        with patch.object(hw, "_build_graph_client", AsyncMock(return_value=client)):
+            await hw._finalize_email_state(meta, "Newsletter", None, triage_class="fyi")
+
+        client.move_to_folder.assert_awaited_once_with("ALT", "Newsletter")
+        client.set_categories.assert_awaited_once_with("NEU", ["Newsletter"])
+        client.mark_as_unread.assert_awaited_once_with("NEU")
+        assert [c[0] for c in manager.mock_calls] == ["move", "set_cat", "unread"]
+
+    @pytest.mark.asyncio
+    async def test_focused_mail_is_never_moved(self):
+        """Der konkret beklagte Fehlmove: echte Korrespondenz landete im System-Ordner.
+
+        Alle beanstandeten Faelle (Affolter, Springer, Streit, Haemmerli, Almonte,
+        von Lanthen) trugen ``inferenceClassification = focused``. Diese Bedingung
+        allein haette jeden davon verhindert.
+        """
+        from unittest.mock import AsyncMock, patch
+        from app.services import hermes_worker as hw
+
+        client = self._client()
+        meta = {"email_message_id": "M1", "inference_classification": "focused"}
+        with patch.object(hw, "_build_graph_client", AsyncMock(return_value=client)):
+            await hw._finalize_email_state(meta, "System", None, triage_class="fyi")
+
+        client.move_to_folder.assert_not_awaited()
+        client.set_categories.assert_awaited_once_with("M1", ["System"])
+        client.mark_as_unread.assert_awaited_once_with("M1")
+
+    @pytest.mark.asyncio
+    async def test_finanzen_sets_category_but_never_moves(self):
+        """``Finanzen`` ist eine Sichtmarke in der Inbox, kein Ordner.
+
+        Verschoben hiesse aus dem Blick -- und genau das war der Hauptkritikpunkt.
+        Selbst unter den sonst move-tauglichen Bedingungen (fyi + other) bleibt die
+        Mail liegen.
+        """
+        from unittest.mock import AsyncMock, patch
+        from app.services import hermes_worker as hw
+
+        client = self._client()
+        meta = {"email_message_id": "M1", "inference_classification": "other"}
+        with patch.object(hw, "_build_graph_client", AsyncMock(return_value=client)):
+            await hw._finalize_email_state(meta, "Finanzen", None, triage_class="fyi")
+
+        client.move_to_folder.assert_not_awaited()
+        client.set_categories.assert_awaited_once_with("M1", ["Finanzen"])
+
+    @pytest.mark.asyncio
+    async def test_task_is_never_moved(self):
+        """Alles mit Handlungsbedarf bleibt sichtbar, unabhaengig vom Label."""
+        from unittest.mock import AsyncMock, patch
+        from app.services import hermes_worker as hw
+
+        client = self._client()
+        meta = {"email_message_id": "M1", "inference_classification": "other"}
+        with patch.object(hw, "_build_graph_client", AsyncMock(return_value=client)):
+            await hw._finalize_email_state(meta, "System", None, triage_class="task")
+
+        client.move_to_folder.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_needs_review_blocks_move(self):
+        """Was das System nicht verstanden hat, raeumt es nicht weg."""
+        from unittest.mock import AsyncMock, patch
+        from app.services import hermes_worker as hw
+
+        client = self._client()
+        meta = {"email_message_id": "M1", "inference_classification": "other"}
+        with patch.object(hw, "_build_graph_client", AsyncMock(return_value=client)):
+            await hw._finalize_email_state(
+                meta, "Newsletter", None, triage_class="fyi", needs_review=True
+            )
+
+        client.move_to_folder.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_missing_folder_does_not_stop_finalization(self):
+        """Fehlt der Zielordner, wird nicht verschoben -- Kategorie/ungelesen laufen weiter.
+
+        ``get_or_create_folder`` erstellt bewusst keine Ordner und wirft ValueError.
+        """
+        from unittest.mock import AsyncMock, patch
+        from app.services import hermes_worker as hw
+
+        client = self._client()
+        client.move_to_folder.side_effect = ValueError("Ordner 'Junk' existiert nicht")
+        meta = {"email_message_id": "M1", "inference_classification": "other"}
+        with patch.object(hw, "_build_graph_client", AsyncMock(return_value=client)):
+            await hw._finalize_email_state(meta, "Junk", None, triage_class="fyi")
+
+        client.set_categories.assert_awaited_once_with("M1", ["Junk"])
+        client.mark_as_unread.assert_awaited_once_with("M1")
+
+
+class TestAutoSubmittedContext:
+    """Der Auto-Submitted-Header als Fakt im Prompt -- nicht als Regel im Code.
+
+    Messung am Postfach: nur 2 von 22 Abwesenheitsnotizen tragen ``auto-replied``, die
+    anderen 20 tragen ``auto-generated`` -- genauso wie Ticketsysteme, Confluence und
+    eine Lieferantenrechnung. Der Header trennt Autoresponder also NICHT von
+    handlungsrelevanter Maschinenpost. Deshalb wandert er als Tatsache in den Prompt,
+    statt als deterministische Klassifikation ins Backend.
+    """
+
+    @pytest.mark.asyncio
+    async def test_header_is_extracted_into_metadata(self):
+        from unittest.mock import AsyncMock
+        from app.services.triage import _enrich_auto_submitted
+
+        client = AsyncMock()
+        client.get_message_headers.return_value = [
+            {"name": "Received", "value": "from mx.example.com"},
+            {"name": "Auto-Submitted", "value": "auto-replied (vacation)"},
+        ]
+        mails = [{"id": "M1"}]
+        await _enrich_auto_submitted(client, mails)
+        assert mails[0]["autoSubmitted"] == "auto-replied (vacation)"
+
+    @pytest.mark.asyncio
+    async def test_no_header_leaves_mail_untouched(self):
+        from unittest.mock import AsyncMock
+        from app.services.triage import _enrich_auto_submitted
+
+        client = AsyncMock()
+        client.get_message_headers.return_value = [{"name": "Received", "value": "x"}]
+        mails = [{"id": "M1"}]
+        await _enrich_auto_submitted(client, mails)
+        assert "autoSubmitted" not in mails[0]
+
+    @pytest.mark.asyncio
+    async def test_explicit_no_is_not_treated_as_machine(self):
+        """``Auto-Submitted: no`` heisst laut RFC 3834 ausdruecklich «von Hand»."""
+        from unittest.mock import AsyncMock
+        from app.services.triage import _enrich_auto_submitted
+
+        client = AsyncMock()
+        client.get_message_headers.return_value = [{"name": "Auto-Submitted", "value": "no"}]
+        mails = [{"id": "M1"}]
+        await _enrich_auto_submitted(client, mails)
+        assert "autoSubmitted" not in mails[0]
+
+    @pytest.mark.asyncio
+    async def test_graph_error_does_not_break_the_cycle(self):
+        from unittest.mock import AsyncMock
+        from app.services.triage import _enrich_auto_submitted
+
+        client = AsyncMock()
+        client.get_message_headers.side_effect = RuntimeError("Graph weg")
+        mails = [{"id": "M1"}]
+        await _enrich_auto_submitted(client, mails)  # darf nicht werfen
+        assert "autoSubmitted" not in mails[0]
+
+
+class TestAbsenceContext:
+    """Eigene Abwesenheit im Entwurfs-Prompt.
+
+    Die Ferien vom 13.-24.07.2026 standen vollstaendig in ``capacity_time_off`` --
+    der Draft-Prompt hat die Tabelle nur nie gelesen. Daher entstanden Antworten, die
+    die Ferien nicht erwaehnten und Termine hineinlegten.
+    """
+
+    @staticmethod
+    def _ferien_zwei_wochen():
+        """Die echten Ferientage: zwei Arbeitswochen, Wochenende nicht erfasst."""
+        return [date(2026, 7, 13) + timedelta(days=i) for i in range(5)] + [
+            date(2026, 7, 20) + timedelta(days=i) for i in range(5)
+        ]
+
+    def test_weekend_gap_is_bridged(self):
+        """Zwei Arbeitswochen sind EINE Abwesenheit, nicht zwei.
+
+        Ohne Bruecke ueber das Wochenende wuerde der Entwurf «bis Freitag, 17.07.»
+        sagen, obwohl Anthony noch eine weitere Woche weg ist.
+        """
+        from app.services.hermes_worker import _group_absence_ranges
+
+        assert _group_absence_ranges(self._ferien_zwei_wochen()) == [
+            (date(2026, 7, 13), date(2026, 7, 24))
+        ]
+
+    def test_real_gap_stays_separate(self):
+        from app.services.hermes_worker import _group_absence_ranges
+
+        tage = [date(2026, 8, 10), date(2026, 8, 11), date(2026, 9, 21)]
+        assert _group_absence_ranges(tage) == [
+            (date(2026, 8, 10), date(2026, 8, 11)),
+            (date(2026, 9, 21), date(2026, 9, 21)),
+        ]
+
+    def test_first_available_day_skips_weekend(self):
+        """Rueckkehr ist der erste Arbeitstag, nicht der Kalendertag danach."""
+        from app.services.hermes_worker import _first_available_day, _group_absence_ranges
+
+        ranges = _group_absence_ranges(self._ferien_zwei_wochen())
+        # Ferien enden Freitag 24.07. -> Rueckkehr Montag 27.07., nicht Samstag 25.07.
+        assert _first_available_day(ranges, date(2026, 7, 17)) == date(2026, 7, 27)
+
+    def test_first_available_day_none_when_present(self):
+        from app.services.hermes_worker import _first_available_day, _group_absence_ranges
+
+        ranges = _group_absence_ranges(self._ferien_zwei_wochen())
+        assert _first_available_day(ranges, date(2026, 7, 27)) is None
+
+    def test_block_names_the_return_date_during_absence(self):
+        from app.services.hermes_worker import _build_absence_block, _group_absence_ranges
+
+        block = _build_absence_block(
+            _group_absence_ranges(self._ferien_zwei_wochen()), date(2026, 7, 17)
+        )
+        assert "HEUTE abwesend" in block
+        assert "24.07.2026" in block
+        assert "Termine NIE in die Abwesenheit legen" in block
+
+    def test_block_warns_about_upcoming_absence(self):
+        from app.services.hermes_worker import _build_absence_block, _group_absence_ranges
+
+        block = _build_absence_block(
+            _group_absence_ranges([date(2026, 8, 10) + timedelta(days=i) for i in range(5)]),
+            date(2026, 7, 27),
+        )
+        assert "aktuell verfügbar" in block
+        assert "10.08." in block
+
+    def test_no_absence_leaves_prompt_untouched(self):
+        from app.services.hermes_worker import _build_absence_block
+
+        assert _build_absence_block([], date(2026, 7, 27)) == ""
+
+    def test_holidays_are_not_absences(self):
+        """Ein Feiertag wird in einer Antwort nicht als Abwesenheit erwaehnt."""
+        from app.services.hermes_worker import _absence_ranges
+
+        rows = [(date(2026, 8, 1), "feiertag")]
+
+        class _Res:
+            def all(self):
+                return rows
+
+        class _DB:
+            async def execute(self, *_a, **_k):
+                return _Res()
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_a):
+                return False
+
+        import asyncio
+        from unittest.mock import patch
+        from app.services import hermes_worker as hw
+
+        with patch.object(hw, "async_session", lambda: _DB()):
+            assert asyncio.run(_absence_ranges()) == []
+
+    def test_scheduling_window_starts_after_absence(self):
+        """Freie Slots erst nach der Rueckkehr suchen.
+
+        ``find_free_slots`` liest den Kalender; Ferien stehen aber in
+        ``capacity_time_off`` und nicht zwingend als Termin. Ohne verschobenes Fenster
+        haelt Graph die Ferientage fuer frei.
+        """
+        from app.services.hermes_worker import _build_calendar_draft_step
+
+        step = _build_calendar_draft_step(
+            "Terminvorschlag Meeting", "Wann hätten Sie Zeit für einen Termin?",
+            available_from=date(2026, 7, 27),
+        )
+        assert 'start="2026-07-27T08:00:00"' in step
+
+    def test_scheduling_step_absent_for_non_scheduling_mail(self):
+        from app.services.hermes_worker import _build_calendar_draft_step
+
+        assert _build_calendar_draft_step("Rechnung 4711", "Beleg im Anhang") == ""
+
+
+class TestTriageLabels:
+    """Kanonisches Label-Vokabular: fail-closed statt Zurechtbiegen."""
+
+    def test_labels_match_real_outlook_categories(self):
+        """Die zehn Labels sind gegen ``/outlook/masterCategories`` verifiziert."""
+        from app.services.triage_labels import TRIAGE_LABELS
+
+        assert TRIAGE_LABELS == (
+            "Signale", "System", "Wichtig", "Offerten/Verträge", "Networking/Leads",
+            "Finanzen", "Kalender", "Newsletter", "Junk", "Unklar",
+        )
+
+    def test_only_case_and_whitespace_are_tolerated(self):
+        from app.services.triage_labels import normalize_label
+
+        assert normalize_label("finanzen") == "Finanzen"
+        assert normalize_label("  Newsletter  ") == "Newsletter"
+        assert normalize_label("Offerten/Verträge") == "Offerten/Verträge"
+
+    def test_invented_labels_are_rejected(self):
+        """Keine Synonymtabelle: erfundene Labels werden abgewiesen, nicht geraten.
+
+        Das sind echte Beobachtungen aus den 80 Kategorien, die in Outlook landeten.
+        """
+        from app.services.triage_labels import normalize_label
+
+        for erfunden in (
+            "Rechnung", "Termin", "System-Info", "Wichtig/Finanzen",
+            "Finance", "Kunde", "", None, 42,
+        ):
+            assert normalize_label(erfunden) is None, erfunden
+
+    def test_only_three_labels_have_folders(self):
+        """Nur drei Ziele stehen dem LLM offen -- Finanzen und Kalender bewusst nicht."""
+        from app.services.triage_labels import LABEL_FOLDERS
+
+        assert set(LABEL_FOLDERS) == {"System", "Newsletter", "Junk"}
+        assert "Finanzen" not in LABEL_FOLDERS
+        assert "Kalender" not in LABEL_FOLDERS
+
+    def test_calendar_label_never_triggers_a_move(self):
+        """Termine bleiben sichtbar, auch wenn das Modell sie fuer reine Info haelt.
+
+        Eine Einladung, eine Absage des Veranstalters oder die Terminkonflikt-Meldung
+        eines Kunden verlangt eine Reaktion. Nach ``Inbox/Kalender`` verschiebt darum
+        ausschliesslich der deterministische Pfad fuer echte Terminantworten.
+        """
+        from app.services.triage_labels import move_target
+
+        assert move_target("Kalender", "fyi", "other") is None
+
+    def test_junk_targets_the_review_subfolder(self):
+        """``Junk`` zeigt auf Anthonys Sichtungsordner, nicht auf Outlooks Quarantaene."""
+        from app.services.triage_labels import LABEL_FOLDERS
+
+        assert LABEL_FOLDERS["Junk"] == "Junk"
+
+    def test_triage_labels_frontend_in_sync(self):
+        """Frontend-Spiegel darf nicht abdriften.
+
+        Die Auswahlliste im Cockpit muss genau die Labels anbieten, die das Backend
+        akzeptiert -- sonst laufen Korrekturen in einen 400er oder es fehlt eine
+        Kategorie in der UI.
+        """
+        import re
+        from pathlib import Path
+        from app.services.triage_labels import TRIAGE_LABELS
+
+        ts = Path(__file__).resolve().parents[2] / "frontend/src/lib/triageLabels.ts"
+        assert ts.is_file(), f"Frontend-Spiegel fehlt: {ts}"
+        block = re.search(
+            r"export const TRIAGE_LABELS = \[(.*?)\] as const;", ts.read_text("utf-8"), re.S
+        )
+        assert block, "TRIAGE_LABELS-Block im Frontend nicht gefunden"
+        assert tuple(re.findall(r"'([^']+)'", block.group(1))) == TRIAGE_LABELS

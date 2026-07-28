@@ -12,7 +12,10 @@ Erkannte Muster:
 - **Verworfene Vorschlaege pro Absender**: Agent-Vorschlaege desselben Absenders
   werden wiederholt verworfen/abgelehnt (``task_deleted``/``rejected``) -> Regel,
   solche Mails zurueckhaltender (eher ``fyi``, kein Task) zu behandeln. Dies ist
-  im Realbetrieb das haeufigste Korrektursignal und wurde zuvor ignoriert.
+  im Realbetrieb das haeufigste Korrektursignal. **Ausgenommen sind eigene
+  Korrespondenten** (Adressen aus ``sent_mail_examples``): fuer sie ist die
+  Verallgemeinerung auf den ganzen Absender zu grob und wuerde genau die wichtigen
+  Kontakte auf ``fyi`` druecken.
 - **Draft-Edits pro Absender**: Antworten an denselben Kontakt werden wiederholt
   stilistisch angepasst -> Regel, den Stil-Anker konsequenter zu uebernehmen.
 
@@ -36,7 +39,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.database import async_session
-from app.models import AgentFeedback, LearnedRule
+from app.models import AgentFeedback, LearnedRule, SentMailExample
 from app.core.principal import system_principal_id
 
 logger = logging.getLogger("taskpilot.reflection")
@@ -65,15 +68,41 @@ async def _existing_rule_signatures(db: AsyncSession, user_id=None) -> set[str]:
     return signatures
 
 
+async def _own_correspondents(db: AsyncSession, user_id=None) -> set[str]:
+    """Adressen, an die Anthony selbst schon geschrieben hat.
+
+    Quelle ist der Style-Store (``sent_mail_examples``) -- also belegte, eigene
+    Korrespondenz und damit ein Fakt, keine Schaetzung. Bewusst NICHT
+    ``sender_profiles.relationship``: dieses Feld ist verunreinigt (T&R-Adressen
+    verteilen sich dort auf ``kunde``, ``lieferant``, ``partner`` und NULL, und
+    Organisationsadressen wie ``info@``/``marketing@`` tragen faelschlich
+    ``partner``).
+    """
+    rows = await db.execute(
+        select(SentMailExample.recipient).where(
+            SentMailExample.user_id == user_id,
+            SentMailExample.recipient.isnot(None),
+        )
+    )
+    return {r.lower() for (r,) in rows.all() if r}
+
+
 def _build_proposals(
-    feedback: list[AgentFeedback], min_occurrences: int
+    feedback: list[AgentFeedback],
+    min_occurrences: int,
+    correspondents: set[str] | None = None,
 ) -> list[tuple[str, str, dict, str]]:
     """Leitet aus Korrektursignalen Regel-Vorschlaege ab.
+
+    ``correspondents`` sind Adressen, an die Anthony selbst schon geschrieben hat
+    (aus ``sent_mail_examples``). Fuer sie entsteht KEINE Absender-Pauschalregel
+    aus verworfenen Vorschlaegen -- Begruendung siehe Abschnitt 2 unten.
 
     Returns Liste von ``(scope, rule_text, evidence, autonomy_hint)``. Rein und
     damit unabhaengig testbar.
     """
     proposals: list[tuple[str, str, dict, str]] = []
+    correspondents = {a.lower() for a in (correspondents or set())}
 
     # 1) Triage-Reklassifikation: (Absender, alt->neu)
     reclass: Counter[tuple[str, str | None, str]] = Counter()
@@ -111,14 +140,34 @@ def _build_proposals(
     # 2) Verworfene Task-Vorschlaege / abgelehnte Entwuerfe pro Absender.
     # Semantik: Der Agent hat wiederholt etwas vorgeschlagen, das der Berater
     # weggeworfen hat -> kuenftig zurueckhaltender sein. Bleibt eine LLM-Leitregel
-    # (kein deterministisches fyi), weil ein reiner Absender-Filter zu grob waere
-    # (z. B. Self-Mails: nur bestimmte Betreffe sind Laerm).
+    # (kein deterministisches fyi).
+    #
+    # WICHTIG -- warum echte Korrespondenten ausgenommen sind: Das Signal selbst ist
+    # valide (gemessen 132 von 137 Faellen stammen aus dem dismiss-review-Pfad, sind
+    # also bewusste Ablehnungen, nicht blosses Aufraeumen). Zu grob ist die
+    # VERALLGEMEINERUNG auf den ganzen Absender. Wenn Anthony einen Task-Vorschlag zu
+    # einer Kundin ablehnt, lautet die Lehre nicht «Post dieser Kundin ist kuenftig
+    # fyi» -- damit wuerde die Lernschleife genau die wichtigen Absender daempfen.
+    #
+    # Gemessen an den Realdaten trennt ``sent_mail_examples`` das trennscharf: die
+    # neun bisher vorgeschlagenen Regeln betrafen ausnahmslos Adressen, an die
+    # Anthony selbst schreibt (Swiss Bankers, BFH, T&R, UMB und seine eigene
+    # Adresse mit 66 Ablehnungen aus Signale-Reports). Die drei zu Recht aktiven
+    # Regeln betreffen ausnahmslos Maschinen-Absender (Leadinfo, Toggl, LinkedIn),
+    # an die er nie geschrieben hat. Kein zusaetzliches Ratesignal noetig.
     discard: Counter[str] = Counter()
     for fb in feedback:
         if fb.feedback_type in ("task_deleted", "rejected") and fb.sender_email:
             discard[fb.sender_email.lower()] += 1
     for sender, count in discard.items():
         if count < min_occurrences:
+            continue
+        if sender in correspondents:
+            logger.info(
+                "Reflexion: keine Pauschalregel fuer %s (%dx verworfen) -- eigener "
+                "Korrespondent, Absender-Verallgemeinerung zu grob",
+                sender, count,
+            )
             continue
         rule_text = (
             f"E-Mails von {sender} fuehrten wiederholt zu verworfenen Agent-Vorschlaegen "
@@ -189,7 +238,8 @@ async def run_reflection(
             )
         )
         feedback = list(rows.scalars().all())
-        proposals = _build_proposals(feedback, min_occurrences)
+        correspondents = await _own_correspondents(db, principal_id)
+        proposals = _build_proposals(feedback, min_occurrences, correspondents)
         if not proposals:
             return 0
 

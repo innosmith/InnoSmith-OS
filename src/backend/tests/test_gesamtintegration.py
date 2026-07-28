@@ -42,6 +42,27 @@ def test_triage_allowlist_respects_configured_servers():
     assert "taskpilot" not in allow
 
 
+def test_triage_allowlist_excludes_graph_admin():
+    """Der Triage-Agent darf den Outlook-Zustand nicht selbst mutieren.
+
+    Die zustandsveraendernden Graph-Tools (Kategorie, Move, Versand, gelesen) liegen
+    in der zweiten Registrierung ``graphAdmin``. Faellt sie in die Triage-Allowlist,
+    kann das LLM wieder unvalidiert schreiben -- die Ursache der 80 erfundenen
+    Kategorien und der Fehlmoves.
+    """
+    with patch.object(hw, "get_configured_server_keys", return_value=list(hw._KNOWN_MCP_SERVERS)):
+        allow = hw.build_triage_allowlist()
+    assert "graphAdmin" not in allow
+
+
+def test_chat_gets_graph_admin_when_graph_selected():
+    """Im Chat bleibt es eine Auswahl: «Graph» aktivieren heisst auch verschieben."""
+    assert hw.expand_graph_admin(["graph"]) == ["graph", "graphAdmin"]
+    assert hw.expand_graph_admin(["taskpilot"]) == ["taskpilot"]
+    # Idempotent -- keine Duplikate bei erneutem Aufruf.
+    assert hw.expand_graph_admin(["graph", "graphAdmin"]) == ["graph", "graphAdmin"]
+
+
 def test_triage_tool_scoping_flag_default_on():
     from app.config import Settings
 

@@ -442,6 +442,49 @@ TOOLS = [
 ]
 
 
+# Tools, die den Microsoft-365-Zustand veraendern. Sie sind bewusst von den
+# Lese-Tools getrennt, weil Hermes Tools nur auf Server-Ebene filtern kann
+# (``enabled_toolsets``): der Triage-Agent laeuft auf einer Registrierung im
+# Modus ``safe`` und kann diese Tools damit nicht aufrufen, waehrend der
+# Chat-Agent eine zweite Registrierung im Modus ``admin`` erhaelt.
+#
+# ``create_draft`` fehlt hier absichtlich: ein Entwurf ist keine Aussenwirkung
+# (der Versand bleibt HITL-pflichtig), und die Triage braucht ihn fuer
+# Antwortvorschlaege.
+_MUTATING_TOOLS: frozenset[str] = frozenset({
+    "set_email_categories",
+    "move_email_to_folder",
+    "send_email",
+    "mark_as_read",
+    "create_calendar_event",
+    "create_planner_task",
+})
+
+
+def _tool_mode() -> str:
+    """Betriebsmodus des Servers: ``safe``, ``admin`` oder ``full``.
+
+    - ``safe`` (Default): alle Tools ausser den zustandsveraendernden. Der
+      Triage-Agent laeuft hierauf, damit das LLM den Outlook-Zustand nicht
+      selbst mutiert -- Kategorien und Moves setzt ausschliesslich das Backend.
+    - ``admin``: nur die zustandsveraendernden Tools. Ergaenzt ``safe`` fuer den
+      Chat-Agenten, ohne die Lese-Tools ein zweites Mal in den Kontext zu legen.
+    - ``full``: alles (Rueckfallebene, falls die Env-Var fehlt).
+    """
+    mode = (os.environ.get("GRAPH_TOOL_MODE") or "full").strip().lower()
+    return mode if mode in ("safe", "admin", "full") else "full"
+
+
+def _visible_tools() -> list[Tool]:
+    """Tool-Liste gemaess Betriebsmodus."""
+    mode = _tool_mode()
+    if mode == "safe":
+        return [t for t in TOOLS if t.name not in _MUTATING_TOOLS]
+    if mode == "admin":
+        return [t for t in TOOLS if t.name in _MUTATING_TOOLS]
+    return TOOLS
+
+
 server = Server("taskpilot-graph")
 _client: GraphClient | None = None
 
@@ -461,13 +504,25 @@ def _get_client() -> GraphClient:
 
 @server.list_tools()
 async def list_tools() -> list[Tool]:
-    return TOOLS
+    return _visible_tools()
 
 
 @server.call_tool()
 async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     t0 = time.monotonic()
     logger.info("Tool %s aufgerufen: %s", name, {k: str(v)[:100] for k, v in arguments.items()})
+    # Zweite Verteidigungslinie: Ausblenden in ``list_tools`` genuegt nicht, weil
+    # ein Modell einen Tool-Namen auch erraten kann. Der Dispatch weist ab.
+    if name not in {t.name for t in _visible_tools()}:
+        logger.warning("Tool %s im Modus %s nicht verfuegbar -- abgewiesen", name, _tool_mode())
+        return [TextContent(
+            type="text",
+            text=(
+                f"Tool '{name}' ist in diesem Kontext nicht verfuegbar. "
+                "Kategorien und Ordner-Zuweisungen setzt das Backend deterministisch "
+                "aus deiner Klassifikation -- gib sie im JSON-Ergebnis an."
+            ),
+        )]
     try:
         client = _get_client()
     except RuntimeError as e:

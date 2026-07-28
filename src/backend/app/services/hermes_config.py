@@ -216,7 +216,7 @@ async def populate_hermes_env() -> None:
 
 
 def build_config_dict() -> dict:
-    """Baut das Hermes-Config-Dict (Modell + 9 MCP-Server + contentConverter)."""
+    """Baut das Hermes-Config-Dict (Modell + MCP-Server + contentConverter)."""
     cfg = get_settings()
     base = _mcp_base_dir()
     py = _python_bin()
@@ -260,11 +260,31 @@ def build_config_dict() -> dict:
             "TP_DB_PASSWORD": "${TP_DB_PASSWORD}",
             "TP_DB_NAME": "${TP_DB_NAME}",
         }),
+        # Zwei Registrierungen desselben Servers, weil Hermes Tools nur auf
+        # Server-Ebene filtern kann (``enabled_toolsets``):
+        # - ``graph`` (Modus ``safe``): alles ausser den zustandsveraendernden
+        #   Tools. Der Triage-Agent laeuft ausschliesslich hierauf, damit das LLM
+        #   Kategorien und Ordner nicht selbst setzt (das macht das Backend
+        #   deterministisch aus der validierten Klassifikation).
+        # - ``graphAdmin`` (Modus ``admin``): nur die zustandsveraendernden Tools,
+        #   ausschliesslich fuer den Chat-Agenten. Die Aufteilung ist disjunkt, damit
+        #   die Lese-Tools nicht doppelt im Chat-Kontext liegen.
+        # Der Key ``graph`` bleibt bewusst der eingeschraenkte: so behalten die
+        # eingespielten Triage-Prompts, -Skills und die Callback-Hooks in
+        # hermes_worker.py ihre Tool-Namen (``mcp_graph_*``).
         "graph": stdio("mcp-graph", {
             "GRAPH_TENANT_ID": "${TP_GRAPH_TENANT_ID}",
             "GRAPH_CLIENT_ID": "${TP_GRAPH_CLIENT_ID}",
             "GRAPH_CLIENT_SECRET": "${TP_GRAPH_CLIENT_SECRET}",
             "GRAPH_USER_EMAIL": "${TP_GRAPH_USER_EMAIL}",
+            "GRAPH_TOOL_MODE": "safe",
+        }, extra_pythonpath=f"{base}:{base}/email-graph"),
+        "graphAdmin": stdio("mcp-graph", {
+            "GRAPH_TENANT_ID": "${TP_GRAPH_TENANT_ID}",
+            "GRAPH_CLIENT_ID": "${TP_GRAPH_CLIENT_ID}",
+            "GRAPH_CLIENT_SECRET": "${TP_GRAPH_CLIENT_SECRET}",
+            "GRAPH_USER_EMAIL": "${TP_GRAPH_USER_EMAIL}",
+            "GRAPH_TOOL_MODE": "admin",
         }, extra_pythonpath=f"{base}:{base}/email-graph"),
         "pipedrive": stdio("mcp-pipedrive", {
             "TP_PIPEDRIVE_API_TOKEN": "${TP_PIPEDRIVE_API_TOKEN}",

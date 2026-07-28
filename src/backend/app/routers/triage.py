@@ -18,6 +18,7 @@ from app.models import AgentJob, EmailTriage, User
 from app.schemas import EmailTriageOut, EmailTriageUpdate
 from app.services.learning import mark_episode_corrected, record_feedback
 from app.services.triage import run_triage_now
+from app.services.triage_labels import TRIAGE_LABELS, normalize_label
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "..", "email-graph"))
 from graph_client import GraphClient, GraphConfig  # noqa: E402
@@ -155,7 +156,11 @@ async def update_triage_item(
 
 
 class ReclassifyRequest(BaseModel):
-    triage_class: str
+    # Beide Felder sind optional: der Berater kann die Klasse korrigieren, das Label,
+    # oder beides. Bisher war nur die Klasse korrigierbar -- entsprechend gab es NULL
+    # Label-Korrekturen als Lernsignal, und 'Finanzen' konnte das System nie lernen.
+    triage_class: str | None = None
+    label: str | None = None
     reason: str | None = None
 
 
@@ -231,6 +236,48 @@ async def _enqueue_corrective_triage_job(
         return None
 
 
+async def _apply_label_correction(
+    db: AsyncSession, item: EmailTriage, body: ReclassifyRequest
+) -> None:
+    """Uebernimmt eine Label-Korrektur: Lernsignal, DB und Outlook-Kategorie.
+
+    Ohne diesen Pfad war ein Kategoriefehler nicht korrigierbar und damit auch nicht
+    lernbar -- es gab NULL ``triage_reclass``-Feedbacks mit Label-Bezug. Erst damit
+    kann die Reflexion eine Regel wie «Post von t-r.ch ist Finanzen» ueberhaupt
+    vorschlagen.
+    """
+    if body.label is None:
+        return
+    new_label = normalize_label(body.label)
+    action = dict(item.suggested_action or {})
+    old_label = action.get("label")
+    if new_label == old_label:
+        return
+
+    await record_feedback(
+        db,
+        feedback_type="triage_reclass",
+        agent_job_id=item.agent_job_id,
+        sender_email=item.from_address,
+        source="cockpit",
+        original={"label": old_label},
+        corrected={"label": new_label},
+        reason=body.reason,
+    )
+    action["label"] = new_label
+    action["label_corrected_by_human"] = True
+    action.pop("needs_review", None)
+    item.suggested_action = action
+
+    if item.message_id:
+        from app.services.hermes_worker import apply_label_category
+
+        await apply_label_category(item.message_id, new_label)
+    logger.info(
+        "Label korrigiert: %s -> %s (triage=%s)", old_label, new_label, item.id,
+    )
+
+
 @router.post("/{triage_id}/reclassify", response_model=EmailTriageOut)
 async def reclassify_triage_item(
     triage_id: uuid.UUID,
@@ -238,24 +285,37 @@ async def reclassify_triage_item(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> EmailTriageOut:
-    """Berater korrigiert die Triage-Klasse -- lernen UND ausfuehren.
+    """Berater korrigiert Triage-Klasse und/oder Label -- lernen UND ausfuehren.
 
     Schreibt ein ``triage_reclass``-Feedback, markiert die zugehoerige Episode als
     korrigiert und reiht -- bei Zielklasse ``task``/``auto_reply`` -- einen
     Korrektur-Job ein, der den richtigen Artefakt (Task bzw. Antwort-Entwurf)
     tatsaechlich erzeugt. ``fyi`` wird nur gelernt (Item verworfen).
+
+    Eine **Label-Korrektur** setzt zusaetzlich die Outlook-Kategorie neu -- ohne Move,
+    damit eine Menschenkorrektur nie etwas aus dem Blick raeumt. Beide Korrekturen
+    sind unabhaengig: nur Label, nur Klasse oder beides.
     """
     _require_owner(user)
-    if body.triage_class not in ("auto_reply", "task", "fyi"):
+    if body.triage_class is not None and body.triage_class not in ("auto_reply", "task", "fyi"):
         raise HTTPException(status_code=400, detail="Ungueltige Triage-Klasse")
+    if body.label is not None and normalize_label(body.label) is None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Ungueltiges Label. Erlaubt: {', '.join(TRIAGE_LABELS)}",
+        )
+    if body.triage_class is None and body.label is None:
+        raise HTTPException(status_code=400, detail="Weder Klasse noch Label angegeben")
 
     result = await db.execute(select(EmailTriage).where(EmailTriage.id == triage_id))
     item = result.scalar_one_or_none()
     if item is None:
         raise HTTPException(status_code=404, detail="Triage-Eintrag nicht gefunden")
 
+    await _apply_label_correction(db, item, body)
+
     old_class = item.triage_class
-    if body.triage_class != old_class:
+    if body.triage_class is not None and body.triage_class != old_class:
         # 1) Lernsignal + Episode-Korrektur (mit Original-Job-Bezug, vor dem Umhaengen).
         await record_feedback(
             db,

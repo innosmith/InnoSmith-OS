@@ -106,6 +106,73 @@ class TestBuildProposals:
         ]
         assert _build_proposals(fb, min_occurrences=3) == []
 
+    def test_own_correspondent_gets_no_blanket_rule(self):
+        """Kein Pauschal-fyi fuer Adressen, an die Anthony selbst schreibt.
+
+        Genau hier vergiftete sich die Lernschleife: aus abgelehnten Task-Vorschlaegen
+        entstanden Regeln, die Swiss Bankers, BFH, T&R und Anthonys eigene Adresse
+        kuenftig zurueckhaltend behandeln sollten -- also genau die wichtigen Absender.
+        """
+        fb = [
+            _fb("task_deleted", sender="angela.parenta@swissbankers.ch"),
+            _fb("task_deleted", sender="angela.parenta@swissbankers.ch"),
+            _fb("task_deleted", sender="angela.parenta@swissbankers.ch"),
+        ]
+        proposals = _build_proposals(
+            fb, min_occurrences=3,
+            correspondents={"angela.parenta@swissbankers.ch"},
+        )
+        assert proposals == []
+
+    def test_machine_sender_still_gets_rule(self):
+        """Echtes Rauschen wird weiterhin gelernt -- die Schleife bleibt wirksam.
+
+        Leadinfo, Toggl und LinkedIn sind die drei zu Recht aktiven Regeln; an diese
+        Adressen hat Anthony nie geschrieben.
+        """
+        fb = [
+            _fb("task_deleted", sender="izabela@leadinfo.com"),
+            _fb("task_deleted", sender="izabela@leadinfo.com"),
+            _fb("rejected", sender="izabela@leadinfo.com"),
+        ]
+        proposals = _build_proposals(
+            fb, min_occurrences=3,
+            correspondents={"angela.parenta@swissbankers.ch"},
+        )
+        assert len(proposals) == 1
+        assert proposals[0][2]["sender"] == "izabela@leadinfo.com"
+
+    def test_correspondent_exemption_is_case_insensitive(self):
+        fb = [
+            _fb("task_deleted", sender="Angela.Parenta@SwissBankers.ch"),
+            _fb("task_deleted", sender="angela.parenta@swissbankers.ch"),
+            _fb("rejected", sender="ANGELA.PARENTA@swissbankers.ch"),
+        ]
+        proposals = _build_proposals(
+            fb, min_occurrences=3,
+            correspondents={"Angela.Parenta@swissbankers.CH"},
+        )
+        assert proposals == []
+
+    def test_reclass_rule_still_created_for_correspondents(self):
+        """Die Gegenrichtung bleibt offen: explizite Umklassifikation wird gelernt.
+
+        Nur die Pauschal-Daempfung ist ausgenommen, nicht das Lernen an sich -- sonst
+        koennte das System 'Finanzen' fuer T&R nie lernen.
+        """
+        fb = [
+            _fb("triage_reclass", sender="dominique.chuard@t-r.ch",
+                original={"triage_class": "fyi"}, corrected={"triage_class": "task"}),
+            _fb("triage_reclass", sender="dominique.chuard@t-r.ch",
+                original={"triage_class": "fyi"}, corrected={"triage_class": "task"}),
+        ]
+        proposals = _build_proposals(
+            fb, min_occurrences=2,
+            correspondents={"dominique.chuard@t-r.ch"},
+        )
+        assert len(proposals) == 1
+        assert proposals[0][2]["key"] == "triage:dominique.chuard@t-r.ch:fyi->task"
+
 
 class TestSemanticKey:
     """Der semantische Schluessel darf NICHT vom Beleg-Zaehler abhaengen -- sonst

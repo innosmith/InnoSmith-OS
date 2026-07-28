@@ -47,6 +47,7 @@ from app.models import (
     AgentFeedback,
     AgentJob,
     BoardColumn,
+    CapacityTimeOff,
     ChatTriage,
     ChecklistItem,
     EmailTriage,
@@ -66,6 +67,13 @@ from app.services.notification import (
     notify_agent_completed,
     notify_chat_triage_task,
     notify_task_suggested,
+)
+from app.services.triage_labels import (
+    FALLBACK_LABEL,
+    NO_CATEGORY,
+    TRIAGE_LABELS,
+    move_target,
+    normalize_label,
 )
 from app.core.principal import get_owner_settings, system_principal_id
 
@@ -724,18 +732,29 @@ def _looks_like_scheduling(subject: str, preview: str) -> bool:
     return any(re.search(p, text) for p in _CALENDAR_INTENT_PATTERNS)
 
 
-def _build_calendar_draft_step(subject: str, preview: str) -> str:
+def _build_calendar_draft_step(
+    subject: str, preview: str, available_from: date | None = None
+) -> str:
     """Konditionale Kalender-Anweisung: bei Terminwunsch echte freie Slots vorschlagen.
 
     Nur lesend (``find_free_slots``); es wird KEIN Termin erstellt. Faellt weg, wenn
     die Mail nicht nach einem Termin aussieht -- haelt den Prompt sonst schlank.
+
+    ``available_from`` verschiebt das Suchfenster hinter eine laufende Abwesenheit.
+    Notwendig, weil Ferien in ``capacity_time_off`` stehen und nicht zwingend als
+    Kalendertermin -- ``find_free_slots`` haelt die Tage sonst faelschlich fuer frei
+    und der Entwurf bietet Termine mitten in den Ferien an.
     """
     if not _looks_like_scheduling(subject or "", preview or ""):
         return ""
     from zoneinfo import ZoneInfo
 
     now = datetime.now(ZoneInfo("Europe/Zurich"))
-    start = now.strftime("%Y-%m-%dT08:00:00")
+    von = now.date()
+    if available_from and available_from > von:
+        von = available_from
+        now = datetime.combine(von, now.time(), tzinfo=now.tzinfo)
+    start = f"{von.isoformat()}T08:00:00"
     end = (now + timedelta(days=10)).strftime("%Y-%m-%dT19:00:00")
     return (
         f'3a. Diese Mail betrifft eine Terminfrage. Rufe find_free_slots(start="{start}", '
@@ -745,6 +764,127 @@ def _build_calendar_draft_step(subject: str, preview: str) -> str:
         "https://innosmith.ch/termin/ an. Erfinde NIEMALS Slots -- nutze nur echte "
         "Rückgaben von find_free_slots. Bei Fehler/keinen freien Slots: nur den "
         "Terminseiten-Link anbieten.\n"
+    )
+
+
+def _group_absence_ranges(days: list[date]) -> list[tuple[date, date]]:
+    """Fasst einzelne Abwesenheitstage zu Spannen zusammen, ueber Wochenenden hinweg.
+
+    ``capacity_time_off`` haelt eine Zeile pro Tag und enthaelt nur Arbeitstage. Eine
+    Ferienwoche Mo-Fr plus die Folgewoche erscheint daher als zwei Bloecke mit einer
+    Luecke am Wochenende. Ohne Bruecke wuerde daraus «bis Freitag» statt «bis in zwei
+    Wochen» -- also wird eine Luecke uebersprungen, wenn sie ausschliesslich aus
+    Samstag/Sonntag besteht.
+    """
+    if not days:
+        return []
+    ordered = sorted(set(days))
+    ranges: list[tuple[date, date]] = []
+    start = prev = ordered[0]
+    for current in ordered[1:]:
+        gap = [prev + timedelta(days=i) for i in range(1, (current - prev).days)]
+        if all(d.weekday() >= 5 for d in gap):
+            prev = current
+            continue
+        ranges.append((start, prev))
+        start = prev = current
+    ranges.append((start, prev))
+    return ranges
+
+
+async def _absence_ranges(horizon_days: int = 21) -> list[tuple[date, date]]:
+    """Anthonys kommende Abwesenheitsspannen aus ``capacity_time_off``.
+
+    Best-effort: liefert bei Fehlern oder fehlenden Eintraegen eine leere Liste, damit
+    der Entwurf nie an fehlendem Kontext scheitert.
+    """
+    from zoneinfo import ZoneInfo
+
+    today = datetime.now(ZoneInfo("Europe/Zurich")).date()
+    try:
+        async with async_session() as db:
+            rows = await db.execute(
+                select(CapacityTimeOff.date, CapacityTimeOff.type)
+                .where(
+                    CapacityTimeOff.date >= today - timedelta(days=7),
+                    CapacityTimeOff.date <= today + timedelta(days=horizon_days),
+                )
+                .order_by(CapacityTimeOff.date)
+            )
+            entries = rows.all()
+    except Exception:  # noqa: BLE001 - Kontext ist Beigabe, darf den Entwurf nie stoppen
+        logger.warning("Abwesenheitskontext konnte nicht geladen werden")
+        return []
+    # Feiertage sind kein Abwesenheitsgrund, den man in einer Antwort erwaehnt.
+    days = [d for d, kind in entries if kind in ("ferien", "krank", "sonstiges")]
+    return [r for r in _group_absence_ranges(days) if r[1] >= today]
+
+
+def _first_available_day(ranges: list[tuple[date, date]], today: date) -> date | None:
+    """Erster Arbeitstag, an dem Anthony wieder verfuegbar ist.
+
+    None, wenn er heute da ist. Wochenenden und direkt anschliessende Abwesenheiten
+    werden uebersprungen -- sonst wuerde als Rueckkehrtag ein Samstag oder ein
+    weiterer Ferientag vorgeschlagen.
+    """
+    aktuell = next((r for r in ranges if r[0] <= today <= r[1]), None)
+    if aktuell is None:
+        return None
+    tag = aktuell[1] + timedelta(days=1)
+    for _ in range(60):  # harte Schranke gegen Endlosschleifen
+        if tag.weekday() >= 5:
+            tag += timedelta(days=1)
+        elif any(a <= tag <= b for a, b in ranges):
+            tag += timedelta(days=1)
+        else:
+            return tag
+    return tag
+
+
+def _build_absence_block(ranges: list[tuple[date, date]], today: date) -> str:
+    """Abwesenheiten als Pflichtkontext fuer Antwort-Entwuerfe.
+
+    Die Ferien sind in ``capacity_time_off`` erfasst (die zwei Wochen vom 13.-24. Juli
+    2026 standen dort vollstaendig drin) -- der Entwurfs-Prompt hat die Tabelle nur
+    nie gelesen. Entsprechend entstanden Antworten, die die Ferien nicht erwaehnten
+    und Termine mitten in die Abwesenheit legten.
+    """
+    if not ranges:
+        return ""
+
+    def _fmt(a: date, b: date) -> str:
+        if a == b:
+            return f"{_WEEKDAYS_DE[a.weekday()]}, {a.strftime('%d.%m.%Y')}"
+        return (
+            f"{_WEEKDAYS_DE[a.weekday()]}, {a.strftime('%d.%m.')} bis "
+            f"{_WEEKDAYS_DE[b.weekday()]}, {b.strftime('%d.%m.%Y')}"
+        )
+
+    aktuell = next((r for r in ranges if r[0] <= today <= r[1]), None)
+    lines = [f"- {_fmt(a, b)}" for a, b in ranges]
+    kern = "\n".join(lines)
+
+    if aktuell:
+        return (
+            "## ABWESENHEIT VON ANTHONY (Pflichtkontext)\n\n"
+            f"**Anthony ist HEUTE abwesend** -- {_fmt(*aktuell)}.\n\n"
+            f"Geplante Abwesenheiten im Horizont:\n{kern}\n\n"
+            "Der Entwurf MUSS das berücksichtigen:\n"
+            "- Die Abwesenheit offen ansprechen, ohne sich zu entschuldigen "
+            "(«ich bin bis [Datum] abwesend»).\n"
+            "- Eine realistische Erwartung setzen, wann Anthony antwortet bzw. handelt "
+            "-- keine Zusage für die Abwesenheitszeit.\n"
+            "- Termine NIE in die Abwesenheit legen. Freie Slots erst ab dem ersten "
+            "Arbeitstag danach vorschlagen.\n"
+            "- Bei Dringlichkeit auf den Zeitpunkt der Rückkehr verweisen statt auf ein "
+            "vages «bald».\n\n---\n\n"
+        )
+    return (
+        "## ABWESENHEIT VON ANTHONY (Pflichtkontext)\n\n"
+        f"Anthony ist aktuell verfügbar. Geplante Abwesenheiten:\n{kern}\n\n"
+        "Schlage KEINE Termine innerhalb dieser Zeiträume vor. Liegt ein Termin- oder "
+        "Lieferwunsch darin, weise aktiv darauf hin und biete Alternativen davor oder "
+        "danach an.\n\n---\n\n"
     )
 
 
@@ -894,6 +1034,23 @@ async def _build_triage_prompt(job: AgentJob) -> str:
 → Lade die Absender-History mit search_sender_history("{from_addr}") um Kommunikationsmuster zu erkennen.
 """
 
+    # Fakt aus dem Umschlag (RFC 3834), keine Textdeutung: der Absender-Server
+    # deklariert selbst, dass die Mail automatisch erzeugt wurde. Wie das zu bewerten
+    # ist, entscheidet das LLM -- eine Messung am Postfach zeigte, dass der Header
+    # Autoresponder nicht von handlungsrelevanter Maschinenpost trennt (eine
+    # Lieferantenrechnung trug denselben Wert wie eine Abwesenheitsnotiz).
+    auto_submitted = (meta.get("auto_submitted") or "").strip()
+    auto_hint = ""
+    if auto_submitted:
+        auto_hint = (
+            f"\n**Auto-Submitted-Header:** `{auto_submitted}` -- die Mail wurde laut "
+            "Absender-Server maschinell erzeugt.\n"
+            "→ Auf eine automatische Antwort (z. B. eine fremde Abwesenheitsnotiz) wird "
+            "NIE geantwortet: kein `auto_reply`. Ob daraus eine Aufgabe entsteht, "
+            "entscheidet allein der Inhalt -- eine maschinell verschickte Rechnung oder "
+            "Frist bleibt handlungsrelevant.\n"
+        )
+
     recipient_hint = ""
     if recipient_type == "cc":
         recipient_hint = (
@@ -983,7 +1140,7 @@ Du hast einen email_triage Job erhalten. Führe den kompletten Triage-Ablauf gem
 **Empfänger-Typ:** {recipient_type} {"(Anthony ist direkter Empfänger im TO)" if recipient_type == "to" else "(Anthony ist NUR im CC)" if recipient_type == "cc" else "(nicht eindeutig bestimmbar)"}
 **Microsoft Inference:** {inference}
 **Body-Vorschau:** {preview[:300]}
-{recipient_hint}{thread_hint}
+{auto_hint}{recipient_hint}{thread_hint}
 {style_section}{sender_style_block}
 ## PFLICHT-AUFRUFE VOR JEDER KLASSIFIKATION UND DRAFT-ERSTELLUNG
 
@@ -1050,7 +1207,14 @@ async def _build_draft_prompt(meta: dict, parsed: dict | None = None) -> str:
     rules_block = await _build_rules_block("draft")
     recall_block = await _build_recall_block(meta)
     anchors_block = await _build_style_anchor_block(meta)
-    calendar_step = _build_calendar_draft_step(subject, preview)
+    from zoneinfo import ZoneInfo
+
+    heute = datetime.now(ZoneInfo("Europe/Zurich")).date()
+    abwesenheiten = await _absence_ranges()
+    absence_block = _build_absence_block(abwesenheiten, heute)
+    calendar_step = _build_calendar_draft_step(
+        subject, preview, _first_available_day(abwesenheiten, heute)
+    )
 
     # Vollstaendigen Body server-seitig laden (kein Verlass auf get_email-Tool).
     body_text = await _load_email_body_text(email_id)
@@ -1066,7 +1230,7 @@ async def _build_draft_prompt(meta: dict, parsed: dict | None = None) -> str:
     return f"""{style_section}{sender_style_block}{anchors_block}{rules_block}{recall_block}{briefing_block}
 ---
 
-## AUFGABE: ANTWORT-ENTWURF SCHREIBEN
+{absence_block}## AUFGABE: ANTWORT-ENTWURF SCHREIBEN
 
 Diese E-Mail wurde als **auto_reply** eingestuft. Schreibe jetzt den bestmöglichen
 Antwort-Entwurf im persönlichen Stil von Anthony Smith. Klassifiziere NICHT neu,
@@ -1925,22 +2089,33 @@ async def _finalize_email_state(
     meta: dict,
     label: str | None,
     moved_id: str | None,
+    *,
+    triage_class: str | None = None,
+    needs_review: bool = False,
 ) -> None:
-    """Deterministische Finalisierung des Outlook-Zustands nach der Triage.
+    """Der EINZIGE Schreibpfad auf den Outlook-Zustand nach der Triage.
 
-    Zwei Garantien, die NICHT dem (unzuverlaessigen) LLM ueberlassen werden:
+    Das LLM klassifiziert, diese Funktion mutiert. Der Triage-Agent hat die
+    zustandsveraendernden Graph-Tools nicht mehr im Toolset (siehe
+    ``_TRIAGE_MCP_SERVERS`` und ``GRAPH_TOOL_MODE`` im Graph-MCP-Server) -- vorher
+    schrieb er unvalidierte Strings direkt nach Outlook, was zu 80 erfundenen
+    Kategorien und zu Moves echter Kundenmails fuehrte.
 
-    1. Kategorie-Sicherheitsnetz: Hat die Mail nach der Triage noch GAR KEINE
-       Outlook-Kategorie, wird sie aus dem JSON-``label`` nachgezogen. Eine vom
-       Agenten bereits gesetzte Kategorie wird NIE ueberschrieben.
-    2. ``mark_as_unread`` als ALLERLETZTER Graph-Schritt -- immer. Ein
+    Drei Schritte, in dieser Reihenfolge zwingend:
+
+    1. **Move** nach ``move_target`` (Label + ``fyi`` + ``inferenceClassification
+       == other``). Zuerst, weil ein Move die Graph-ID aendert -- danach zaehlt nur
+       noch die neue ID.
+    2. **Kategorie** aus dem validierten Label, IMMER gesetzt (nicht mehr nur als
+       Luecken-Fueller). Genau hier entstand der Hauptmangel: 64 % der Mails
+       blieben ohne ``label``, und ``Finanzen`` wurde faktisch nie vergeben.
+    3. **``mark_as_unread``** als allerletzte Aktion -- immer. Ein
        ``set_categories``-PATCH kippt ``isRead`` in Exchange auf ``true``; nur wenn
-       das ungelesen-Setzen zuletzt laeuft, bleibt die Mail fuer Anthony sichtbar
-       neu.
+       das ungelesen-Setzen zuletzt laeuft, bleibt die Mail sichtbar neu.
 
-    Laeuft auf der FINALEN Message-ID: ``moved_id`` (nach einem Move) hat Vorrang
-    vor ``email_message_id``. Best-effort und 404-tolerant (CC-only-Mails / bereits
-    veraltete IDs duerfen den Job nicht stoppen), andere Fehler werden geloggt.
+    ``moved_id`` deckt den Altfall ab, dass die ID bereits durch einen fremden
+    Move gewandert ist. Best-effort und 404-tolerant (CC-only-Mails / veraltete
+    IDs duerfen den Job nie stoppen).
     """
     final_mid = moved_id or meta.get("email_message_id")
     if not final_mid:
@@ -1950,13 +2125,35 @@ async def _finalize_email_state(
     if client is None:
         return
     try:
-        # Schritt 1: Kategorie nur als Luecken-Fueller (Agent-Arbeit nie ueberschreiben).
-        if label and label != "Unklassifiziert":
+        # Schritt 1: Move -- deterministisch aus der Klassifikation, nicht vom LLM.
+        target = move_target(
+            label,
+            triage_class,
+            meta.get("inference_classification"),
+            needs_review=needs_review,
+        )
+        if target and not moved_id:
             try:
-                existing = await client.get_email_categories(final_mid)
-                if not (existing or {}).get("categories"):
-                    await client.set_categories(final_mid, [label])
-                    logger.info("Finalize: Kategorie '%s' nachgezogen (Sicherheitsnetz)", label)
+                result = await client.move_to_folder(final_mid, target)
+                new_mid = (result or {}).get("id")
+                if new_mid:
+                    final_mid = new_mid
+                logger.info(
+                    "Finalize: Mail nach '%s' verschoben (label=%s, fyi + other)",
+                    target, label,
+                )
+            except ValueError:
+                # get_or_create_folder wirft ValueError, wenn der Ordner fehlt.
+                logger.warning("Finalize: Zielordner '%s' existiert nicht -- kein Move", target)
+            except httpx.HTTPStatusError as exc:
+                status = exc.response.status_code if exc.response is not None else None
+                logger.warning("Finalize: Move nach '%s' fehlgeschlagen (HTTP %s)", target, status)
+
+        # Schritt 2: Kategorie IMMER aus dem validierten Label setzen.
+        if label and label != NO_CATEGORY:
+            try:
+                await client.set_categories(final_mid, [label])
+                logger.info("Finalize: Kategorie '%s' gesetzt", label)
             except httpx.HTTPStatusError as exc:
                 status = exc.response.status_code if exc.response is not None else None
                 if status == 404:
@@ -1964,7 +2161,7 @@ async def _finalize_email_state(
                 else:
                     logger.warning("Finalize: Kategorie-Schritt fehlgeschlagen (HTTP %s)", status)
 
-        # Schritt 2: IMMER und als letzte Aktion -- Mail auf ungelesen zuruecksetzen.
+        # Schritt 3: IMMER und als letzte Aktion -- Mail auf ungelesen zuruecksetzen.
         try:
             await client.mark_as_unread(final_mid)
             logger.info("Finalize: Mail auf ungelesen gesetzt (mid=%s)", str(final_mid)[:40])
@@ -1976,6 +2173,49 @@ async def _finalize_email_state(
                 logger.warning("Finalize: ungelesen-Schritt fehlgeschlagen (HTTP %s)", status)
     except Exception:  # noqa: BLE001 - Finalisierung darf den Job nie stoppen
         logger.warning("Finalize: unerwarteter Fehler (mid=%s)", str(final_mid)[:40])
+    finally:
+        try:
+            await client.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+async def apply_label_category(message_id: str, label: str) -> bool:
+    """Setzt eine korrigierte Kategorie in Outlook -- ohne Move, ohne Statusverlust.
+
+    Fuer die manuelle Label-Korrektur aus dem Cockpit. Bewusst KEIN Move: eine
+    Menschenkorrektur soll nichts wegraeumen (verschoben heisst aus dem Blick). Der
+    Gelesen-Status wird erhalten, weil ein ``set_categories``-PATCH ihn in Exchange
+    auf ``true`` kippt.
+
+    Returns True, wenn die Kategorie gesetzt wurde.
+    """
+    client = await _build_graph_client()
+    if client is None:
+        return False
+    try:
+        was_unread = False
+        try:
+            state = await client.get_email_categories(message_id)
+            was_unread = (state or {}).get("isRead") is False
+        except httpx.HTTPStatusError:
+            logger.info("Label-Korrektur: Zustand nicht lesbar (mid=%s)", str(message_id)[:40])
+
+        await client.set_categories(message_id, [label])
+        if was_unread:
+            try:
+                await client.mark_as_unread(message_id)
+            except httpx.HTTPStatusError:
+                logger.warning("Label-Korrektur: ungelesen nicht wiederherstellbar")
+        logger.info("Label-Korrektur: Kategorie '%s' gesetzt (mid=%s)", label, str(message_id)[:40])
+        return True
+    except httpx.HTTPStatusError as exc:
+        status = exc.response.status_code if exc.response is not None else None
+        logger.warning("Label-Korrektur fehlgeschlagen (HTTP %s)", status)
+        return False
+    except Exception:  # noqa: BLE001 - Korrektur darf den Request nie sprengen
+        logger.warning("Label-Korrektur: unerwarteter Fehler (mid=%s)", str(message_id)[:40])
+        return False
     finally:
         try:
             await client.close()
@@ -2557,8 +2797,9 @@ async def _structured_triage_reask(meta: dict, content: str) -> dict | None:
     from_addr = meta.get("from_address", "")
     preview = (meta.get("body_preview") or "")[:500]
     analysis = (content or "")[-1500:]
+    labels_hint = "|".join(TRIAGE_LABELS)
     schema_hint = (
-        '{"rationale": "kurz", "label": "kurzes Label", '
+        f'{{"rationale": "kurz", "label": "{labels_hint}", '
         '"triage_class": "task|auto_reply|fyi", "reply_expected": true|false, '
         '"confidence": 0.0}'
     )
@@ -2566,6 +2807,7 @@ async def _structured_triage_reask(meta: dict, content: str) -> dict | None:
         "Du bist ein E-Mail-Triage-Klassifikator. Gib AUSSCHLIESSLICH ein JSON-Objekt "
         f"nach diesem Schema zurueck: {schema_hint}. Begruende ZUERST (rationale), dann "
         "klassifiziere. triage_class ist genau eines von task, auto_reply, fyi. "
+        "label ist genau EINES der vorgegebenen Labels -- erfinde keine neuen. "
         "Terminzusagen/reine Infos sind fyi. Im Zweifel fyi."
     )
     user_msg = (
@@ -2611,7 +2853,7 @@ async def _structured_triage_reask(meta: dict, content: str) -> dict | None:
                 "type": "object",
                 "properties": {
                     "rationale": {"type": "string"},
-                    "label": {"type": "string"},
+                    "label": {"type": "string", "enum": list(TRIAGE_LABELS)},
                     "triage_class": {
                         "type": "string",
                         "enum": ["task", "auto_reply", "fyi"],
@@ -2619,7 +2861,7 @@ async def _structured_triage_reask(meta: dict, content: str) -> dict | None:
                     "reply_expected": {"type": "boolean"},
                     "confidence": {"type": "number"},
                 },
-                "required": ["rationale", "triage_class", "reply_expected"],
+                "required": ["rationale", "label", "triage_class", "reply_expected"],
                 "additionalProperties": False,
             },
         },
@@ -2678,10 +2920,13 @@ async def _fallback_unparsed_triage(job_id, meta: dict, moved_id: str | None = N
             )
         )
         await db.commit()
-    # Auch im Fallback deterministisch finalisieren: Sentinel "Unklassifiziert"
+    # Auch im Fallback deterministisch finalisieren: Sentinel NO_CATEGORY
     # ueberspringt das Kategorie-Setzen (kein Raten einer Outlook-Kategorie),
     # die Mail wird aber auf ungelesen zurueckgesetzt und bleibt sichtbar.
-    await _finalize_email_state(meta, "Unklassifiziert", moved_id)
+    # needs_review verhindert jeden Move -- was nicht verstanden wurde, bleibt liegen.
+    await _finalize_email_state(
+        meta, NO_CATEGORY, moved_id, triage_class="fyi", needs_review=True
+    )
     return "completed"
 
 
@@ -2721,7 +2966,23 @@ async def _post_process_triage(
             return await _fallback_unparsed_triage(job_id, meta, moved_id)
 
     triage_class = parsed.get("triage_class")
-    label = parsed.get("label")
+    # Label gegen das kanonische Vokabular pruefen. Fail-closed: ein erfundenes
+    # Label wird NICHT zurechtgebogen, sondern zu 'Unklar' mit needs_review --
+    # sichtbar in der Inbox und korrigierbar (statt still falsch kategorisiert).
+    label = normalize_label(parsed.get("label"))
+    label_invalid = label is None
+    if label_invalid:
+        raw_label = parsed.get("label")
+        logger.warning(
+            "Job %s: Label %r nicht im Vokabular -- fail-closed auf '%s' (needs_review)",
+            job_id, str(raw_label)[:60], FALLBACK_LABEL,
+        )
+        label = FALLBACK_LABEL
+        parsed["label"] = FALLBACK_LABEL
+        parsed["label_rejected"] = str(raw_label)[:120] if raw_label else None
+        parsed["needs_review"] = True
+    else:
+        parsed["label"] = label
     # Echte Draft-ID aus dem Tool-Ergebnis ist die einzige verlaessliche Quelle.
     # Die vom Modell im JSON gemeldete ID wird NICHT als ID-Quelle genutzt.
     draft_id = captured_draft_id
@@ -2953,9 +3214,15 @@ async def _post_process_triage(
         await db.commit()
 
     # Deterministische Outlook-Finalisierung NACH der DB-Transaktion (reine Netz-
-    # I/O): Kategorie-Sicherheitsnetz + Mail immer auf ungelesen zuruecksetzen.
-    # Laeuft fuer alle Klassen (task/auto_reply/fyi) und auf der finalen ID.
-    await _finalize_email_state(meta, label, moved_id)
+    # I/O): Move gemaess Politik, Kategorie aus dem validierten Label, Mail immer
+    # auf ungelesen. Laeuft fuer alle Klassen (task/auto_reply/fyi).
+    await _finalize_email_state(
+        meta,
+        label,
+        moved_id,
+        triage_class=triage_class,
+        needs_review=label_invalid,
+    )
 
     return final_status
 
@@ -2992,6 +3259,20 @@ def get_configured_server_keys() -> list[str]:
         return []
 
 
+def expand_graph_admin(servers: list[str]) -> list[str]:
+    """Koppelt ``graphAdmin`` an ``graph`` (nur fuer Chat-Kontexte).
+
+    Der Graph-Server ist zweimal registriert: ``graph`` ohne und ``graphAdmin``
+    mit den zustandsveraendernden Tools (siehe ``hermes_config.build_config_dict``).
+    Fuer den Nutzer bleibt das eine Auswahl -- wer im Chat «Graph» aktiviert, will
+    auch verschieben und kategorisieren koennen. Die Triage nutzt diese Funktion
+    bewusst NICHT.
+    """
+    if "graph" in servers and "graphAdmin" not in servers:
+        return [*servers, "graphAdmin"]
+    return servers
+
+
 def resolve_cloud_toolsets(enabled_servers: list[str] | None) -> list[str]:
     """Validiert die gewuenschten MCP-Server gegen die Konfiguration.
 
@@ -3000,7 +3281,8 @@ def resolve_cloud_toolsets(enabled_servers: list[str] | None) -> list[str]:
     Eine leere Liste bedeutet Default-Deny (keine MCP-Tools).
     """
     configured = set(get_configured_server_keys())
-    return [s for s in (enabled_servers or []) if s in configured]
+    requested = expand_graph_admin(list(enabled_servers or []))
+    return [s for s in requested if s in configured]
 
 
 # Kuratierte Allowlist der Hermes-Core-Toolsets fuer lokale Agenten (Worker + Chat).
@@ -3024,7 +3306,7 @@ LOCAL_CORE_TOOLSETS: list[str] = [
 # Fallback-Server-Keys, falls config.yaml (noch) nicht lesbar ist. Deckt sich mit
 # build_config_dict() in hermes_config.py.
 _KNOWN_MCP_SERVERS: list[str] = [
-    "taskpilot", "graph", "pipedrive", "toggl", "bexio",
+    "taskpilot", "graph", "graphAdmin", "pipedrive", "toggl", "bexio",
     "signa", "invoiceinsight", "scripts", "sandbox", "contentConverter",
 ]
 
@@ -3048,9 +3330,14 @@ def build_local_allowlist(include_delegation: bool = False) -> list[str]:
 
 
 # MCP-Server, die die Triage tatsaechlich braucht: E-Mail/Teams lesen und
-# verschieben (graph) sowie Tasks/Profile/History (taskpilot). Alle anderen
-# Server (CRM, Buchhaltung, Zeiterfassung, SIGNA, Sandbox, ...) sind fuer die
-# Klassifikation irrelevanter Prompt-Ballast fuer das lokale Modell.
+# Entwuerfe schreiben (graph) sowie Tasks/Profile/History (taskpilot). Alle
+# anderen Server (CRM, Buchhaltung, Zeiterfassung, SIGNA, Sandbox, ...) sind fuer
+# die Klassifikation irrelevanter Prompt-Ballast fuer das lokale Modell.
+#
+# ``graphAdmin`` ist hier bewusst NICHT enthalten: die zustandsveraendernden
+# Graph-Tools (Kategorien, Move, Versand, gelesen-Markierung) liegen dort, und
+# der Triage-Agent soll den Outlook-Zustand nicht selbst mutieren. Er
+# klassifiziert, das Backend schreibt (siehe ``_finalize_email_state``).
 _TRIAGE_MCP_SERVERS: list[str] = ["graph", "taskpilot"]
 
 
@@ -3230,7 +3517,7 @@ def build_chat_agent(
         # bedeutet voller Zugriff (Default) — Daten bleiben ohnehin lokal.
         if enabled_servers:
             configured = set(get_configured_server_keys() or _KNOWN_MCP_SERVERS)
-            servers = [s for s in enabled_servers if s in configured]
+            servers = [s for s in expand_graph_admin(list(enabled_servers)) if s in configured]
             enabled_toolsets = [*LOCAL_CORE_TOOLSETS, "delegation", *servers]
         else:
             enabled_toolsets = build_local_allowlist(include_delegation=True)

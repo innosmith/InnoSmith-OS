@@ -38,3 +38,31 @@ class TestIsMeetingResponse:
         assert "meetingAccepted" in MEETING_RESPONSE_TYPES
         assert "meetingRequest" not in MEETING_RESPONSE_TYPES
         assert "meetingCancelled" not in MEETING_RESPONSE_TYPES
+
+
+class TestKalenderIsMovedOnlyHere:
+    """``Inbox/Kalender`` wird ausschliesslich von diesem Pfad befuellt.
+
+    Das LLM-Label ``Kalender`` loest keinen Move aus (siehe ``LABEL_FOLDERS``), damit
+    Einladungen, Veranstalter-Absagen und Terminkonflikt-Meldungen von Kunden in der
+    Inbox sichtbar bleiben. Verschoben werden nur echte Terminantworten -- und die
+    erkennt Exchange strukturiert, nicht das Modell.
+    """
+
+    def test_llm_label_does_not_move(self):
+        from app.services.triage_labels import move_target
+
+        assert move_target("Kalender", "fyi", "other") is None
+
+    def test_deterministic_path_still_targets_kalender(self):
+        """Der Move haengt an einem woertlichen Ordnernamen, nicht an LABEL_FOLDERS.
+
+        Sonst haette das Entfernen von ``Kalender`` aus der Label-Karte auch die
+        Terminantworten stillgelegt.
+        """
+        import inspect
+        from app.services.triage import _handle_meeting_response
+
+        quelle = inspect.getsource(_handle_meeting_response)
+        assert 'move_to_folder(message_id, "Kalender")' in quelle
+        assert 'set_categories(message_id, ["Kalender"])' in quelle

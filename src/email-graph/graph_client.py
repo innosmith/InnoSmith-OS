@@ -330,6 +330,20 @@ class GraphClient:
                         "hasAttachments,importance,isRead,conversationId"},
         )
 
+    async def get_message_headers(self, message_id: str) -> list[dict]:
+        """Internet-Header einer E-Mail als ``[{name, value}, ...]``.
+
+        Fakten aus dem Umschlag (z. B. ``Auto-Submitted`` nach RFC 3834), die im
+        normalen ``$select`` bewusst fehlen -- eine Mail traegt typisch 45-75 Header,
+        die in einer Listenabfrage die Antwort unnoetig aufblaehen wuerden.
+        """
+        data = await self._get(
+            f"{self._user_path}/messages/{message_id}",
+            {"$select": "id,internetMessageHeaders"},
+        )
+        headers = data.get("internetMessageHeaders")
+        return headers if isinstance(headers, list) else []
+
     async def get_email_attachments(self, message_id: str) -> list[dict]:
         """Anhänge einer E-Mail laden (inkl. ``contentBytes`` für fileAttachments).
 
@@ -341,15 +355,21 @@ class GraphClient:
         return data.get("value", [])
 
     async def get_email_categories(self, message_id: str) -> dict:
-        """Kategorien und Klassifizierung einer E-Mail."""
+        """Kategorien, Klassifizierung und Gelesen-Status einer E-Mail.
+
+        ``isRead`` wird mitgeliefert, weil ein ``set_categories``-PATCH den Status in
+        Exchange auf ``true`` kippt. Wer eine Kategorie nachtraeglich korrigiert, muss
+        den vorherigen Zustand kennen, um ihn wiederherzustellen.
+        """
         data = await self._get(
             f"{self._user_path}/messages/{message_id}",
-            {"$select": "id,categories,inferenceClassification"},
+            {"$select": "id,categories,inferenceClassification,isRead"},
         )
         return {
             "id": data.get("id"),
             "categories": data.get("categories", []),
             "inferenceClassification": data.get("inferenceClassification"),
+            "isRead": data.get("isRead"),
         }
 
     async def create_draft(

@@ -6,6 +6,7 @@ import { EmailBody } from '../components/EmailBody';
 import { EmailThreadPanel } from '../components/EmailThreadPanel';
 import { RichTextEditor } from '../components/RichTextEditor';
 import { ConfidenceBadge } from '../components/agent/ConfidenceBadge';
+import { TRIAGE_LABELS } from '../lib/triageLabels';
 
 /* ---------- Typen ---------- */
 
@@ -77,6 +78,9 @@ interface TriageItem {
     triage_class?: string;
     confidence?: number;
     rationale?: string;
+    label?: string;
+    needs_review?: boolean;
+    label_rejected?: string | null;
     suggested_action?: { type?: string; detail?: string };
     type?: string;
     detail?: string;
@@ -357,6 +361,26 @@ export function InboxPage() {
       setTimeout(() => setReclassDone(null), 6000);
     } catch {
       setReclassDone('Korrektur fehlgeschlagen.');
+      setTimeout(() => setReclassDone(null), 4000);
+    } finally {
+      setReclassBusy(false);
+    }
+  };
+
+  /* -- Outlook-Kategorie korrigieren (setzt Kategorie neu, verschiebt NICHT) -- */
+  const relabelTriage = async (triageId: string, targetLabel: string) => {
+    setReclassBusy(true);
+    try {
+      await api.post(`/api/triage/${triageId}/reclassify`, {
+        label: targetLabel,
+        reason: reclassReason.trim() || undefined,
+      });
+      setReclassReason('');
+      setReclassDone(`Kategorie auf «${targetLabel}» korrigiert – InnoPilot lernt daraus.`);
+      await fetchTriage();
+      setTimeout(() => setReclassDone(null), 6000);
+    } catch {
+      setReclassDone('Kategorie-Korrektur fehlgeschlagen.');
       setTimeout(() => setReclassDone(null), 4000);
     } finally {
       setReclassBusy(false);
@@ -848,6 +872,32 @@ export function InboxPage() {
                       placeholder="Grund (optional) – hilft beim Lernen"
                       className="min-w-[180px] flex-1 rounded-lg border border-indigo-200/70 bg-white/80 px-3 py-1 text-xs text-gray-700 placeholder:text-gray-400 focus:outline-none focus:ring-1 focus:ring-indigo-400 dark:border-indigo-800/50 dark:bg-gray-900/60 dark:text-gray-200"
                     />
+                  </div>
+                  {/* Outlook-Kategorie korrigieren: setzt die Kategorie neu, verschiebt nie. */}
+                  <div className="mt-2 flex flex-wrap items-center gap-2">
+                    <span className="text-xs font-medium text-indigo-700 dark:text-indigo-300">
+                      Kategorie:
+                    </span>
+                    <select
+                      value={selectedTriage.suggested_action?.label ?? ''}
+                      disabled={reclassBusy}
+                      onChange={(e) => {
+                        if (e.target.value) relabelTriage(selectedTriage.id, e.target.value);
+                      }}
+                      className="rounded-lg border border-indigo-200/70 bg-white/80 px-2 py-1 text-xs text-gray-700 focus:outline-none focus:ring-1 focus:ring-indigo-400 disabled:opacity-40 dark:border-indigo-800/50 dark:bg-gray-900/60 dark:text-gray-200"
+                    >
+                      <option value="">– nicht gesetzt –</option>
+                      {TRIAGE_LABELS.map((l) => (
+                        <option key={l} value={l}>{l}</option>
+                      ))}
+                    </select>
+                    {selectedTriage.suggested_action?.needs_review && (
+                      <span className="text-xs text-amber-600 dark:text-amber-400">
+                        {selectedTriage.suggested_action.label_rejected
+                          ? `Agent schlug «${selectedTriage.suggested_action.label_rejected}» vor – kein gültiges Label, bitte prüfen.`
+                          : 'Zur manuellen Sichtung markiert.'}
+                      </span>
+                    )}
                   </div>
                   {reclassDone && (
                     <p className="mt-2 text-xs text-indigo-600 dark:text-indigo-400">{reclassDone}</p>
