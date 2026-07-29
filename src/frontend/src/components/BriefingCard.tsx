@@ -107,21 +107,24 @@ export function BriefingCard({ cardClass, textPrimary, textSecondary, textMuted,
           <h2 className={`text-sm font-semibold uppercase tracking-wider ${textSecondary}`}>
             Briefing
           </h2>
-          <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-semibold ${TYPE_BADGES[selectedType]}`}>
-            {TYPE_LABELS[selectedType]}
-          </span>
+          {/* Badge nur wenn keine Typ-Chips sichtbar — vermeidet doppeltes «Tag» */}
+          {!(isOpen && available.length > 1) && (
+            <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-semibold ${TYPE_BADGES[selectedType]}`}>
+              {TYPE_LABELS[selectedType]}
+            </span>
+          )}
           <span className={`hidden truncate text-xs sm:block ${textMuted}`}>
             {formatCreatedAt(current.created_at)}
           </span>
         </button>
         <div className="flex shrink-0 items-center gap-1.5">
           {isOpen && available.length > 1 && (
-            <div className="flex gap-1">
+            <div className="flex gap-1 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
               {available.map(t => (
                 <button
                   key={t}
                   onClick={() => setSelectedType(t)}
-                  className={`rounded-lg px-2.5 py-1 text-[11px] font-medium transition-colors ${
+                  className={`min-h-9 shrink-0 rounded-lg px-2.5 py-1 text-[11px] font-medium transition-colors lg:min-h-0 ${
                     selectedType === t
                       ? 'bg-indigo-600 text-white'
                       : hasBg
@@ -137,7 +140,7 @@ export function BriefingCard({ cardClass, textPrimary, textSecondary, textMuted,
           {isOpen && (
             <button
               onClick={handleCopy}
-              className={`rounded-lg p-1.5 transition-colors ${
+              className={`flex h-10 w-10 items-center justify-center rounded-lg transition-colors lg:h-auto lg:w-auto lg:p-1.5 ${
                 hasBg ? 'text-white/70 hover:bg-white/10 hover:text-white' : 'text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-800 dark:hover:text-gray-300'
               }`}
               title="In Zwischenablage kopieren"
@@ -156,7 +159,8 @@ export function BriefingCard({ cardClass, textPrimary, textSecondary, textMuted,
           <button
             type="button"
             onClick={() => setExpanded(v => !v)}
-            className={`rounded p-1 ${hasBg ? 'hover:bg-white/10' : 'hover:bg-gray-100 dark:hover:bg-gray-800'}`}
+            aria-label={isOpen ? 'Briefing einklappen' : 'Briefing aufklappen'}
+            className={`flex h-10 w-10 items-center justify-center rounded lg:h-auto lg:w-auto lg:p-1 ${hasBg ? 'hover:bg-white/10' : 'hover:bg-gray-100 dark:hover:bg-gray-800'}`}
           >
             {isOpen
               ? <ChevronUp className={`h-4 w-4 ${textMuted}`} />
@@ -166,7 +170,9 @@ export function BriefingCard({ cardClass, textPrimary, textSecondary, textMuted,
       </div>
 
       {isOpen && (
-        <div className={`mt-3 max-h-[28rem] overflow-y-auto rounded-lg p-3 text-sm ${
+        // Mobil kein eigener Scrollbereich: ein innerer Scroller in einer
+        // scrollenden Seite fängt Wischgesten ab. Dort scrollt die Seite.
+        <div className={`mt-3 rounded-lg p-3 pb-4 text-sm lg:max-h-[min(28rem,55dvh)] lg:overflow-y-auto lg:overscroll-contain ${
           hasBg ? 'bg-white/5' : 'bg-gray-50/70 dark:bg-gray-800/40'
         } ${textPrimary}`}>
           <MarkdownView text={current.output || ''} />

@@ -5,9 +5,18 @@ export function UpdateBanner() {
     needRefresh: [needRefresh],
     updateServiceWorker,
   } = useRegisterSW({
+    // Sofort nach Registrierung und beim Fokus prüfen — sonst bleibt nach
+    // `make prod` oft noch Stunden der alte Precache (index.html + JS) aktiv.
+    immediate: true,
     onRegisteredSW(_url, registration) {
       if (!registration) return;
-      setInterval(() => registration.update(), 5 * 60 * 1000);
+      void registration.update();
+      setInterval(() => registration.update(), 60 * 1000);
+      const onFocus = () => { void registration.update(); };
+      window.addEventListener('focus', onFocus);
+      document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible') onFocus();
+      });
     },
   });
 

@@ -402,7 +402,7 @@ export function SignalePage() {
             <div className="flex items-center gap-2">
               <button
                 onClick={() => setMobileFilterOpen(v => !v)}
-                className={`inline-flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium transition-colors ${
+                className={`inline-flex min-h-9 items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium transition-colors ${
                   mobileFilterOpen
                     ? 'bg-indigo-600 text-white'
                     : hasBg
@@ -419,7 +419,7 @@ export function SignalePage() {
                 )}
               </button>
               {activeFilterCount > 0 && (
-                <button onClick={resetFilters} className={`text-[11px] ${hasBg ? 'text-white/50' : 'text-gray-400 dark:text-gray-500'}`}>
+                <button onClick={resetFilters} className={`min-h-9 px-1 text-[11px] lg:min-h-0 lg:px-0 ${hasBg ? 'text-white/50' : 'text-gray-400 dark:text-gray-500'}`}>
                   ×
                 </button>
               )}

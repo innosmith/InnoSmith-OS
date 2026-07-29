@@ -384,12 +384,12 @@ export function AnalysisPage() {
         <div>
           <Link
             to="/finanzen"
-            className="mb-1 inline-flex items-center gap-1 text-xs font-medium text-gray-500 hover:text-indigo-600 dark:text-gray-400 dark:hover:text-indigo-400"
+            className="mb-1 inline-flex min-h-11 items-center gap-1 text-xs font-medium text-gray-500 hover:text-indigo-600 lg:min-h-0 dark:text-gray-400 dark:hover:text-indigo-400"
           >
             <ArrowLeft className="h-3.5 w-3.5" />
             Zurück zu Finanzen
           </Link>
-          <h1 className="flex items-center gap-2 text-2xl font-semibold text-gray-900 dark:text-white">
+          <h1 className="hidden items-center gap-2 text-2xl font-semibold lg:flex dark:text-white text-gray-900">
             <Sparkles className="h-6 w-6 text-indigo-500" />
             Finanzanalysen
           </h1>

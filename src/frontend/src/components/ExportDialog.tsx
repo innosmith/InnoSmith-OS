@@ -251,7 +251,7 @@ export function ExportDialog(props: ExportDialogProps) {
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 modal-safe"
       onMouseDown={e => { backdropMouseDown.current = e.target === e.currentTarget; }}
       onMouseUp={e => {
         // Nur schliessen, wenn Maus-Down UND Maus-Up direkt auf dem Backdrop

@@ -101,7 +101,7 @@ export function BackgroundPicker({ isOpen, onClose, currentUrl, onSelect }: Back
   return (
     <div
       ref={backdropRef}
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm modal-safe"
       onClick={(e) => { if (e.target === backdropRef.current) onClose(); }}
     >
       <div className="w-full max-w-2xl rounded-2xl border border-gray-200 bg-white shadow-2xl dark:border-gray-700 dark:bg-gray-900">

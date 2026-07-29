@@ -196,7 +196,8 @@ function CreditorsPageInner() {
         <div className="flex-shrink-0 px-4 pt-4 sm:px-6 sm:pt-6">
           <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <div>
-              <h1 className={`text-2xl font-bold ${hasBg ? 'text-white drop-shadow-sm' : 'text-gray-900 dark:text-white'}`}>
+              {/* Titel liefert mobil der MobileHeader. */}
+              <h1 className={`hidden text-xl font-bold lg:block lg:text-2xl ${hasBg ? 'text-white drop-shadow-sm' : 'text-gray-900 dark:text-white'}`}>
                 Kreditoren
               </h1>
               <p className={`mt-1 text-xs ${styleCtx.textMuted}`}>
@@ -206,7 +207,7 @@ function CreditorsPageInner() {
             <div className="flex items-center gap-2">
               <button
                 onClick={() => setFilterOpen(f => !f)}
-                className={`relative flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm font-medium transition-colors ${btnBase}`}
+                className={`relative flex min-h-11 min-w-11 items-center justify-center gap-1.5 rounded-lg px-3 py-2 text-sm font-medium transition-colors lg:min-h-0 lg:min-w-0 ${btnBase}`}
               >
                 <SlidersHorizontal className="h-4 w-4" />
                 <span className="hidden sm:inline">Filter</span>
@@ -220,14 +221,14 @@ function CreditorsPageInner() {
                 href="http://invoice.innosmith.ai"
                 target="_blank"
                 rel="noopener noreferrer"
-                className={`flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm font-medium transition-colors ${btnBase}`}
+                className={`flex min-h-11 min-w-11 items-center justify-center gap-1.5 rounded-lg px-3 py-2 text-sm font-medium transition-colors lg:min-h-0 lg:min-w-0 ${btnBase}`}
               >
                 <ExternalLink className="h-4 w-4" />
                 <span className="hidden sm:inline">InvoiceInsight</span>
               </a>
               <button
                 onClick={() => setBgPickerOpen(true)}
-                className={`rounded-lg p-2 transition-colors ${hasBg ? 'text-white/70 hover:bg-white/10 hover:text-white' : 'text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-800 dark:hover:text-gray-300'}`}
+                className={`flex min-h-11 min-w-11 items-center justify-center rounded-lg p-2 transition-colors lg:min-h-0 lg:min-w-0 ${hasBg ? 'text-white/70 hover:bg-white/10 hover:text-white' : 'text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-800 dark:hover:text-gray-300'}`}
                 title="Hintergrund ändern"
               >
                 <Image className="h-5 w-5" />
@@ -235,7 +236,7 @@ function CreditorsPageInner() {
               <button
                 onClick={handleRefresh}
                 disabled={refreshing}
-                className={`flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium transition-colors ${btnBase}`}
+                className={`flex min-h-11 min-w-11 items-center justify-center gap-2 rounded-lg px-3 py-2 text-sm font-medium transition-colors lg:min-h-0 lg:min-w-0 ${btnBase}`}
               >
                 <RefreshCw className={`h-4 w-4 ${refreshing ? 'animate-spin' : ''}`} />
                 <span className="hidden sm:inline">Aktualisieren</span>
@@ -253,7 +254,7 @@ function CreditorsPageInner() {
                   <button
                     key={t.id}
                     onClick={() => setTab(t.id)}
-                    className={`relative flex items-center gap-1.5 whitespace-nowrap px-3 py-2.5 text-[11px] sm:text-sm font-medium transition-colors ${
+                    className={`relative flex min-h-11 items-center gap-1.5 whitespace-nowrap px-3 py-2.5 text-[11px] font-medium transition-colors sm:text-sm lg:min-h-0 ${
                       isActive
                         ? hasBg
                           ? 'text-white'

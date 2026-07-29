@@ -51,9 +51,29 @@ server {
         proxy_set_header X-Real-IP $remote_addr;
     }
 
+    # Service Worker, App-Shell und Manifest NIE langlebig cachen. Sonst prueft der
+    # Browser sw.js nie neu, der alte Workbox-Precache bleibt aktiv und verweist auf
+    # geloeschte Chunk-Hashes -> «Failed to fetch dynamically imported module».
+    # Muss vor der generischen Asset-Regel stehen (exakte Matches gewinnen).
+    location = /sw.js {
+        add_header Cache-Control "no-cache, must-revalidate" always;
+        expires off;
+    }
+
+    location = /index.html {
+        add_header Cache-Control "no-cache, must-revalidate" always;
+        expires off;
+    }
+
+    location = /manifest.webmanifest {
+        default_type application/manifest+json;
+        add_header Cache-Control "no-cache, must-revalidate" always;
+        expires off;
+    }
+
     location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot)$ {
-        expires 1y;
-        add_header Cache-Control "public, immutable";
+        expires off;
+        add_header Cache-Control "public, max-age=31536000, immutable" always;
     }
 
     gzip on;

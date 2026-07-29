@@ -108,6 +108,16 @@ export function SettingsPage() {
   const [searchParams] = useSearchParams();
   const initialTab = (searchParams.get('tab') as SettingsTab) || 'profile';
   const [tab, setTab] = useState<SettingsTab>(initialTab);
+  const tabStripRef = useRef<HTMLDivElement>(null);
+
+  // Der Tab-Strip ist mobil ~360px breit bei ~970px Inhalt: ohne Nachführen
+  // verschwindet der aktive Tab und man verliert die Orientierung.
+  useEffect(() => {
+    tabStripRef.current
+      ?.querySelector('[data-tab-active]')
+      ?.scrollIntoView({ block: 'nearest', inline: 'center' });
+  }, [tab]);
+
   const [profile, setProfile] = useState<UserProfile | null>(null);
   const [settings, setSettings] = useState<UserSettingsData>({});
   const [users, setUsers] = useState<ManagedUser[]>([]);
@@ -645,17 +655,18 @@ export function SettingsPage() {
 
   return (
     <div className="flex h-full flex-col">
-      <div className="border-b border-white/40 bg-white/50 px-4 py-4 sm:px-6 backdrop-blur-sm dark:border-gray-800 dark:bg-gray-900/50">
+      <div className="hidden border-b border-white/40 bg-white/50 px-4 py-4 sm:px-6 backdrop-blur-sm lg:block dark:border-gray-800 dark:bg-gray-900/50">
         <h1 className="text-xl font-bold text-gray-900 dark:text-white">Einstellungen</h1>
       </div>
 
       <div className="border-b border-white/40 bg-white/50 px-4 sm:px-6 backdrop-blur-sm dark:border-gray-800 dark:bg-gray-900/50">
-        <div className="flex gap-4 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden" style={{ WebkitOverflowScrolling: 'touch', maskImage: 'linear-gradient(to right, transparent 0, black 8px, black calc(100% - 24px), transparent 100%)' }}>
+        <div ref={tabStripRef} className="flex gap-4 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden" style={{ WebkitOverflowScrolling: 'touch', maskImage: 'linear-gradient(to right, transparent 0, black 8px, black calc(100% - 24px), transparent 100%)' }}>
           {tabs.map((t) => (
             <button
               key={t.id}
+              data-tab-active={tab === t.id || undefined}
               onClick={() => setTab(t.id)}
-              className={`shrink-0 whitespace-nowrap border-b-2 px-1 py-3 text-sm font-medium transition-colors ${
+              className={`min-h-11 shrink-0 whitespace-nowrap border-b-2 px-2 py-3 text-sm font-medium transition-colors lg:px-1 ${
                 tab === t.id
                   ? 'border-indigo-500 text-indigo-600 dark:text-indigo-400'
                   : 'border-transparent text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-300'
@@ -667,8 +678,8 @@ export function SettingsPage() {
         </div>
       </div>
 
-      <div className="flex-1 overflow-y-auto overflow-x-hidden overscroll-x-none p-4 sm:p-6">
-        <div className="mx-auto max-w-4xl space-y-8 rounded-2xl border border-white/40 bg-white/60 p-6 shadow-sm backdrop-blur-sm dark:border-gray-800 dark:bg-gray-900/60">
+      <div className="flex-1 overflow-y-auto overflow-x-hidden overscroll-x-none p-4 pb-[max(1rem,env(safe-area-inset-bottom,0px))] sm:p-6">
+        <div className="mx-auto max-w-4xl space-y-8 rounded-2xl border border-white/40 bg-white/60 p-4 shadow-sm backdrop-blur-sm sm:p-6 dark:border-gray-800 dark:bg-gray-900/60">
 
           {/* ── Profil ── */}
           {tab === 'profile' && profile && (

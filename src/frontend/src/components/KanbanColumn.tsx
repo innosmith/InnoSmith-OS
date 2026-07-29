@@ -207,7 +207,14 @@ export function KanbanColumn({
   }
 
   return (
-    <div ref={setSortRef} style={style} className="flex w-72 shrink-0 flex-col">
+    // Mobil eine Spalte pro Bildschirm (Container-Padding p-4 abgezogen), damit
+    // Karten nicht halb angeschnitten stehen; Snap-Ziel für den Spalten-Pager.
+    <div
+      ref={setSortRef}
+      id={`kbcol-${id}`}
+      style={style}
+      className="flex w-[calc(100vw-2rem)] shrink-0 snap-start flex-col sm:w-72"
+    >
       <div
         className={`relative z-20 mb-3 flex items-center justify-between rounded-xl px-3 py-2 ${headerClasses}`}
         style={headerBgColor ? { backgroundColor: headerBgColor } : undefined}
@@ -256,7 +263,7 @@ export function KanbanColumn({
           {onCreateTask && (
             <button
               onClick={() => setAdding(true)}
-              className={`rounded-lg p-1 transition-colors ${btnClasses}`}
+              className={`flex h-9 w-9 items-center justify-center rounded-lg transition-colors lg:h-auto lg:w-auto lg:p-1 ${btnClasses}`}
               title="Neue Aufgabe"
             >
               <PlusIcon className="h-4 w-4" />
@@ -266,7 +273,7 @@ export function KanbanColumn({
             <div className="relative" ref={menuRef}>
               <button
                 onClick={() => { setMenuOpen(!menuOpen); setColorPickerOpen(false); setIconPickerOpen(false); setConfirmDelete(false); }}
-                className={`rounded-lg p-1 transition-colors ${btnClasses}`}
+                className={`flex h-9 w-9 items-center justify-center rounded-lg transition-colors lg:h-auto lg:w-auto lg:p-1 ${btnClasses}`}
                 title="Spalten-Einstellungen"
               >
                 <DotsIcon className="h-4 w-4" />

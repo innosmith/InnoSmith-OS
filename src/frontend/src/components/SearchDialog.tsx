@@ -500,7 +500,7 @@ export function SearchDialog({
         data-active={isActive}
         onClick={() => activateItem({ kind: 'doc', data: h })}
         onMouseEnter={() => setActiveIndex(idx)}
-        className={`flex w-full items-start gap-3 py-2.5 text-left transition-colors ${
+        className={`flex min-h-11 w-full items-start gap-3 py-2.5 text-left transition-colors ${
           indented ? 'pl-11 pr-4' : 'px-4'
         } ${dimmed && !isActive ? 'opacity-60' : ''} ${
           isActive
@@ -588,13 +588,13 @@ export function SearchDialog({
   return (
     <div
       ref={backdropRef}
-      className="fixed inset-0 z-50 flex items-start justify-center bg-black/40 px-4 backdrop-blur-sm"
+      className="fixed inset-0 z-50 flex items-start justify-center bg-black/40 px-4 pt-[env(safe-area-inset-top,0px)] pb-[env(safe-area-inset-bottom,0px)] backdrop-blur-sm"
       onClick={(e) => {
         if (e.target === backdropRef.current) onClose();
       }}
     >
       <div
-        className="mt-4 flex w-full max-w-xl flex-col overflow-hidden rounded-2xl border border-gray-200 bg-white shadow-2xl sm:mt-[12dvh] dark:border-gray-700 dark:bg-gray-900"
+        className="mt-2 flex max-h-[min(85dvh,calc(100dvh-env(safe-area-inset-top,0px)-env(safe-area-inset-bottom,0px)-1rem))] w-full max-w-xl flex-col overflow-hidden rounded-2xl border border-gray-200 bg-white shadow-2xl sm:mt-[12dvh] dark:border-gray-700 dark:bg-gray-900"
         onKeyDown={handleKeyDown}
       >
         {/* Suchfeld */}
@@ -605,7 +605,8 @@ export function SearchDialog({
             type="text"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder='Suchen…  ("Vorname Nachname" für exakte Phrase)'
+            placeholder='Suchen…'
+            title='Phrase: "Vorname Nachname"'
             className="flex-1 bg-transparent text-sm text-gray-900 outline-none placeholder:text-gray-400 dark:text-white dark:placeholder:text-gray-500"
           />
           {(loading || docLoading) && (
@@ -647,7 +648,9 @@ export function SearchDialog({
         )}
 
         {/* Ergebnisse */}
-        <div ref={listRef} className="max-h-[50dvh] overflow-y-auto sm:max-h-[60dvh]">
+        {/* Die Liste füllt die Panel-Höhe; ein fixes 50dvh liess mobil zwei Drittel
+            des Dialogs leer, während Treffer abgeschnitten waren. */}
+        <div ref={listRef} className="min-h-0 flex-1 overflow-y-auto sm:max-h-[60dvh]">
           {!query.trim() && (
             <div className="flex flex-col items-center gap-2 px-4 py-10 text-center text-sm text-gray-400 dark:text-gray-500">
               <span className="hidden items-center gap-1.5 sm:flex">

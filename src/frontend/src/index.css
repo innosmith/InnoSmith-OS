@@ -23,6 +23,31 @@ html, body, #root {
   overscroll-behavior: none;
 }
 
+/* Safe-Area-Utilities (iPhone Dynamic Island / Home Indicator).
+   Full-Bleed bleibt; nur interaktive Inhalte nutzen diese Klassen. */
+.pt-safe {
+  padding-top: env(safe-area-inset-top, 0px);
+}
+.pb-safe {
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+.mt-safe {
+  margin-top: env(safe-area-inset-top, 0px);
+}
+.mb-safe {
+  margin-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+/* Dialog-Backdrops: hält den Dialog aus Dynamic Island und Home-Indicator heraus.
+   Auf `!important` angewiesen, weil die Backdrops daneben Tailwind-Padding wie
+   `p-4` tragen und die Kaskade sonst von der Klassenreihenfolge abhängt. */
+.modal-safe {
+  padding-top: max(1rem, env(safe-area-inset-top, 0px)) !important;
+  padding-bottom: max(1rem, env(safe-area-inset-bottom, 0px)) !important;
+  padding-left: max(1rem, env(safe-area-inset-left, 0px)) !important;
+  padding-right: max(1rem, env(safe-area-inset-right, 0px)) !important;
+}
+
 html {
   scroll-behavior: smooth;
   background-color: #030712;

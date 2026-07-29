@@ -512,9 +512,10 @@ export function FinancePage() {
 
       <div className="relative z-10 flex-1 overflow-y-auto overflow-x-hidden overscroll-x-none p-4 sm:p-6">
         {/* Header */}
-        <div className="mb-6 flex items-center justify-between">
-          <div>
-            <h1 className={`text-2xl font-bold ${hasBg ? 'text-white drop-shadow-sm' : 'text-gray-900 dark:text-white'}`}>Finanz-Controlling</h1>
+        <div className="mb-6 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between lg:gap-2">
+          <div className="min-w-0">
+            {/* Titel liefert mobil der MobileHeader — hier würde er nur doppelt erscheinen. */}
+            <h1 className={`hidden text-xl font-bold lg:block lg:text-2xl ${hasBg ? 'text-white drop-shadow-sm' : 'text-gray-900 dark:text-white'}`}>Finanz-Controlling</h1>
             {overview && (
               <p className={`mt-1 text-xs ${hasBg ? 'text-white/60' : 'text-gray-400 dark:text-gray-500'}`}>
                 Datenstand: Journal{' '}
@@ -530,10 +531,10 @@ export function FinancePage() {
               </p>
             )}
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2 lg:flex-nowrap">
             <Link
               to="/finanzen/analysen"
-              className={`flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm font-medium transition-colors ${hasBg ? 'bg-indigo-500/80 text-white hover:bg-indigo-500 backdrop-blur-sm' : 'border border-indigo-200 bg-indigo-50 text-indigo-700 hover:bg-indigo-100 dark:border-indigo-800 dark:bg-indigo-950/40 dark:text-indigo-300 dark:hover:bg-indigo-900/40'}`}
+              className={`flex min-h-11 items-center gap-1.5 rounded-lg px-3 py-2 text-sm font-medium transition-colors lg:min-h-0 ${hasBg ? 'bg-indigo-500/80 text-white hover:bg-indigo-500 backdrop-blur-sm' : 'border border-indigo-200 bg-indigo-50 text-indigo-700 hover:bg-indigo-100 dark:border-indigo-800 dark:bg-indigo-950/40 dark:text-indigo-300 dark:hover:bg-indigo-900/40'}`}
               title="KI-gestützte Finanz- und Treuhandanalysen"
             >
               <Sparkles className="h-4 w-4" />
@@ -543,7 +544,7 @@ export function FinancePage() {
               href="https://office.bexio.com"
               target="_blank"
               rel="noopener noreferrer"
-              className={`flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm font-medium transition-colors ${hasBg ? 'bg-white/10 text-white/90 hover:bg-white/20 backdrop-blur-sm' : 'border border-gray-200 bg-white text-gray-700 hover:bg-gray-50 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-300 dark:hover:bg-gray-700'}`}
+              className={`flex min-h-11 items-center gap-1.5 rounded-lg px-3 py-2 text-sm font-medium transition-colors lg:min-h-0 ${hasBg ? 'bg-white/10 text-white/90 hover:bg-white/20 backdrop-blur-sm' : 'border border-gray-200 bg-white text-gray-700 hover:bg-gray-50 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-300 dark:hover:bg-gray-700'}`}
               title="Bexio Buchhaltung öffnen"
             >
               Bexio öffnen
@@ -551,7 +552,7 @@ export function FinancePage() {
             </a>
             <button
               onClick={() => setBgPickerOpen(true)}
-              className={`rounded-lg p-2 transition-colors ${hasBg ? 'text-white/70 hover:bg-white/10 hover:text-white' : 'text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-800 dark:hover:text-gray-300'}`}
+              className={`flex min-h-11 min-w-11 items-center justify-center rounded-lg p-2 transition-colors lg:min-h-0 lg:min-w-0 ${hasBg ? 'text-white/70 hover:bg-white/10 hover:text-white' : 'text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-800 dark:hover:text-gray-300'}`}
               title="Hintergrund ändern"
             >
               <BgImageIcon className="h-5 w-5" />
@@ -559,7 +560,7 @@ export function FinancePage() {
             <button
               onClick={handleRefresh}
               disabled={loading}
-              className={`flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium transition-colors ${hasBg ? 'bg-white/10 text-white/90 hover:bg-white/20 backdrop-blur-sm' : 'border border-gray-200 bg-white text-gray-700 hover:bg-gray-50 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-300 dark:hover:bg-gray-700'}`}
+              className={`flex min-h-11 items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium transition-colors lg:min-h-0 ${hasBg ? 'bg-white/10 text-white/90 hover:bg-white/20 backdrop-blur-sm' : 'border border-gray-200 bg-white text-gray-700 hover:bg-gray-50 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-300 dark:hover:bg-gray-700'}`}
             >
               <RefreshIcon className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
               Aktualisieren
@@ -581,7 +582,7 @@ export function FinancePage() {
           {/* Gruppe 1 — Heute / Bestand */}
           <div>
             <p className={`mb-2 text-[11px] font-semibold uppercase tracking-wider ${hasBg ? 'text-white/60' : 'text-gray-400 dark:text-gray-500'}`}>Heute / Bestand</p>
-            <div className="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-4">
+            <div className="grid grid-cols-2 gap-2 sm:gap-3 md:grid-cols-3 lg:grid-cols-4">
               <KpiCard
                 label="Banksaldo"
                 value={formatCHF(overview?.bank_balance)}
@@ -626,7 +627,7 @@ export function FinancePage() {
           {/* Gruppe 2 — Prognose Jahresende (erwartet/Run-Rate als Hauptwert → Worst Case als Floor) */}
           <div>
             <p className={`mb-2 text-[11px] font-semibold uppercase tracking-wider ${hasBg ? 'text-white/60' : 'text-gray-400 dark:text-gray-500'}`}>Prognose Jahresende</p>
-            <div className="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-4">
+            <div className="grid grid-cols-2 gap-2 sm:gap-3 md:grid-cols-3 lg:grid-cols-4">
               <KpiCard
                 label="Prog. Jahresumsatz (erwartet)"
                 value={formatCHF(overview?.forecast_year_revenue_runrate)}
@@ -680,7 +681,7 @@ export function FinancePage() {
           {/* Gruppe 3 — Ergebnis YTD */}
           <div>
             <p className={`mb-2 text-[11px] font-semibold uppercase tracking-wider ${hasBg ? 'text-white/60' : 'text-gray-400 dark:text-gray-500'}`}>Ergebnis YTD</p>
-            <div className="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-4">
+            <div className="grid grid-cols-2 gap-2 sm:gap-3 md:grid-cols-3 lg:grid-cols-4">
               <KpiCard
                 label="Umsatz YTD"
                 value={formatCHF(overview?.revenue_ytd_live)}
@@ -1482,16 +1483,17 @@ export function FinancePage() {
 function InfoTooltip({ text }: { text: string }) {
   return (
     <span className="group/tip relative inline-flex shrink-0">
+      {/* Negatives Margin: mobil 44px Trefferfläche, ohne das Layout zu verändern. */}
       <button
         type="button"
         aria-label="Erklärung anzeigen"
-        className="text-gray-300 transition-colors hover:text-gray-500 focus:outline-none dark:text-gray-600 dark:hover:text-gray-300"
+        className="-m-[15px] p-[15px] text-gray-300 transition-colors hover:text-gray-500 focus:outline-none lg:m-0 lg:p-0 dark:text-gray-600 dark:hover:text-gray-300"
       >
         <InfoIcon className="h-3.5 w-3.5" />
       </button>
       <span
         role="tooltip"
-        className="pointer-events-none absolute right-0 top-5 z-30 w-56 rounded-lg bg-gray-900 p-2 text-[11px] font-normal leading-snug text-white opacity-0 shadow-lg transition-opacity duration-150 group-hover/tip:opacity-100 group-focus-within/tip:opacity-100 dark:bg-gray-700"
+        className="pointer-events-none absolute right-0 top-5 z-30 w-56 max-w-[75vw] rounded-lg bg-gray-900 p-2 text-[11px] font-normal leading-snug text-white opacity-0 shadow-lg transition-opacity duration-150 group-hover/tip:opacity-100 group-focus-within/tip:opacity-100 dark:bg-gray-700"
       >
         {text}
       </span>
@@ -1549,21 +1551,21 @@ function KpiCard({
     neutral: 'border-l-gray-200 dark:border-l-gray-700',
   };
   return (
-    <div className={`rounded-xl border border-gray-200 border-l-4 ${statusColors[status]} bg-white p-3 shadow-sm lg:p-4 dark:border-gray-700 dark:bg-gray-800/50`}>
-      <div className="flex items-center gap-2 lg:gap-3">
-        <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-gray-50 text-gray-500 lg:h-10 lg:w-10 dark:bg-gray-800 dark:text-gray-400">
+    <div className={`rounded-xl border border-gray-200 border-l-4 ${statusColors[status]} bg-white p-2.5 shadow-sm sm:p-3 lg:p-4 dark:border-gray-700 dark:bg-gray-800/50`}>
+      <div className="flex items-start gap-2 lg:items-center lg:gap-3">
+        <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-gray-50 text-gray-500 sm:h-8 sm:w-8 lg:h-10 lg:w-10 dark:bg-gray-800 dark:text-gray-400">
           {icon}
         </div>
         <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-1">
-            <p className="min-w-0 truncate text-[11px] font-medium text-gray-500 lg:text-xs dark:text-gray-400">{label}</p>
+          <div className="flex items-start gap-1">
+            <p className="min-w-0 text-[10px] font-medium leading-snug text-gray-500 sm:text-[11px] lg:truncate lg:text-xs dark:text-gray-400" title={label}>{label}</p>
             {info && <InfoTooltip text={info} />}
           </div>
-          <div className="flex items-baseline justify-between gap-2">
-            <p className="min-w-0 truncate text-base font-bold leading-tight text-gray-900 lg:text-xl dark:text-white">{value}</p>
+          <div className="mt-0.5 flex flex-wrap items-baseline justify-between gap-x-2 gap-y-0.5">
+            <p className="min-w-0 break-words text-sm font-bold leading-tight text-gray-900 sm:text-base lg:text-xl dark:text-white">{value}</p>
             {trend && <TrendPill trend={trend} />}
           </div>
-          <p className="truncate text-[11px] text-gray-500 lg:text-xs dark:text-gray-400">{sublabel}</p>
+          <p className="mt-0.5 text-[10px] leading-snug text-gray-500 sm:text-[11px] lg:truncate lg:text-xs dark:text-gray-400" title={sublabel}>{sublabel}</p>
         </div>
       </div>
     </div>
@@ -1583,11 +1585,13 @@ function SourceCard({
     rose: 'border-t-rose-400',
   };
   return (
-    <div className={`rounded-2xl border border-gray-200 border-t-4 ${borderColors[color] || 'border-t-gray-400'} bg-white p-4 shadow-sm dark:border-gray-700 dark:bg-gray-800/50`}>
-      <div className="mb-3 flex items-center justify-between">
-        <div>
-          <h3 className="text-sm font-semibold text-gray-900 dark:text-white">{title}</h3>
-          <p className="text-xs text-gray-500 dark:text-gray-400">{subtitle}</p>
+    // `min-w-0`: als Grid-Item darf die Karte sonst nicht unter ihre Inhaltsbreite
+    // schrumpfen und schob den Öffnen-Link mobil ~60px aus dem Viewport.
+    <div className={`min-w-0 rounded-2xl border border-gray-200 border-t-4 ${borderColors[color] || 'border-t-gray-400'} bg-white p-4 shadow-sm dark:border-gray-700 dark:bg-gray-800/50`}>
+      <div className="mb-3 flex min-w-0 items-center justify-between gap-2">
+        <div className="min-w-0">
+          <h3 className="truncate text-sm font-semibold text-gray-900 dark:text-white">{title}</h3>
+          <p className="truncate text-xs text-gray-500 dark:text-gray-400">{subtitle}</p>
         </div>
         {comingSoon && (
           <span className="rounded-full bg-gray-100 px-2 py-0.5 text-[10px] font-medium text-gray-500 dark:bg-gray-700 dark:text-gray-400">
@@ -1601,7 +1605,7 @@ function SourceCard({
           href={linkUrl}
           target="_blank"
           rel="noopener noreferrer"
-          className="mt-3 flex items-center gap-1 text-xs font-medium text-indigo-600 transition-colors hover:text-indigo-500 dark:text-indigo-400"
+          className="mt-3 flex min-h-11 items-center gap-1 text-xs font-medium text-indigo-600 transition-colors hover:text-indigo-500 lg:min-h-0 dark:text-indigo-400"
         >
           {linkLabel || 'Öffnen'}
           <ExternalLinkIcon className="h-3 w-3" />
@@ -1812,7 +1816,7 @@ function InvoicePdfModal({ url, onClose }: { url: string; onClose: () => void })
   }, [url]);
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={onClose}>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm modal-safe" onClick={onClose}>
       <div className="relative mx-2 h-[90dvh] w-full rounded-2xl bg-white shadow-2xl lg:mx-4 lg:h-[85vh] lg:max-w-6xl dark:bg-gray-900" onClick={e => e.stopPropagation()}>
         <button
           onClick={onClose}

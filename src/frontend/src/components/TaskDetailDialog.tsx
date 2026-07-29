@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { api } from '../api/client';
 import { useAuth } from '../contexts/AuthContext';
+import { useMediaQuery } from '../hooks/useMediaQuery';
 import { TaskDetailContent, TaskDetailAttachments, TaskDetailActivity, TaskDetailSidebar } from './task-detail';
 import { TracePanel } from './TracePanel';
 import { FormattedOutput } from './FormattedOutput';
@@ -27,6 +28,7 @@ interface TaskDetailDialogProps {
 
 export function TaskDetailDialog({ taskId, onClose, onUpdated, onOpenTask, reviewMode, onReviewConfirm, onReviewDismiss }: TaskDetailDialogProps) {
   const { isOwner, user: authUser } = useAuth();
+  const isMobile = useMediaQuery('(max-width: 1023px)');
   const [task, setTask] = useState<TaskDetail | null>(null);
   const [agentJobs, setAgentJobs] = useState<AgentJob[]>([]);
   const [allTags, setAllTags] = useState<Tag[]>([]);
@@ -226,18 +228,21 @@ export function TaskDetailDialog({ taskId, onClose, onUpdated, onOpenTask, revie
 
   if (!taskId) return null;
 
+  // Mobile: immer Vollbild — Close/Controls liegen unter der Dynamic Island
+  const effectiveMode: TaskDetailMode = isMobile ? 'fullscreen' : mode;
+
   const backdropClass =
-    mode === 'fullscreen'
+    effectiveMode === 'fullscreen'
       ? 'fixed inset-0 z-50'
-      : mode === 'modal'
-        ? 'fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4 backdrop-blur-sm'
+      : effectiveMode === 'modal'
+        ? 'fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4 pt-[max(1rem,env(safe-area-inset-top,0px))] pb-[max(1rem,env(safe-area-inset-bottom,0px))] backdrop-blur-sm'
         : 'fixed inset-0 z-50 flex justify-end bg-black/30 backdrop-blur-sm';
 
   const panelClass =
-    mode === 'fullscreen'
-      ? 'flex h-full w-full flex-col overflow-hidden bg-white pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)] dark:bg-gray-950'
-      : mode === 'modal'
-        ? 'flex w-full max-w-4xl max-h-[90dvh] flex-col overflow-hidden rounded-2xl bg-white shadow-2xl ring-1 ring-gray-200 dark:bg-gray-950 dark:ring-gray-700/60'
+    effectiveMode === 'fullscreen'
+      ? 'flex h-full w-full flex-col overflow-hidden bg-white pt-[env(safe-area-inset-top,0px)] pb-[env(safe-area-inset-bottom,0px)] dark:bg-gray-950'
+      : effectiveMode === 'modal'
+        ? 'flex max-h-full w-full max-w-4xl flex-col lg:max-h-[90dvh] overflow-hidden rounded-2xl bg-white shadow-2xl ring-1 ring-gray-200 dark:bg-gray-950 dark:ring-gray-700/60'
         : 'flex h-full w-full max-w-4xl flex-col overflow-hidden bg-white shadow-2xl ring-1 ring-gray-200 dark:bg-gray-950 dark:ring-gray-700/60';
 
   const boardColumns: BoardColumn[] = currentProject?.board_columns?.sort((a, b) => a.position - b.position) || [];
@@ -246,48 +251,56 @@ export function TaskDetailDialog({ taskId, onClose, onUpdated, onOpenTask, revie
     <div ref={backdropRef} className={backdropClass} onClick={(e) => { if (e.target === backdropRef.current) onClose(); }}>
       <div className={panelClass}>
         {/* ─── Header ─── */}
-        <div className="flex items-center justify-between border-b border-gray-100 bg-gray-50/60 px-5 py-2.5 dark:border-gray-800 dark:bg-gray-900/40">
-          <div className="flex items-center gap-3">
+        <div className="flex items-center justify-between gap-2 border-b border-gray-100 bg-gray-50/60 px-3 py-2.5 sm:px-5 dark:border-gray-800 dark:bg-gray-900/40">
+          <div className="flex min-w-0 flex-1 items-center gap-2 sm:gap-3">
             {task?.recurrence_rule && !task?.template_id ? (
               <span
-                className="inline-flex items-center gap-1.5 rounded-md bg-indigo-50/80 px-2 py-0.5 text-[11px] font-semibold text-indigo-600 ring-1 ring-indigo-200/60 dark:bg-indigo-950/40 dark:text-indigo-300 dark:ring-indigo-800/40"
+                className="inline-flex max-w-full items-center gap-1.5 truncate rounded-md bg-indigo-50/80 px-2 py-0.5 text-[11px] font-semibold text-indigo-600 ring-1 ring-indigo-200/60 dark:bg-indigo-950/40 dark:text-indigo-300 dark:ring-indigo-800/40"
                 title="Wiederkehrende Vorlage — Instanzen werden automatisch erzeugt und einzeln erledigt"
               >
                 Wiederkehrende Vorlage
               </span>
             ) : (
-              <label className="flex cursor-pointer items-center gap-2" title="Cmd/Ctrl+Enter">
+              <label className="flex min-h-11 shrink-0 cursor-pointer items-center gap-2 sm:min-h-0" title="Cmd/Ctrl+Enter">
                 <input
                   type="checkbox"
                   checked={task?.is_completed ?? false}
                   onChange={() => task && updateTask({ is_completed: !task.is_completed })}
-                  className="h-4 w-4 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500 dark:border-gray-600"
+                  className="h-5 w-5 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500 sm:h-4 sm:w-4 dark:border-gray-600"
                 />
-                <span className={`text-sm font-medium ${task?.is_completed ? 'text-green-600 dark:text-green-400' : 'text-gray-500 dark:text-gray-400'}`}>
+                <span className={`hidden text-sm font-medium sm:inline ${task?.is_completed ? 'text-green-600 dark:text-green-400' : 'text-gray-500 dark:text-gray-400'}`}>
                   {task?.is_completed ? 'Erledigt' : 'Offen'}
                 </span>
               </label>
             )}
+            {/* Mobil bleibt der Titel im Header sichtbar — sonst weiss man beim
+                Scrollen durch die Beschreibung nicht mehr, welcher Task offen ist. */}
+            {task && (
+              <span className="min-w-0 flex-1 truncate text-sm font-semibold text-gray-900 sm:hidden dark:text-white">
+                {task.title}
+              </span>
+            )}
             {currentProject && (
-              <span className="rounded-md bg-white/80 px-2 py-0.5 text-[11px] font-medium text-gray-500 shadow-sm ring-1 ring-gray-200/60 dark:bg-gray-800 dark:text-gray-400 dark:ring-gray-700">
+              <span className="hidden max-w-[8rem] truncate rounded-md bg-white/80 px-2 py-0.5 text-[11px] font-medium text-gray-500 shadow-sm ring-1 ring-gray-200/60 sm:inline dark:bg-gray-800 dark:text-gray-400 dark:ring-gray-700">
                 {currentProject.name}
               </span>
             )}
             {task?.email_message_id && (
-              <span className="rounded-md bg-sky-50/80 px-2 py-0.5 text-[11px] font-medium text-sky-600 ring-1 ring-sky-200/60 dark:bg-sky-950/40 dark:text-sky-400 dark:ring-sky-800/40">
+              <span className="hidden shrink-0 rounded-md bg-sky-50/80 px-2 py-0.5 text-[11px] font-medium text-sky-600 ring-1 ring-sky-200/60 sm:inline dark:bg-sky-950/40 dark:text-sky-400 dark:ring-sky-800/40">
                 Aus E-Mail
               </span>
             )}
           </div>
-          <div className="flex items-center gap-0.5">
+          <div className="flex shrink-0 items-center gap-0.5">
             {/* Action Menu */}
             <div className="relative" ref={actionMenuRef}>
               <button
                 onClick={() => setShowActionMenu(!showActionMenu)}
-                className="rounded-md p-1.5 text-gray-400 transition-colors hover:bg-gray-200/60 dark:hover:bg-gray-800"
+                className="flex h-11 w-10 items-center justify-center rounded-md text-gray-400 transition-colors hover:bg-gray-200/60 sm:h-auto sm:w-auto sm:p-2 dark:hover:bg-gray-800"
                 title="Aktionen"
+                aria-label="Aktionen"
               >
-                <MoreHorizontalIcon className="h-4 w-4" />
+                <MoreHorizontalIcon className="h-5 w-5 sm:h-4 sm:w-4" />
               </button>
               {showActionMenu && (
                 <div className="absolute right-0 top-9 z-20 w-48 rounded-xl border border-gray-200 bg-white py-1 shadow-xl dark:border-gray-700 dark:bg-gray-900">
@@ -305,15 +318,23 @@ export function TaskDetailDialog({ taskId, onClose, onUpdated, onOpenTask, revie
               )}
             </div>
 
-            <div className="mx-1 h-4 w-px bg-gray-200 dark:bg-gray-700" />
-
-            {([['modal', 'Modal', ModalIcon], ['panel', 'Seitenpanel', PanelIcon], ['fullscreen', 'Vollbild', FullscreenIcon]] as const).map(([m, title, Icon]) => (
-              <button key={m} onClick={() => persistMode(m as TaskDetailMode)} className={`rounded-md p-1.5 transition-colors ${mode === m ? 'bg-indigo-100 text-indigo-600 dark:bg-indigo-950 dark:text-indigo-400' : 'text-gray-400 hover:bg-gray-200/60 dark:hover:bg-gray-800'}`} title={title}>
-                <Icon className="h-4 w-4" />
-              </button>
-            ))}
-            <div className="mx-1 h-4 w-px bg-gray-200 dark:bg-gray-700" />
-            <button onClick={onClose} className="rounded-md p-1.5 text-gray-400 transition-colors hover:bg-gray-200/60 dark:hover:bg-gray-800">
+            {!isMobile && (
+              <>
+                <div className="mx-1 h-4 w-px bg-gray-200 dark:bg-gray-700" />
+                {([['modal', 'Modal', ModalIcon], ['panel', 'Seitenpanel', PanelIcon], ['fullscreen', 'Vollbild', FullscreenIcon]] as const).map(([m, title, Icon]) => (
+                  <button key={m} onClick={() => persistMode(m as TaskDetailMode)} className={`rounded-md p-1.5 transition-colors ${mode === m ? 'bg-indigo-100 text-indigo-600 dark:bg-indigo-950 dark:text-indigo-400' : 'text-gray-400 hover:bg-gray-200/60 dark:hover:bg-gray-800'}`} title={title}>
+                    <Icon className="h-4 w-4" />
+                  </button>
+                ))}
+                <div className="mx-1 h-4 w-px bg-gray-200 dark:bg-gray-700" />
+              </>
+            )}
+            <button
+              onClick={onClose}
+              className="flex h-11 w-10 items-center justify-center rounded-md text-gray-500 transition-colors hover:bg-gray-200/60 hover:text-gray-700 sm:h-auto sm:w-auto sm:p-2 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200"
+              aria-label="Schliessen"
+              title="Schliessen"
+            >
               <CloseIcon className="h-5 w-5" />
             </button>
           </div>
@@ -372,6 +393,36 @@ export function TaskDetailDialog({ taskId, onClose, onUpdated, onOpenTask, revie
           </div>
         ) : task ? (
           <div className="flex-1 overflow-y-auto">
+            {/* Die Attribut-Spalte steht mobil ganz unten. Diese Chips zeigen das
+                Wichtigste ohne Scrollen und springen auf Tap zur Spalte. */}
+            <div className="flex flex-wrap gap-1.5 border-b border-gray-100 px-4 py-2 md:hidden dark:border-gray-800">
+              {task.due_date && (
+                <span className="rounded-full bg-amber-50 px-2.5 py-1 text-[11px] font-medium text-amber-700 dark:bg-amber-950/40 dark:text-amber-300">
+                  {new Date(task.due_date).toLocaleDateString('de-CH', { day: '2-digit', month: 'short' })}
+                </span>
+              )}
+              {currentProject && (
+                <span className="max-w-[9rem] truncate rounded-full bg-gray-100 px-2.5 py-1 text-[11px] font-medium text-gray-600 dark:bg-gray-800 dark:text-gray-300">
+                  {currentProject.name}
+                </span>
+              )}
+              {boardColumns.find((c) => c.id === task.board_column_id) && (
+                <span className="rounded-full bg-indigo-50 px-2.5 py-1 text-[11px] font-medium text-indigo-700 dark:bg-indigo-950/40 dark:text-indigo-300">
+                  {boardColumns.find((c) => c.id === task.board_column_id)!.name}
+                </span>
+              )}
+              {task.assignee === 'agent' && (
+                <span className="rounded-full bg-violet-50 px-2.5 py-1 text-[11px] font-medium text-violet-700 dark:bg-violet-950/40 dark:text-violet-300">
+                  Agent
+                </span>
+              )}
+              <button
+                onClick={() => document.getElementById('task-attribute-panel')?.scrollIntoView({ behavior: 'smooth', block: 'start' })}
+                className="ml-auto rounded-full px-2.5 py-1 text-[11px] font-medium text-indigo-600 dark:text-indigo-400"
+              >
+                Alle Attribute
+              </button>
+            </div>
             <div className="grid grid-cols-1 md:grid-cols-[1fr_340px]">
               {/* ═══════════ Linke Spalte: Inhalt ═══════════ */}
               <div className="min-w-0 space-y-6 p-6 md:border-r md:border-gray-100 md:dark:border-gray-800">

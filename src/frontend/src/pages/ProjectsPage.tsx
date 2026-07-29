@@ -167,20 +167,33 @@ export function ProjectsPage() {
       {isGradient && <div className="pointer-events-none absolute inset-0 bg-black/5 dark:bg-black/20" />}
 
       <div className={`relative z-10 border-b px-4 py-4 sm:px-6 ${hasBg ? 'border-white/10 bg-black/20 backdrop-blur-sm' : 'border-gray-200 dark:border-gray-800'}`}>
-        <div className="flex items-center justify-between">
-          <div>
-            <h1 className={`text-xl font-bold ${textPrimary}`}>Projekte</h1>
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex items-start justify-between gap-2">
+            <div>
+              <h1 className={`hidden text-xl font-bold lg:block ${textPrimary}`}>Projekte</h1>
+              {isOwner && (
+                <p className={`text-sm lg:mt-0.5 ${textSecondary}`}>
+                  {activeProjects.length} aktiv{archivedProjects.length > 0 && ` · ${archivedProjects.length} archiviert`}
+                </p>
+              )}
+            </div>
             {isOwner && (
-              <p className={`mt-0.5 text-sm ${textSecondary}`}>
-                {activeProjects.length} aktiv{archivedProjects.length > 0 && ` · ${archivedProjects.length} archiviert`}
-              </p>
+              <button
+                onClick={() => setBgPickerOpen(true)}
+                className={`shrink-0 rounded-lg p-2 transition-colors lg:hidden ${hasBg ? 'text-white/70 hover:bg-white/10 hover:text-white' : 'text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-800 dark:hover:text-gray-300'}`}
+                title="Hintergrund ändern"
+              >
+                <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="m2.25 15.75 5.159-5.159a2.25 2.25 0 0 1 3.182 0l5.159 5.159m-1.5-1.5 1.409-1.409a2.25 2.25 0 0 1 3.182 0l2.909 2.909M3.75 21h16.5A2.25 2.25 0 0 0 22.5 18.75V5.25A2.25 2.25 0 0 0 20.25 3H3.75A2.25 2.25 0 0 0 1.5 5.25v13.5A2.25 2.25 0 0 0 3.75 21Z" />
+                </svg>
+              </button>
             )}
           </div>
           {isOwner && (
-            <div className="flex items-center gap-3">
+            <div className="flex flex-wrap items-center gap-2 sm:gap-3">
               <button
                 onClick={() => setBgPickerOpen(true)}
-                className={`rounded-lg p-2 transition-colors ${hasBg ? 'text-white/70 hover:bg-white/10 hover:text-white' : 'text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-800 dark:hover:text-gray-300'}`}
+                className={`hidden rounded-lg p-2 transition-colors lg:inline-flex ${hasBg ? 'text-white/70 hover:bg-white/10 hover:text-white' : 'text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-800 dark:hover:text-gray-300'}`}
                 title="Hintergrund ändern"
               >
                 <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
@@ -190,22 +203,27 @@ export function ProjectsPage() {
               <div className={`flex rounded-lg border ${hasBg ? 'border-white/20' : 'border-gray-200 dark:border-gray-700'}`}>
                 <button
                   onClick={() => setShowArchived(false)}
-                  className={`px-3 py-1.5 text-xs font-medium transition-colors ${!showArchived ? 'bg-indigo-50 text-indigo-700 dark:bg-indigo-950 dark:text-indigo-300' : 'text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-300'}`}
+                  className={`min-h-11 px-3 py-1.5 text-xs font-medium transition-colors lg:min-h-0 ${!showArchived ? 'bg-indigo-50 text-indigo-700 dark:bg-indigo-950 dark:text-indigo-300' : 'text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-300'}`}
                 >
                   Aktiv ({activeProjects.length})
                 </button>
                 <button
                   onClick={() => setShowArchived(true)}
-                  className={`px-3 py-1.5 text-xs font-medium transition-colors ${showArchived ? 'bg-indigo-50 text-indigo-700 dark:bg-indigo-950 dark:text-indigo-300' : 'text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-300'}`}
+                  className={`min-h-11 px-3 py-1.5 text-xs font-medium transition-colors lg:min-h-0 ${showArchived ? 'bg-indigo-50 text-indigo-700 dark:bg-indigo-950 dark:text-indigo-300' : 'text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-300'}`}
                 >
                   Archiv ({archivedProjects.length})
                 </button>
               </div>
               <button
                 onClick={() => setShowForm((v) => !v)}
-                className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-indigo-700"
+                className="rounded-lg bg-indigo-600 px-3 py-2 text-sm font-medium text-white transition-colors hover:bg-indigo-700 sm:px-4"
               >
-                {showForm ? 'Abbrechen' : 'Neues Projekt'}
+                {showForm ? 'Abbrechen' : (
+                  <>
+                    <span className="sm:hidden">+ Projekt</span>
+                    <span className="hidden sm:inline">Neues Projekt</span>
+                  </>
+                )}
               </button>
             </div>
           )}
@@ -263,126 +281,112 @@ export function ProjectsPage() {
             <p>{showArchived ? 'Kein archiviertes Projekt vorhanden' : 'Noch keine Projekte vorhanden'}</p>
           </div>
         ) : (
-          <div className="overflow-hidden rounded-xl border border-gray-200 dark:border-gray-800">
-            <table className="w-full text-left text-sm">
-              <thead>
-                <tr className="border-b border-gray-200 bg-gray-50 dark:border-gray-800 dark:bg-gray-900/60">
-                  <th className="px-4 py-3 font-medium text-gray-500 dark:text-gray-400">Projekt</th>
-                  <th className="px-4 py-3 font-medium text-gray-500 dark:text-gray-400">Status</th>
-                  <th className="px-4 py-3 text-right font-medium text-gray-500 dark:text-gray-400">Offen</th>
-                  <th className="px-4 py-3 text-right font-medium text-gray-500 dark:text-gray-400">Erledigt</th>
-                  <th className="px-4 py-3 text-right font-medium text-gray-500 dark:text-gray-400">Überfällig</th>
-                  <th className="w-48 px-4 py-3 font-medium text-gray-500 dark:text-gray-400">Fortschritt</th>
-                  {isOwner && <th className="px-4 py-3 text-right font-medium text-gray-500 dark:text-gray-400">Aktionen</th>}
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-200 dark:divide-gray-800">
-                {displayedProjects.map((project) => (
-                  <tr
-                    key={project.id}
-                    onClick={() => navigate(`/projects/${project.id}`)}
-                    className="cursor-pointer bg-white transition-colors hover:bg-gray-50 dark:bg-gray-900 dark:hover:bg-gray-800/60"
-                  >
-                    <td className="px-4 py-3">
-                      <div className="flex items-center gap-2.5">
-                        <div className="relative">
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              setEditingColorId(editingColorId === project.id ? null : project.id);
+          <>
+            {/* Mobile: Card-Liste */}
+            <div className="flex flex-col gap-3 md:hidden">
+              {displayedProjects.map((project) => (
+                <div
+                  key={project.id}
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => navigate(`/projects/${project.id}`)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault();
+                      navigate(`/projects/${project.id}`);
+                    }
+                  }}
+                  className="w-full cursor-pointer rounded-xl border border-gray-200 bg-white p-3.5 text-left shadow-sm transition-colors active:bg-gray-50 dark:border-gray-800 dark:bg-gray-900 dark:active:bg-gray-800/60"
+                >
+                  <div className="flex items-start gap-3">
+                    <div className="relative shrink-0" onClick={(e) => e.stopPropagation()}>
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setEditingColorId(editingColorId === project.id ? null : project.id);
+                        }}
+                        onMouseDown={(e) => e.stopPropagation()}
+                        className="flex h-10 w-10 items-center justify-center rounded-md transition-colors hover:bg-gray-100 lg:h-auto lg:w-auto lg:p-0.5 dark:hover:bg-gray-800"
+                        title="Farbe ändern"
+                      >
+                        <ProjectIcon
+                          iconUrl={project.icon_url}
+                          iconEmoji={project.icon_emoji}
+                          color={project.color}
+                          size={24}
+                        />
+                      </button>
+                      {editingColorId === project.id && (
+                        <div
+                          className="absolute left-0 top-8 z-50 rounded-xl border border-gray-200 bg-white p-3 shadow-xl dark:border-gray-700 dark:bg-gray-900"
+                          onMouseDown={(e) => e.stopPropagation()}
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          <ColorPicker
+                            value={project.color}
+                            onChange={(color) => {
+                              handleColorChange(project.id, color);
+                              setEditingColorId(null);
                             }}
-                            onMouseDown={(e) => e.stopPropagation()}
-                            className="rounded-md p-0.5 transition-colors hover:bg-gray-100 dark:hover:bg-gray-800"
-                            title="Farbe ändern"
-                          >
-                            <ProjectIcon
-                              iconUrl={project.icon_url}
-                              iconEmoji={project.icon_emoji}
-                              color={project.color}
-                              size={20}
-                            />
-                          </button>
-                          {editingColorId === project.id && (
-                            <div
-                              className="absolute left-0 top-8 z-50 rounded-xl border border-gray-200 bg-white p-3 shadow-xl dark:border-gray-700 dark:bg-gray-900"
-                              onMouseDown={(e) => e.stopPropagation()}
-                              onClick={(e) => e.stopPropagation()}
-                            >
-                              <ColorPicker
-                                value={project.color}
-                                onChange={(color) => {
-                                  handleColorChange(project.id, color);
-                                  setEditingColorId(null);
-                                }}
-                              />
-                            </div>
-                          )}
+                          />
                         </div>
-                        <span className="font-medium text-gray-900 dark:text-white">
+                      )}
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-2">
+                        <span className="truncate text-sm font-semibold text-gray-900 dark:text-white">
                           {project.name}
                         </span>
+                        <span
+                          className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium ${
+                            project.status === 'active'
+                              ? 'bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-300'
+                              : 'bg-gray-100 text-gray-500 dark:bg-gray-800 dark:text-gray-400'
+                          }`}
+                        >
+                          {project.status === 'active' ? 'Aktiv' : 'Archiv'}
+                        </span>
                       </div>
-                    </td>
-                    <td className="px-4 py-3">
-                      <span
-                        className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium ${
-                          project.status === 'active'
-                            ? 'bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-300'
-                            : 'bg-gray-100 text-gray-500 dark:bg-gray-800 dark:text-gray-400'
-                        }`}
-                      >
-                        {project.status === 'active' ? 'Aktiv' : 'Archiviert'}
-                      </span>
-                    </td>
-                    <td className="px-4 py-3 text-right tabular-nums text-gray-700 dark:text-gray-300">
-                      {project.open_tasks}
-                    </td>
-                    <td className="px-4 py-3 text-right tabular-nums text-gray-700 dark:text-gray-300">
-                      {project.completed_tasks}
-                    </td>
-                    <td className="px-4 py-3 text-right">
-                      <span
-                        className={`tabular-nums ${
-                          project.overdue_tasks > 0
-                            ? 'font-medium text-red-600 dark:text-red-400'
-                            : 'text-gray-700 dark:text-gray-300'
-                        }`}
-                      >
-                        {project.overdue_tasks}
-                      </span>
-                    </td>
-                    <td className="px-4 py-3">
-                      <div className="flex items-center gap-2.5">
-                        <div className="h-2 flex-1 overflow-hidden rounded-full bg-gray-200 dark:bg-gray-700">
+                      <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs tabular-nums text-gray-600 dark:text-gray-300">
+                        <span>Offen {project.open_tasks}</span>
+                        <span>Erledigt {project.completed_tasks}</span>
+                        <span className={project.overdue_tasks > 0 ? 'font-medium text-red-600 dark:text-red-400' : ''}>
+                          Überfällig {project.overdue_tasks}
+                        </span>
+                      </div>
+                      <div className="mt-2.5 flex items-center gap-2.5">
+                        <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-gray-200 dark:bg-gray-700">
                           <div
                             className="h-full rounded-full bg-indigo-500 transition-all"
                             style={{ width: `${Math.min(project.progress_pct, 100)}%` }}
                           />
                         </div>
-                        <span className="w-10 text-right text-xs tabular-nums text-gray-500 dark:text-gray-400">
+                        <span className="w-9 text-right text-[11px] tabular-nums text-gray-500 dark:text-gray-400">
                           {Math.round(project.progress_pct)}%
                         </span>
                       </div>
-                    </td>
-                    {isOwner && (
-                      <td className="px-4 py-3 text-right">
-                        <div className="flex items-center justify-end gap-1">
+                      {isOwner && (
+                        <div className="mt-2.5 flex justify-end gap-1">
                           {project.status === 'active' ? (
                             <button
+                              type="button"
                               onClick={(e) => handleArchive(e, project.id)}
-                              className="rounded-lg px-2.5 py-1 text-xs font-medium text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200"
+                              className="min-h-11 rounded-lg px-2.5 py-1 text-xs font-medium text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-700 lg:min-h-0 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200"
                             >
                               Archivieren
                             </button>
                           ) : (
                             <>
                               <button
+                                type="button"
                                 onClick={(e) => handleReactivate(e, project.id)}
                                 className="rounded-lg px-2.5 py-1 text-xs font-medium text-indigo-600 transition-colors hover:bg-indigo-50 dark:text-indigo-400 dark:hover:bg-indigo-950"
                               >
                                 Reaktivieren
                               </button>
                               <button
+                                type="button"
                                 onClick={(e) => handleDelete(e, project.id)}
                                 className="rounded-lg px-2.5 py-1 text-xs font-medium text-red-500 transition-colors hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-950"
                               >
@@ -391,13 +395,150 @@ export function ProjectsPage() {
                             </>
                           )}
                         </div>
-                      </td>
-                    )}
+                      )}
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            {/* Desktop: Tabelle */}
+            <div className="hidden overflow-hidden rounded-xl border border-gray-200 md:block dark:border-gray-800">
+              <table className="w-full text-left text-sm">
+                <thead>
+                  <tr className="border-b border-gray-200 bg-gray-50 dark:border-gray-800 dark:bg-gray-900/60">
+                    <th className="px-4 py-3 font-medium text-gray-500 dark:text-gray-400">Projekt</th>
+                    <th className="px-4 py-3 font-medium text-gray-500 dark:text-gray-400">Status</th>
+                    <th className="px-4 py-3 text-right font-medium text-gray-500 dark:text-gray-400">Offen</th>
+                    <th className="px-4 py-3 text-right font-medium text-gray-500 dark:text-gray-400">Erledigt</th>
+                    <th className="px-4 py-3 text-right font-medium text-gray-500 dark:text-gray-400">Überfällig</th>
+                    <th className="w-48 px-4 py-3 font-medium text-gray-500 dark:text-gray-400">Fortschritt</th>
+                    {isOwner && <th className="px-4 py-3 text-right font-medium text-gray-500 dark:text-gray-400">Aktionen</th>}
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+                </thead>
+                <tbody className="divide-y divide-gray-200 dark:divide-gray-800">
+                  {displayedProjects.map((project) => (
+                    <tr
+                      key={project.id}
+                      onClick={() => navigate(`/projects/${project.id}`)}
+                      className="cursor-pointer bg-white transition-colors hover:bg-gray-50 dark:bg-gray-900 dark:hover:bg-gray-800/60"
+                    >
+                      <td className="px-4 py-3">
+                        <div className="flex items-center gap-2.5">
+                          <div className="relative">
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setEditingColorId(editingColorId === project.id ? null : project.id);
+                              }}
+                              onMouseDown={(e) => e.stopPropagation()}
+                              className="flex h-10 w-10 items-center justify-center rounded-md transition-colors hover:bg-gray-100 lg:h-auto lg:w-auto lg:p-0.5 dark:hover:bg-gray-800"
+                              title="Farbe ändern"
+                            >
+                              <ProjectIcon
+                                iconUrl={project.icon_url}
+                                iconEmoji={project.icon_emoji}
+                                color={project.color}
+                                size={20}
+                              />
+                            </button>
+                            {editingColorId === project.id && (
+                              <div
+                                className="absolute left-0 top-8 z-50 rounded-xl border border-gray-200 bg-white p-3 shadow-xl dark:border-gray-700 dark:bg-gray-900"
+                                onMouseDown={(e) => e.stopPropagation()}
+                                onClick={(e) => e.stopPropagation()}
+                              >
+                                <ColorPicker
+                                  value={project.color}
+                                  onChange={(color) => {
+                                    handleColorChange(project.id, color);
+                                    setEditingColorId(null);
+                                  }}
+                                />
+                              </div>
+                            )}
+                          </div>
+                          <span className="font-medium text-gray-900 dark:text-white">
+                            {project.name}
+                          </span>
+                        </div>
+                      </td>
+                      <td className="px-4 py-3">
+                        <span
+                          className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium ${
+                            project.status === 'active'
+                              ? 'bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-300'
+                              : 'bg-gray-100 text-gray-500 dark:bg-gray-800 dark:text-gray-400'
+                          }`}
+                        >
+                          {project.status === 'active' ? 'Aktiv' : 'Archiviert'}
+                        </span>
+                      </td>
+                      <td className="px-4 py-3 text-right tabular-nums text-gray-700 dark:text-gray-300">
+                        {project.open_tasks}
+                      </td>
+                      <td className="px-4 py-3 text-right tabular-nums text-gray-700 dark:text-gray-300">
+                        {project.completed_tasks}
+                      </td>
+                      <td className="px-4 py-3 text-right">
+                        <span
+                          className={`tabular-nums ${
+                            project.overdue_tasks > 0
+                              ? 'font-medium text-red-600 dark:text-red-400'
+                              : 'text-gray-700 dark:text-gray-300'
+                          }`}
+                        >
+                          {project.overdue_tasks}
+                        </span>
+                      </td>
+                      <td className="px-4 py-3">
+                        <div className="flex items-center gap-2.5">
+                          <div className="h-2 flex-1 overflow-hidden rounded-full bg-gray-200 dark:bg-gray-700">
+                            <div
+                              className="h-full rounded-full bg-indigo-500 transition-all"
+                              style={{ width: `${Math.min(project.progress_pct, 100)}%` }}
+                            />
+                          </div>
+                          <span className="w-10 text-right text-xs tabular-nums text-gray-500 dark:text-gray-400">
+                            {Math.round(project.progress_pct)}%
+                          </span>
+                        </div>
+                      </td>
+                      {isOwner && (
+                        <td className="px-4 py-3 text-right">
+                          <div className="flex items-center justify-end gap-1">
+                            {project.status === 'active' ? (
+                              <button
+                                onClick={(e) => handleArchive(e, project.id)}
+                                className="min-h-11 rounded-lg px-2.5 py-1 text-xs font-medium text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-700 lg:min-h-0 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200"
+                              >
+                                Archivieren
+                              </button>
+                            ) : (
+                              <>
+                                <button
+                                  onClick={(e) => handleReactivate(e, project.id)}
+                                  className="rounded-lg px-2.5 py-1 text-xs font-medium text-indigo-600 transition-colors hover:bg-indigo-50 dark:text-indigo-400 dark:hover:bg-indigo-950"
+                                >
+                                  Reaktivieren
+                                </button>
+                                <button
+                                  onClick={(e) => handleDelete(e, project.id)}
+                                  className="rounded-lg px-2.5 py-1 text-xs font-medium text-red-500 transition-colors hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-950"
+                                >
+                                  Löschen
+                                </button>
+                              </>
+                            )}
+                          </div>
+                        </td>
+                      )}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </>
         )}
       </div>
 

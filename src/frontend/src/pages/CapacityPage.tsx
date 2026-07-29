@@ -9,6 +9,7 @@ import { SortableContext, verticalListSortingStrategy, useSortable, arrayMove } 
 import { CSS } from '@dnd-kit/utilities';
 import { restrictToHorizontalAxis } from '@dnd-kit/modifiers';
 import { api } from '../api/client';
+import { useMediaQuery } from '../hooks/useMediaQuery';
 import { ProjectIcon } from '../components/ProjectIcon';
 import { BackgroundPicker } from '../components/BackgroundPicker';
 import { LucideIconPicker } from '../components/LucideIconPicker';
@@ -119,6 +120,264 @@ function minutesToDisplay(min: number): string {
   const m = min % 60;
   if (m === 0) return `${h}h`;
   return `${h}h ${m}m`;
+}
+
+function getIsoWeekNumber(d: Date): number {
+  const target = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  const dayNr = (target.getDay() + 6) % 7;
+  target.setDate(target.getDate() - dayNr + 3);
+  const firstThursday = new Date(target.getFullYear(), 0, 4);
+  const firstDayNr = (firstThursday.getDay() + 6) % 7;
+  firstThursday.setDate(firstThursday.getDate() - firstDayNr + 3);
+  return 1 + Math.round((target.getTime() - firstThursday.getTime()) / (7 * 24 * 3600 * 1000));
+}
+
+/** Ganze Stunden für die Übersicht; die Minuten stehen in der Detailzeile. */
+function hoursRounded(min: number): string {
+  const abs = Math.abs(min);
+  if (abs > 0 && abs < 30) return '<1h';
+  return `${Math.round(abs / 60)}h`;
+}
+
+/** Farbschema der Auslastung — identisch zur Desktop-Matrix. */
+function utilizationColors(util: number): { bar: string; text: string } {
+  if (util === 0) return { bar: 'bg-gray-300 dark:bg-gray-600', text: 'text-gray-400 dark:text-gray-500' };
+  if (util <= 60) return { bar: 'bg-emerald-400 dark:bg-emerald-500', text: 'text-emerald-700 dark:text-emerald-300' };
+  if (util <= 85) return { bar: 'bg-emerald-500 dark:bg-emerald-400', text: 'text-emerald-700 dark:text-emerald-300' };
+  if (util <= 100) return { bar: 'bg-amber-400 dark:bg-amber-400', text: 'text-amber-700 dark:text-amber-300' };
+  return { bar: 'bg-red-500 dark:bg-red-500', text: 'text-red-700 dark:text-red-300' };
+}
+
+interface WeekListProps {
+  weeks: Date[];
+  summary: WeeklySummary[];
+  allocations: Allocation[];
+  projects: CapProject[];
+  togglWeekMap: Record<string, number>;
+  holidayWeekMap: Record<string, { hours: number; entries: { label: string; dayIndex: number }[] }>;
+  timeOff: TimeOffEntry[];
+  onCellClick: (projectId: string, weekStart: string) => void;
+}
+
+/**
+ * Kapazität als Wochenliste (mobil).
+ *
+ * Die Matrix-Ansicht des Desktops setzt Breite voraus. Mobil ist die Leitfrage
+ * nicht «welches Projekt», sondern «wo habe ich noch Luft und wo bin ich drüber».
+ * Darum trägt jede Zeile die Restkapazität als Hauptwert; die Projekte einer
+ * Woche stehen aufgeklappt darunter und führen per Tap in den Buchungsdialog.
+ */
+function CapacityWeekList({
+  weeks, summary, allocations, projects, togglWeekMap, holidayWeekMap, timeOff, onCellClick,
+}: WeekListProps) {
+  const todayWeek = toIso(getMonday(new Date()));
+  // Startzustand bewusst zugeklappt: die Übersicht über alle Wochen ist der Zweck
+  // der Liste; eine offene Woche schiebt den Rest aus dem Bild.
+  const [openWeek, setOpenWeek] = useState<string | null>(null);
+  const [showAllProjects, setShowAllProjects] = useState(false);
+
+  const minutesByWeekProject = useMemo(() => {
+    const map: Record<string, Record<string, number>> = {};
+    for (const a of allocations) {
+      if (!map[a.week_start]) map[a.week_start] = {};
+      map[a.week_start][a.capacity_project_id] =
+        (map[a.week_start][a.capacity_project_id] || 0) + a.minutes;
+    }
+    return map;
+  }, [allocations]);
+
+  const projectById = useMemo(() => {
+    const map: Record<string, CapProject> = {};
+    for (const p of projects) map[p.id] = p;
+    return map;
+  }, [projects]);
+
+  /** Kennzahlen pro Woche — einmal berechnet, für Zeilen und Kopfzeile. */
+  const weekStats = useMemo(() => {
+    // Ab der laufenden Woche: sie ist planbar und gehört in die Bilanz.
+    const currentWeekStart = getMonday(new Date());
+    return weeks.map(week => {
+      const weekStr = toIso(week);
+      const holidayHours = holidayWeekMap[weekStr]?.hours || 0;
+      const s = summary.find(x => x.week_start === weekStr);
+      const availMin = Math.max(0, (s?.available_minutes ?? 2400) - holidayHours * 60);
+      const plannedMin = s?.planned_minutes ?? 0;
+      return {
+        week,
+        weekStr,
+        availMin,
+        plannedMin,
+        freeMin: availMin - plannedMin,
+        util: availMin > 0 ? Math.round((plannedMin / availMin) * 100) : plannedMin > 0 ? 999 : 0,
+        isFuture: week >= currentWeekStart,
+      };
+    });
+  }, [weeks, summary, holidayWeekMap]);
+
+  const overview = useMemo(() => {
+    const future = weekStats.filter(w => w.isFuture);
+    return {
+      weeks: future.length,
+      over: future.filter(w => w.freeMin < 0).length,
+      freeMin: future.reduce((sum, w) => sum + Math.max(0, w.freeMin), 0),
+    };
+  }, [weekStats]);
+
+  return (
+    <div data-testid="capacity-week-list">
+      {/* Gesamtbild zuerst: wie viele Wochen sind überbucht, wie viel ist frei. */}
+      <div className="sticky top-0 z-10 flex items-center gap-3 border-b border-gray-200 bg-white/95 px-4 py-2 text-xs backdrop-blur dark:border-gray-700 dark:bg-gray-900/95">
+        <span className="text-gray-500 dark:text-gray-400">{overview.weeks} Wochen</span>
+        <span className={`flex items-center gap-1 font-medium ${overview.over > 0 ? 'text-red-600 dark:text-red-400' : 'text-gray-400 dark:text-gray-500'}`}>
+          <span className="h-2 w-2 rounded-full bg-current" />
+          {overview.over} überbucht
+        </span>
+        <span className="ml-auto font-medium text-emerald-600 tabular-nums dark:text-emerald-400">
+          {minutesToDisplay(overview.freeMin)} frei
+        </span>
+      </div>
+      <div className="divide-y divide-gray-100 dark:divide-gray-800">
+      {weekStats.map(({ week, weekStr, availMin, plannedMin, freeMin, util, isFuture }) => {
+        const weekEndDate = new Date(week.getFullYear(), week.getMonth(), week.getDate() + 6);
+        const holidayInfo = holidayWeekMap[weekStr];
+        const actualMin = togglWeekMap[weekStr] || 0;
+        const isPast = !isFuture;
+        const isCurrent = weekStr === todayWeek;
+        const colors = utilizationColors(util);
+        // Ganze Woche abwesend und nichts geplant: «0h voll» wäre irreführend.
+        // Ist trotz Abwesenheit Arbeit gebucht, bleibt es eine Überbuchung —
+        // genau die will man sehen, statt sie als «Ferien» zu verstecken.
+        const isHolidayWeek = availMin === 0 && plannedMin === 0;
+
+        const manualOffHours = timeOff
+          .filter(t => t.date >= weekStr && t.date <= toIso(weekEndDate))
+          .reduce((sum, t) => sum + t.hours, 0);
+        const totalOffHours = manualOffHours + (holidayInfo?.hours || 0);
+
+        const perProject = minutesByWeekProject[weekStr] || {};
+        const bookedProjects = Object.entries(perProject)
+          .filter(([id]) => projectById[id])
+          .sort((a, b) => b[1] - a[1]);
+        const isOpen = openWeek === weekStr;
+        const unbookedProjects = projects.filter(p => !perProject[p.id]);
+
+        return (
+          <div
+            key={weekStr}
+            className={`border-l-2 ${isCurrent ? 'border-indigo-500 bg-indigo-50/60 dark:bg-indigo-950/20' : 'border-transparent'}`}
+          >
+            <button
+              onClick={() => { setOpenWeek(isOpen ? null : weekStr); setShowAllProjects(false); }}
+              className="flex w-full items-center gap-2.5 px-3 py-1.5 text-left"
+              aria-expanded={isOpen}
+            >
+              <div className="w-[52px] shrink-0">
+                <div className={`text-xs font-semibold ${isCurrent ? 'text-indigo-700 dark:text-indigo-300' : isPast ? 'text-gray-400 dark:text-gray-500' : 'text-gray-700 dark:text-gray-200'}`}>
+                  KW {getIsoWeekNumber(week)}
+                </div>
+                <div className="text-[10px] text-gray-400 dark:text-gray-500">{formatWeek(week)}</div>
+              </div>
+              <div className="min-w-0 flex-1">
+                <div className="relative h-2.5 w-full overflow-hidden rounded-full bg-gray-200/80 dark:bg-gray-700/60">
+                  <div className={`h-full rounded-full ${colors.bar}`} style={{ width: `${Math.min(100, util)}%` }} />
+                </div>
+                <div className="mt-0.5 flex items-center gap-1.5 text-[10px] text-gray-400 dark:text-gray-500">
+                  <span className="tabular-nums">{minutesToDisplay(plannedMin)}/{minutesToDisplay(availMin)}</span>
+                  {/* Ohne verfügbare Zeit gibt es keine sinnvolle Quote (999%). */}
+                  {availMin > 0 && <span className={`tabular-nums ${colors.text}`}>{util}%</span>}
+                  {totalOffHours > 0 && (
+                    <span className="flex items-center gap-0.5 text-amber-600 dark:text-amber-400">
+                      <Palmtree className="h-2.5 w-2.5" />{totalOffHours}h
+                    </span>
+                  )}
+                  {isPast && actualMin > 0 && (
+                    <span className="tabular-nums">Ist {minutesToDisplay(actualMin)}</span>
+                  )}
+                </div>
+              </div>
+              {/* Hauptaussage rechts: verbleibende oder überbuchte Stunden. */}
+              <div className="w-[52px] shrink-0 text-right">
+                {isHolidayWeek ? (
+                  <>
+                    <div className="text-sm font-bold leading-tight text-amber-600 dark:text-amber-400">—</div>
+                    <div className="text-[9px] text-amber-600/80 dark:text-amber-400/80">Ferien</div>
+                  </>
+                ) : (
+                  <>
+                    <div className={`text-sm font-bold leading-tight tabular-nums ${freeMin > 0 ? 'text-emerald-600 dark:text-emerald-400' : freeMin < 0 ? 'text-red-600 dark:text-red-400' : 'text-amber-600 dark:text-amber-400'}`}>
+                      {freeMin > 0 ? `+${hoursRounded(freeMin)}` : freeMin < 0 ? `\u2212${hoursRounded(freeMin)}` : '0h'}
+                    </div>
+                    <div className="text-[9px] text-gray-400 dark:text-gray-500">
+                      {freeMin > 0 ? 'frei' : freeMin < 0 ? 'über' : 'voll'}
+                    </div>
+                  </>
+                )}
+              </div>
+              <ChevronDown className={`h-4 w-4 shrink-0 text-gray-300 transition-transform dark:text-gray-600 ${isOpen ? 'rotate-180' : ''}`} />
+            </button>
+
+            {isOpen && (
+              <div className="border-t border-gray-100 bg-gray-50/60 px-4 py-2 dark:border-gray-800 dark:bg-gray-900/40">
+                {holidayInfo && holidayInfo.entries.length > 0 && (
+                  <div className="mb-1 flex items-center gap-1.5 text-[11px] text-amber-700 dark:text-amber-400">
+                    <Palmtree className="h-3.5 w-3.5" />
+                    {holidayInfo.entries.map(e => e.label).join(', ')}
+                  </div>
+                )}
+                {bookedProjects.length === 0 && (
+                  <p className="py-1 text-xs text-gray-400 dark:text-gray-500">Keine Kapazität geplant</p>
+                )}
+                {bookedProjects.map(([projectId, minutes]) => {
+                  const p = projectById[projectId];
+                  return (
+                    <button
+                      key={projectId}
+                      onClick={() => onCellClick(projectId, weekStr)}
+                      className="flex min-h-11 w-full items-center gap-2 text-left"
+                    >
+                      <ProjectIcon iconUrl={p.icon_url} iconEmoji={p.icon_emoji} color={p.color} size={18} />
+                      <span className="min-w-0 flex-1 truncate text-xs text-gray-700 dark:text-gray-200">
+                        {p.name}
+                        {p.client_name && <span className="text-gray-400 dark:text-gray-500"> · {p.client_name}</span>}
+                      </span>
+                      <span className="shrink-0 text-xs font-medium tabular-nums text-gray-600 dark:text-gray-300">
+                        {minutesToDisplay(minutes)}
+                      </span>
+                    </button>
+                  );
+                })}
+                {unbookedProjects.length > 0 && (
+                  showAllProjects ? (
+                    <div className="mt-1 border-t border-gray-200 pt-1 dark:border-gray-700">
+                      {unbookedProjects.map(p => (
+                        <button
+                          key={p.id}
+                          onClick={() => onCellClick(p.id, weekStr)}
+                          className="flex min-h-11 w-full items-center gap-2 text-left opacity-60"
+                        >
+                          <ProjectIcon iconUrl={p.icon_url} iconEmoji={p.icon_emoji} color={p.color} size={18} />
+                          <span className="min-w-0 flex-1 truncate text-xs text-gray-700 dark:text-gray-200">{p.name}</span>
+                          <Plus className="h-3.5 w-3.5 shrink-0 text-gray-400" />
+                        </button>
+                      ))}
+                    </div>
+                  ) : (
+                    <button
+                      onClick={() => setShowAllProjects(true)}
+                      className="mt-1 flex min-h-11 items-center gap-1 text-xs font-medium text-indigo-600 dark:text-indigo-400"
+                    >
+                      <Plus className="h-3.5 w-3.5" /> Projekt einplanen
+                    </button>
+                  )
+                )}
+              </div>
+            )}
+          </div>
+        );
+      })}
+      </div>
+    </div>
+  );
 }
 
 function getMonthPacing(): { expectedPct: number; workdaysElapsed: number; workdaysTotal: number } {
@@ -372,7 +631,7 @@ function SortableProjectRow({
     >
       {/* Projekt-Label */}
       <div
-        className="flex w-64 min-w-64 shrink-0 items-center gap-2 border-r border-gray-200 bg-white px-3 py-2 dark:border-gray-700 dark:bg-gray-900"
+        className="flex w-40 min-w-40 shrink-0 lg:w-64 lg:min-w-64 items-center gap-2 border-r border-gray-200 bg-white px-3 py-2 dark:border-gray-700 dark:bg-gray-900"
         style={{ borderLeft: `4px solid ${project.color}` }}
       >
         <button
@@ -805,7 +1064,7 @@ function AllocationDialog({
   if (!open) return null;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm" data-testid="capacity-alloc-dialog">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm modal-safe" data-testid="capacity-alloc-dialog">
       <div className={`rounded-xl border border-gray-200 bg-white p-6 shadow-2xl dark:border-gray-700 dark:bg-gray-900 ${mode === 'calendar' ? 'w-full max-w-lg' : 'w-full max-w-sm'}`}>
         {/* Header */}
         <div className="mb-4 flex items-center justify-between">
@@ -1262,8 +1521,8 @@ function ProjectDialog({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm" data-testid="capacity-project-dialog">
-      <div className="w-full max-w-lg rounded-xl border border-gray-200 bg-white p-6 shadow-2xl dark:border-gray-700 dark:bg-gray-900 max-h-[90vh] overflow-y-auto">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm modal-safe" data-testid="capacity-project-dialog">
+      <div className="w-full max-w-lg overflow-y-auto rounded-xl border border-gray-200 bg-white p-6 shadow-2xl max-h-full lg:max-h-[90vh] dark:border-gray-700 dark:bg-gray-900">
         <div className="mb-4 flex items-center justify-between">
           <h3 className="text-lg font-semibold text-gray-800 dark:text-gray-100">
             {initial ? 'Projekt bearbeiten' : 'Kapazitätsprojekt'}
@@ -1695,7 +1954,7 @@ export function CapacityPage() {
   // tauchen automatisch wieder auf, sobald im navigierten Zeitraum Kapazität
   // existiert (allocations werden pro Fenster geladen). Aus der Gruppe heraus
   // lässt sich jederzeit Kapazität buchen, wodurch das Projekt wieder hochwandert.
-  const { mainProjects, emptyProjects } = useMemo(() => {
+  const { mainProjects, emptyProjects, visibleProjects } = useMemo(() => {
     const visible = projects.filter(p => showTentative || p.status === 'bestätigt');
     const withWindowCap = new Set(allocations.map(a => a.capacity_project_id));
     const main: CapProject[] = [];
@@ -1706,7 +1965,7 @@ export function CapacityPage() {
       if (hasWindowCap || neverPlanned) main.push(p);
       else empty.push(p);
     }
-    return { mainProjects: main, emptyProjects: empty };
+    return { mainProjects: main, emptyProjects: empty, visibleProjects: visible };
   }, [projects, allocations, showTentative]);
 
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }));
@@ -2090,6 +2349,11 @@ export function CapacityPage() {
 
   // ── Render ─────────────────────────────────────────────────────────────────
 
+  // Die Gantt-Matrix braucht Breite: Projektspalte + Soll/Ist + n Wochenspalten.
+  // Auf 393px blieben pro Woche wenige Pixel — die Auslastung war unlesbar.
+  // Mobil wird deshalb transponiert: eine Zeile pro Woche, Projekte aufklappbar.
+  const isDesktop = useMediaQuery('(min-width: 1024px)');
+
   if (loading && projects.length === 0) {
     return (
       <div className="flex h-full items-center justify-center">
@@ -2110,62 +2374,65 @@ export function CapacityPage() {
       }
     >
       {/* Header */}
-      <div className="flex items-center justify-between border-b border-gray-200 bg-white/80 px-6 py-3 backdrop-blur dark:border-gray-700 dark:bg-gray-900/80">
+      {/* Mobil: Kopf stapeln und die Werkzeuge in eine Scrollzeile — zehn Controls
+          nebeneinander reichten auf 393px weit über den Viewport hinaus. */}
+      <div className="flex flex-col gap-2 border-b border-gray-200 bg-white/80 px-4 py-2 backdrop-blur lg:flex-row lg:items-center lg:justify-between lg:px-6 lg:py-3 dark:border-gray-700 dark:bg-gray-900/80">
         <div className="flex items-center gap-3">
-          <h1 className="text-xl font-bold text-gray-800 dark:text-gray-100">Kapazitätsplanung</h1>
+          <h1 className="hidden text-xl font-bold text-gray-800 lg:block dark:text-gray-100">Kapazitätsplanung</h1>
           <span className="rounded-full bg-gray-100 px-2.5 py-0.5 text-xs font-medium text-gray-600 dark:bg-gray-800 dark:text-gray-400">
             Anthony Smith · 40h/Woche
           </span>
         </div>
-        <div className="flex items-center gap-2">
-          <label className="flex items-center gap-1.5 text-xs text-gray-600 dark:text-gray-400">
+        <div className="-mx-4 flex items-center gap-2 overflow-x-auto px-4 lg:mx-0 lg:overflow-visible lg:px-0 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+          <label className="flex min-h-10 shrink-0 items-center gap-1.5 whitespace-nowrap text-xs text-gray-600 lg:min-h-0 dark:text-gray-400">
             <input
               type="checkbox"
               checked={showTentative}
               onChange={e => setShowTentative(e.target.checked)}
-              className="rounded border-gray-300"
+              className="h-4 w-4 rounded border-gray-300 lg:h-3.5 lg:w-3.5"
               data-testid="capacity-toggle-tentative"
             />
             Vorläufige anzeigen
           </label>
-          <div className="ml-3 flex rounded-lg border border-gray-200 dark:border-gray-700">
+          <div className="flex shrink-0 rounded-lg border border-gray-200 lg:ml-3 dark:border-gray-700">
             {(['3m', '6m', '1y'] as ViewRange[]).map(r => (
               <button
                 key={r}
                 onClick={() => setViewRange(r)}
-                className={`px-3 py-1.5 text-xs font-medium transition ${viewRange === r ? 'bg-indigo-100 text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-400' : 'text-gray-500 hover:bg-gray-50 dark:hover:bg-gray-800'}`}
+                className={`min-h-9 whitespace-nowrap px-3 py-1.5 text-xs font-medium transition ${viewRange === r ? 'bg-indigo-100 text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-400' : 'text-gray-500 hover:bg-gray-50 dark:hover:bg-gray-800'}`}
                 data-testid={`capacity-range-${r}`}
               >
-                {r === '3m' ? '3 Monate' : r === '6m' ? '6 Monate' : '1 Jahr'}
+                <span className="lg:hidden">{r === '3m' ? '3M' : r === '6m' ? '6M' : '1J'}</span>
+                <span className="hidden lg:inline">{r === '3m' ? '3 Monate' : r === '6m' ? '6 Monate' : '1 Jahr'}</span>
               </button>
             ))}
           </div>
-          <button onClick={() => setStartDate(addWeeks(startDate, -4))} className="rounded-lg p-1.5 text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-800" data-testid="capacity-nav-prev">
+          <button onClick={() => setStartDate(addWeeks(startDate, -4))} className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg text-gray-500 hover:bg-gray-100 lg:h-auto lg:w-auto lg:p-1.5 dark:hover:bg-gray-800" data-testid="capacity-nav-prev" aria-label="4 Wochen zurück">
             <ChevronLeft className="h-4 w-4" />
           </button>
-          <button onClick={() => setStartDate(getMonday(new Date()))} className="rounded-lg px-2 py-1 text-xs font-medium text-gray-600 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800" data-testid="capacity-nav-today">
+          <button onClick={() => setStartDate(getMonday(new Date()))} className="min-h-10 shrink-0 rounded-lg px-2 py-1 text-xs font-medium text-gray-600 hover:bg-gray-100 lg:min-h-0 dark:text-gray-400 dark:hover:bg-gray-800" data-testid="capacity-nav-today">
             Heute
           </button>
-          <button onClick={() => setStartDate(addWeeks(startDate, 4))} className="rounded-lg p-1.5 text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-800" data-testid="capacity-nav-next">
+          <button onClick={() => setStartDate(addWeeks(startDate, 4))} className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg text-gray-500 hover:bg-gray-100 lg:h-auto lg:w-auto lg:p-1.5 dark:hover:bg-gray-800" data-testid="capacity-nav-next" aria-label="4 Wochen vorwärts">
             <ChevronRight className="h-4 w-4" />
           </button>
           <button
             onClick={() => setTimeOffDialog(true)}
-            className="ml-3 flex items-center gap-1.5 rounded-lg border border-amber-300 px-3 py-1.5 text-xs font-medium text-amber-700 hover:bg-amber-50 dark:border-amber-700 dark:text-amber-400 dark:hover:bg-amber-900/20"
+            className="flex min-h-10 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg border border-amber-300 px-3 py-1.5 text-xs font-medium text-amber-700 hover:bg-amber-50 lg:ml-3 lg:min-h-0 dark:border-amber-700 dark:text-amber-400 dark:hover:bg-amber-900/20"
             data-testid="capacity-add-timeoff"
           >
             <Palmtree className="h-3.5 w-3.5" /> Ferien
           </button>
           <button
             onClick={() => setProjectDialog({ open: true, editing: null })}
-            className="flex items-center gap-1.5 rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-indigo-700"
+            className="flex min-h-10 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-indigo-700 lg:min-h-0"
             data-testid="capacity-add-project"
           >
             <Plus className="h-3.5 w-3.5" /> Projekt
           </button>
           <button
             onClick={() => setBgPickerOpen(true)}
-            className="rounded-lg p-1.5 text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-800 dark:hover:text-gray-300"
+            className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg text-gray-400 hover:bg-gray-100 hover:text-gray-600 lg:h-auto lg:w-auto lg:p-1.5 dark:hover:bg-gray-800 dark:hover:text-gray-300"
             title="Hintergrund ändern"
             data-testid="capacity-bg-picker"
           >
@@ -2174,14 +2441,30 @@ export function CapacityPage() {
         </div>
       </div>
 
+      {!isDesktop && (
+        <div className="flex-1 overflow-y-auto" data-testid="capacity-timeline">
+          <CapacityWeekList
+            weeks={weeks}
+            summary={summary}
+            allocations={allocations}
+            projects={visibleProjects}
+            togglWeekMap={togglWeekMap}
+            holidayWeekMap={holidayWeekMap}
+            timeOff={timeOff}
+            onCellClick={handleCellClick}
+          />
+        </div>
+      )}
+
       {/* Timeline */}
+      {isDesktop && (
       <div ref={timelineRefCallback} className="flex-1 overflow-hidden" data-testid="capacity-timeline">
         <div className="h-full w-full overflow-y-auto">
           {/* Auslastungs-Header (Runn.io-Stil) */}
           <div className="sticky top-0 z-20 border-b border-gray-200 bg-white/95 backdrop-blur dark:border-gray-700 dark:bg-gray-900/95">
             {/* Wochenlabels */}
             <div className="flex">
-              <div className="flex w-64 min-w-64 shrink-0 items-end border-r border-gray-200 bg-white px-3 pb-1 dark:border-gray-700 dark:bg-gray-900">
+              <div className="flex w-40 min-w-40 shrink-0 lg:w-64 lg:min-w-64 items-end border-r border-gray-200 bg-white px-3 pb-1 dark:border-gray-700 dark:bg-gray-900">
                 <span className="text-[10px] font-semibold text-gray-500 uppercase dark:text-gray-400">Woche</span>
               </div>
               <div
@@ -2231,7 +2514,7 @@ export function CapacityPage() {
             </div>
             {/* Auslastungs-Blöcke */}
             <div className="flex">
-              <div className="flex w-64 min-w-64 shrink-0 items-center border-r border-gray-200 bg-white px-3 py-1.5 dark:border-gray-700 dark:bg-gray-900">
+              <div className="flex w-40 min-w-40 shrink-0 lg:w-64 lg:min-w-64 items-center border-r border-gray-200 bg-white px-3 py-1.5 dark:border-gray-700 dark:bg-gray-900">
                 <span className="text-[10px] font-semibold text-gray-500 uppercase dark:text-gray-400">Auslastung</span>
               </div>
               <div
@@ -2316,7 +2599,7 @@ export function CapacityPage() {
           {/* Ferien-/Feiertags-Zeile */}
           {(timeOff.length > 0 || computedHolidays.length > 0) && (
             <div className="flex items-stretch border-b border-amber-200 dark:border-amber-800/50 bg-amber-50/50 dark:bg-amber-900/10">
-              <div className="flex w-64 min-w-64 shrink-0 items-center gap-2 border-r border-gray-200 bg-amber-50 px-3 py-1.5 dark:border-gray-700 dark:bg-amber-900/20">
+              <div className="flex w-40 min-w-40 shrink-0 lg:w-64 lg:min-w-64 items-center gap-2 border-r border-gray-200 bg-amber-50 px-3 py-1.5 dark:border-gray-700 dark:bg-amber-900/20">
                 <Palmtree className="h-4 w-4 text-amber-500" />
                 <span className="text-xs font-medium text-amber-700 dark:text-amber-400">Ferien / Feiertage</span>
               </div>
@@ -2476,6 +2759,7 @@ export function CapacityPage() {
           )}
         </div>
       </div>
+      )}
 
       {/* Fehler-Banner */}
       {actionError && (
@@ -2557,7 +2841,7 @@ export function CapacityPage() {
 
       {/* Ferien-Dialog */}
       {timeOffDialog && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm" data-testid="capacity-timeoff-dialog">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm modal-safe" data-testid="capacity-timeoff-dialog">
           <div className="w-full max-w-sm rounded-xl border border-gray-200 bg-white p-6 shadow-2xl dark:border-gray-700 dark:bg-gray-900">
             <div className="mb-4 flex items-center justify-between">
               <h3 className="text-lg font-semibold text-gray-800 dark:text-gray-100">Ferien / freie Tage</h3>

@@ -1530,7 +1530,7 @@ export function ChatPage() {
                 <button
                   type="button"
                   onClick={handleDeleteAllChats}
-                  className="shrink-0 rounded-lg p-2 text-gray-400 transition-colors hover:bg-red-50 hover:text-red-500 dark:hover:bg-red-950/30 dark:hover:text-red-400"
+                  className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg text-gray-400 transition-colors hover:bg-red-50 hover:text-red-500 lg:h-auto lg:w-auto lg:p-2 dark:hover:bg-red-950/30 dark:hover:text-red-400"
                   title="Alle Konversationen löschen"
                 >
                   <TrashIcon className="h-4 w-4" />
@@ -1574,7 +1574,7 @@ export function ChatPage() {
                         <span className="text-[10px] text-gray-400">${c.total_cost_usd.toFixed(4)}</span>
                       )}
                     </div>
-                    <button onClick={(e) => handleDelete(c.id, e)} className="absolute right-2 top-2 rounded p-1 text-gray-500 opacity-50 transition-colors hover:bg-red-100 hover:text-red-600 hover:!opacity-100 group-hover:opacity-80 dark:text-gray-400 dark:hover:bg-red-900/40 dark:hover:text-red-400" title="Konversation löschen">
+                    <button onClick={(e) => handleDelete(c.id, e)} className="absolute right-1 top-1 flex h-9 w-9 items-center justify-center rounded text-gray-500 opacity-50 transition-colors hover:bg-red-100 hover:text-red-600 hover:!opacity-100 group-hover:opacity-80 lg:right-2 lg:top-2 lg:h-auto lg:w-auto lg:p-1 dark:text-gray-400 dark:hover:bg-red-900/40 dark:hover:text-red-400" title="Konversation löschen">
                       <TrashIcon className="h-3.5 w-3.5" />
                     </button>
                   </li>
@@ -1589,8 +1589,14 @@ export function ChatPage() {
       <div className="flex min-w-0 flex-1 flex-col" style={bgStyle}>
         {/* Top bar — schlank, nur Sidebar-Toggle + Einstellungen */}
         <div className="flex items-center gap-2 border-b border-gray-200 bg-white/50 px-3 py-2 backdrop-blur-sm dark:border-gray-800 dark:bg-gray-900/50">
-          <button onClick={() => setShowSidebar(!showSidebar)} className="shrink-0 rounded-lg p-1.5 text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800" title={showSidebar ? 'Verlauf ausblenden' : 'Verlauf einblenden'}>
+          <button
+            onClick={() => setShowSidebar(!showSidebar)}
+            className="flex min-h-11 shrink-0 items-center gap-1.5 rounded-lg p-1.5 text-gray-500 hover:bg-gray-100 lg:min-h-0 dark:text-gray-400 dark:hover:bg-gray-800"
+            title={showSidebar ? 'Verlauf ausblenden' : 'Verlauf einblenden'}
+            aria-label={showSidebar ? 'Verlauf ausblenden' : 'Chat-Verlauf'}
+          >
             <SidebarIcon className="h-5 w-5" />
+            <span className="text-xs font-medium lg:hidden">Verlauf</span>
           </button>
 
           <div className="flex-1" />
@@ -1712,17 +1718,17 @@ export function ChatPage() {
             );
           })()}
 
-          <button onClick={() => setBgPickerOpen(true)} className="rounded-lg p-1.5 text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-700 dark:hover:text-gray-300" title="Hintergrund ändern">
+          <button onClick={() => setBgPickerOpen(true)} className="flex h-11 w-11 items-center justify-center rounded-lg text-gray-400 hover:bg-gray-100 hover:text-gray-600 lg:h-auto lg:w-auto lg:p-1.5 dark:hover:bg-gray-700 dark:hover:text-gray-300" title="Hintergrund ändern">
             <ImageIcon className="h-5 w-5" />
           </button>
-          <button onClick={() => navigate('/settings?tab=llm')} className="rounded-lg p-1.5 text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-700 dark:hover:text-gray-300" title="LLM-Einstellungen">
+          <button onClick={() => navigate('/settings?tab=llm')} className="flex h-11 w-11 items-center justify-center rounded-lg text-gray-400 hover:bg-gray-100 hover:text-gray-600 lg:h-auto lg:w-auto lg:p-1.5 dark:hover:bg-gray-700 dark:hover:text-gray-300" title="LLM-Einstellungen">
             <SettingsIcon className="h-5 w-5" />
           </button>
         </div>
 
         {/* Nachrichten oder Leerzustand */}
         {!activeId && messages.length === 0 ? (
-          <div className="flex flex-1 flex-col items-center justify-center px-4">
+          <div className="flex flex-1 flex-col items-center justify-center px-4 pb-[env(safe-area-inset-bottom,0px)]">
             <div className="mb-8 text-center">
               <div className="mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-xl bg-indigo-50 dark:bg-indigo-900/30">
                 {modeIcon(mode)}
@@ -1763,7 +1769,7 @@ export function ChatPage() {
                   onKeyDown={handleKeyDown}
                   placeholder={
                     mode === 'deep_research' ? 'Frage für Deep Research eingeben...'
-                      : 'Nachricht an InnoPilot... (/code für Sandbox-Code, /suche für Web-Recherche)'
+                      : (isChatMobile ? 'Nachricht an InnoPilot…' : 'Nachricht an InnoPilot... (/code für Sandbox-Code, /suche für Web-Recherche)')
                   }
                   rows={4}
                   className="max-h-48 min-h-[96px] w-full resize-none border-0 bg-transparent px-4 pt-3 pb-1 text-sm outline-none placeholder:text-gray-400 dark:text-gray-100 dark:placeholder:text-gray-500"
@@ -1799,7 +1805,7 @@ export function ChatPage() {
                       <div className="relative" ref={modelDropdownRef}>
                         <button onClick={() => setModelOpen(!modelOpen)} className="flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium text-gray-600 transition-colors hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-gray-700">
                           {selectedModelInfo?.type === 'local' ? <LockIcon className="h-3 w-3 text-green-500" /> : <CloudIcon className="h-3 w-3 text-blue-400" />}
-                          <span className="max-w-[180px] truncate">{modelLabel(selectedModel)}</span>
+                          <span className="max-w-[100px] truncate sm:max-w-[180px]">{modelLabel(selectedModel)}</span>
                           {selectedModelInfo?.capabilities.includes('thinking') && <span className="rounded bg-violet-100 px-1 py-px text-[9px] font-semibold text-violet-700 dark:bg-violet-900/40 dark:text-violet-300">T</span>}
                           <ChevronIcon className="h-3 w-3" />
                         </button>
@@ -1838,8 +1844,8 @@ export function ChatPage() {
                   )}
                   <div className="ml-auto flex shrink-0 items-center gap-2">
                     <input ref={fileInputRef} type="file" multiple className="hidden" onChange={handleFileSelect} />
-                    <button onClick={() => fileInputRef.current?.click()} className="rounded-md p-1 text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-700" title="Datei anhängen"><AttachIcon className="h-4 w-4" /></button>
-                    <button onClick={() => setOnedriveOpen(true)} className="rounded-md p-1 text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-700" title="OneDrive-Dateien anhängen"><OneDriveIcon className="h-4 w-4" /></button>
+                    <button onClick={() => fileInputRef.current?.click()} className="flex h-10 w-10 items-center justify-center rounded-md text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-600 lg:h-auto lg:w-auto lg:p-1 dark:hover:bg-gray-700" title="Datei anhängen"><AttachIcon className="h-4 w-4" /></button>
+                    <button onClick={() => setOnedriveOpen(true)} className="flex h-10 w-10 items-center justify-center rounded-md text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-600 lg:h-auto lg:w-auto lg:p-1 dark:hover:bg-gray-700" title="OneDrive-Dateien anhängen"><OneDriveIcon className="h-4 w-4" /></button>
                     <button onClick={() => { setAnonymizeInitialText(input); setAnonymizeOpen(true); }} className="rounded-md p-1 text-emerald-500 transition-colors hover:bg-emerald-50 hover:text-emerald-600 dark:hover:bg-emerald-900/30" title="Text anonymisieren">
                       <ShieldIcon className="h-4 w-4" />
                     </button>
@@ -2206,7 +2212,7 @@ export function ChatPage() {
         )}
 
         {/* Eingabebereich am unteren Rand — nur bei aktiver Konversation */}
-        {(activeId || messages.length > 0) && <div className="border-t border-gray-200 bg-white/80 px-4 py-3 backdrop-blur-sm dark:border-gray-800 dark:bg-gray-900/80">
+        {(activeId || messages.length > 0) && <div className="border-t border-gray-200 bg-white/80 px-4 py-3 pb-[max(0.75rem,env(safe-area-inset-bottom,0px))] backdrop-blur-sm dark:border-gray-800 dark:bg-gray-900/80">
           <div className="mx-auto max-w-4xl">
             <div className="rounded-2xl border border-gray-300 bg-white shadow-sm transition-colors focus-within:border-indigo-500 focus-within:ring-1 focus-within:ring-indigo-500 dark:border-gray-600 dark:bg-gray-800">
               <textarea
@@ -2216,7 +2222,9 @@ export function ChatPage() {
                 onKeyDown={handleKeyDown}
                 placeholder={
                   mode === 'deep_research' ? 'Frage für Deep Research eingeben...'
-                    : (isStreaming ? 'Korrigieren & neu lenken — stoppt den aktuellen Lauf...' : 'Nachricht an InnoPilot... (/code für Sandbox-Code, /suche für Web)')
+                    : (isStreaming
+                      ? 'Korrigieren & neu lenken…'
+                      : (isChatMobile ? 'Nachricht an InnoPilot…' : 'Nachricht an InnoPilot... (/code für Sandbox-Code, /suche für Web)'))
                 }
                 rows={1}
                 className="max-h-36 min-h-[44px] w-full resize-none rounded-t-2xl border-0 bg-transparent px-4 pt-3 pb-1 text-sm outline-none placeholder:text-gray-400 dark:text-gray-100 dark:placeholder:text-gray-500"
@@ -2269,7 +2277,7 @@ export function ChatPage() {
                     <div className="relative" ref={modelDropdownRef}>
                       <button onClick={() => setModelOpen(!modelOpen)} className="flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium text-gray-600 transition-colors hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-gray-700">
                         {selectedModelInfo?.type === 'local' ? <LockIcon className="h-3 w-3 text-green-500" /> : <CloudIcon className="h-3 w-3 text-blue-400" />}
-                        <span className="max-w-[180px] truncate">{modelLabel(selectedModel)}</span>
+                        <span className="max-w-[100px] truncate sm:max-w-[180px]">{modelLabel(selectedModel)}</span>
                         {selectedModelInfo?.capabilities.includes('thinking') && <span className="rounded bg-violet-100 px-1 py-px text-[9px] font-semibold text-violet-700 dark:bg-violet-900/40 dark:text-violet-300">T</span>}
                         <ChevronIcon className="h-3 w-3" />
                       </button>
@@ -2316,10 +2324,10 @@ export function ChatPage() {
                     <span className="text-[10px] text-gray-400 dark:text-gray-500">{messages.length} Nachrichten</span>
                   )}
                   <input ref={fileInputRef} type="file" multiple className="hidden" onChange={handleFileSelect} />
-                  <button onClick={() => fileInputRef.current?.click()} className="rounded-md p-1 text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-700" title="Datei anhängen">
+                  <button onClick={() => fileInputRef.current?.click()} className="flex h-10 w-10 items-center justify-center rounded-md text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-600 lg:h-auto lg:w-auto lg:p-1 dark:hover:bg-gray-700" title="Datei anhängen">
                     <AttachIcon className="h-4 w-4" />
                   </button>
-                  <button onClick={() => setOnedriveOpen(true)} className="rounded-md p-1 text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-700" title="OneDrive-Dateien anhängen">
+                  <button onClick={() => setOnedriveOpen(true)} className="flex h-10 w-10 items-center justify-center rounded-md text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-600 lg:h-auto lg:w-auto lg:p-1 dark:hover:bg-gray-700" title="OneDrive-Dateien anhängen">
                     <OneDriveIcon className="h-4 w-4" />
                   </button>
                   <button onClick={() => { setAnonymizeInitialText(input); setAnonymizeOpen(true); }} className="rounded-md p-1 text-emerald-500 transition-colors hover:bg-emerald-50 hover:text-emerald-600 dark:hover:bg-emerald-900/30" title="Text anonymisieren">

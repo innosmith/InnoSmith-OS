@@ -287,7 +287,8 @@ export function MindMapsPage() {
           {/* Header */}
           <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4 mb-6">
             <div className="flex-1">
-              <h1 className="text-2xl font-bold text-gray-900 dark:text-white flex items-center gap-2">
+              {/* Titel liefert mobil der MobileHeader. */}
+              <h1 className="hidden text-2xl font-bold text-gray-900 dark:text-white lg:flex lg:items-center lg:gap-2">
                 <BrainCircuit size={28} className="text-indigo-600" />
                 Mind-Maps
               </h1>
@@ -395,7 +396,7 @@ export function MindMapsPage() {
                     <div className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity">
                       <button
                         onClick={e => { e.stopPropagation(); setMenuOpen(menuOpen === map.id ? null : map.id); }}
-                        className="p-1.5 rounded-lg bg-black/20 hover:bg-black/40 text-white backdrop-blur-sm"
+                        className="flex h-10 w-10 items-center justify-center rounded-lg bg-black/20 text-white backdrop-blur-sm hover:bg-black/40 lg:h-auto lg:w-auto lg:p-1.5"
                         data-testid={`mindmap-menu-${map.id}`}
                       >
                         <MoreHorizontal size={14} />

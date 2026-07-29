@@ -8,6 +8,7 @@ import { api } from '../api/client';
 import { useAuth } from '../contexts/AuthContext';
 import { useTheme } from '../contexts/ThemeContext';
 import { useBadges } from '../hooks/useBadges';
+import { useMediaQuery } from '../hooks/useMediaQuery';
 import { ThemeToggle } from './ThemeToggle';
 import { ProjectIcon } from './ProjectIcon';
 import type { Project } from '../types';
@@ -36,7 +37,7 @@ interface SidebarProps {
 
 export function Sidebar({
   isOpen,
-  collapsed,
+  collapsed: collapsedPref,
   onClose,
   onToggleCollapse,
   onSearchOpen,
@@ -44,6 +45,10 @@ export function Sidebar({
   appLogoUrl,
   sidebarColor,
 }: SidebarProps) {
+  // Einklappen ist eine Desktop-Präferenz. Mobil ist der Drawer immer beschriftet —
+  // sonst bleibt nur eine 56px-Icon-Spalte, die sich mobil nicht aufklappen lässt.
+  const isDesktop = useMediaQuery('(min-width: 1024px)');
+  const collapsed = collapsedPref && isDesktop;
   const [projects, setProjects] = useState<Project[]>([]);
   const [sidebarOrder, setSidebarOrder] = useState<string[] | null>(null);
   const [projectsExpanded, setProjectsExpanded] = useState(true);
@@ -98,7 +103,7 @@ export function Sidebar({
   const bgClasses = SIDEBAR_COLORS[sidebarColor || 'default'] || SIDEBAR_COLORS.default;
 
   const linkClasses = ({ isActive }: { isActive: boolean }) =>
-    `flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors ${
+    `flex min-h-11 items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors lg:min-h-0 ${
       isActive
         ? 'bg-indigo-50 text-indigo-700 dark:bg-indigo-950 dark:text-indigo-300'
         : 'text-gray-700 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-gray-800'
@@ -123,7 +128,7 @@ export function Sidebar({
       )}
 
       <aside
-        className={`fixed top-0 left-0 z-40 flex h-full ${w} flex-col border-r border-gray-200 ${bgClasses.light} ${bgClasses.dark} transition-[transform,visibility] duration-200 dark:border-gray-800 lg:static lg:visible lg:translate-x-0 ${
+        className={`fixed top-0 left-0 z-40 flex h-dvh ${w} flex-col border-r border-gray-200 pt-[env(safe-area-inset-top,0px)] lg:h-full ${bgClasses.light} ${bgClasses.dark} transition-[transform,visibility] duration-200 dark:border-gray-800 lg:static lg:visible lg:translate-x-0 lg:pt-0 ${
           isOpen ? 'visible translate-x-0' : 'invisible -translate-x-full'
         }`}
       >
@@ -289,6 +294,9 @@ export function Sidebar({
                   <NavLink to="/debitoren" className={collapsedLinkClasses} onClick={onClose} title="Debitoren">
                     <DebtorsIcon className="h-5 w-5" />
                   </NavLink>
+                  <NavLink to="/kreditoren" className={collapsedLinkClasses} onClick={onClose} title="Kreditoren">
+                    <CreditorsIcon className="h-5 w-5" />
+                  </NavLink>
                 </>
               )}
             </>
@@ -402,6 +410,11 @@ export function Sidebar({
                     <DebtorsIcon className="h-5 w-5" />
                     <span className="flex-1">Debitoren</span>
                   </NavLink>
+
+                  <NavLink to="/kreditoren" className={linkClasses} onClick={onClose}>
+                    <CreditorsIcon className="h-5 w-5" />
+                    <span className="flex-1">Kreditoren</span>
+                  </NavLink>
                 </>
               )}
             </>
@@ -409,7 +422,7 @@ export function Sidebar({
         </nav>
 
         {/* Footer */}
-        <div className="border-t border-gray-200 px-2 py-2 dark:border-gray-800">
+        <div className="border-t border-gray-200 px-2 py-2 pb-[max(0.5rem,env(safe-area-inset-bottom,0px))] dark:border-gray-800 lg:pb-2">
           {collapsed ? (
             <div className="flex flex-col items-center gap-2">
               <NavLink to="/settings" className={collapsedLinkClasses} onClick={onClose} title="Einstellungen">
@@ -484,7 +497,7 @@ function LogoutButton({ onLogout, collapsed = false }: { onLogout: () => void; c
   return (
     <button
       onClick={() => { if (confirm) { onLogout(); } else { setConfirm(true); } }}
-      className={`rounded-lg px-3 py-1.5 text-xs font-medium transition-colors ${
+      className={`min-h-11 rounded-lg px-3 py-1.5 text-xs font-medium transition-colors lg:min-h-0 ${
         confirm
           ? 'bg-red-100 text-red-600 dark:bg-red-950 dark:text-red-400'
           : 'text-gray-500 hover:bg-gray-100 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200'
@@ -645,6 +658,14 @@ function DebtorsIcon({ className }: { className?: string }) {
   return (
     <svg className={className} fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
       <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v12m-3-2.818.879.659c1.171.879 3.07.879 4.242 0 1.172-.879 1.172-2.303 0-3.182C13.536 12.219 12.768 12 12 12c-.725 0-1.45-.22-2.003-.659-1.106-.879-1.106-2.303 0-3.182s2.9-.879 4.006 0l.415.33M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" />
+    </svg>
+  );
+}
+
+function CreditorsIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M2.25 8.25h19.5M2.25 9h19.5m-16.5 5.25h6m-6 2.25h3m-3.75 3h15a2.25 2.25 0 0 0 2.25-2.25V6.75A2.25 2.25 0 0 0 19.5 4.5h-15a2.25 2.25 0 0 0-2.25 2.25v10.5A2.25 2.25 0 0 0 4.5 19.5Z" />
     </svg>
   );
 }

@@ -7,6 +7,7 @@ import { EmailThreadPanel } from '../components/EmailThreadPanel';
 import { RichTextEditor } from '../components/RichTextEditor';
 import { ConfidenceBadge } from '../components/agent/ConfidenceBadge';
 import { TRIAGE_LABELS } from '../lib/triageLabels';
+import { useMediaQuery } from '../hooks/useMediaQuery';
 
 /* ---------- Typen ---------- */
 
@@ -169,6 +170,8 @@ export function InboxPage() {
   const [composeReplyTo, setComposeReplyTo] = useState<string | undefined>();
   const [unreadOnly, setUnreadOnly] = useState(false);
   const [activeTab, setActiveTab] = useState<'email' | 'teams'>('email');
+  const isMobile = useMediaQuery('(max-width: 1023px)');
+  const [mobileSearchOpen, setMobileSearchOpen] = useState(false);
 
   const [triageMap, setTriageMap] = useState<Record<string, TriageItem>>({});
   const [triageStats, setTriageStats] = useState<TriageStats | null>(null);
@@ -398,6 +401,25 @@ export function InboxPage() {
 
   const selectedTriage = selectedEmail ? triageMap[selectedEmail.id] : null;
 
+  /* -- Primäraktionen: Desktop-Leiste und mobile Bottom-Bar teilen sie -- */
+  const openReplyDraft = (emailId: string) => {
+    setComposeReplyTo(emailId);
+    setShowCompose(true);
+  };
+
+  const createTaskFromSelected = () => {
+    if (!selectedEmail) return;
+    window.dispatchEvent(new CustomEvent('open-create-task-from-email', {
+      detail: {
+        emailId: selectedEmail.id,
+        subject: selectedEmail.subject,
+        bodyPreview: selectedEmail.body_preview,
+        fromAddress: selectedEmail.from_address,
+        triageId: selectedTriage?.id,
+      },
+    }));
+  };
+
   useEffect(() => {
     const uniqueAddresses = [...new Set(emails.map(e => e.from_address).filter(Boolean))] as string[];
     const unknownAddresses = uniqueAddresses.filter(addr => senderAvatars[addr] === undefined);
@@ -444,16 +466,20 @@ export function InboxPage() {
 
       <div className="relative z-10 flex h-full flex-col">
       {/* Header */}
-      <div className={`border-b px-4 py-4 sm:px-6 backdrop-blur-xl ${hasBg ? 'border-white/10 bg-black/35' : 'border-gray-200/60 bg-white/80 dark:border-gray-800/60 dark:bg-gray-900/80'}`}>
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-6">
-            <div>
+      {/* Beim Lesen einer E-Mail ist die Listen-Chrome mobil nur verlorene Höhe;
+          die Zurück-Leiste im Detail übernimmt die Navigation. */}
+      <div className={`border-b px-4 py-2.5 backdrop-blur-xl sm:px-6 lg:py-4 ${selectedEmail ? 'max-lg:hidden' : ''} ${hasBg ? 'border-white/10 bg-black/35' : 'border-gray-200/60 bg-white/80 dark:border-gray-800/60 dark:bg-gray-900/80'}`}>
+        <div className="flex flex-col gap-3">
+          <div className="hidden items-start justify-between gap-2 lg:flex">
+            <div className="min-w-0">
               <h1 className={`text-xl font-bold ${hasBg ? 'text-white' : 'text-gray-900 dark:text-white'}`}>Posteingang</h1>
               <p className={`mt-0.5 text-sm ${hasBg ? 'text-white/70' : 'text-gray-500 dark:text-gray-400'}`}>
                 Nachrichten verwalten und beantworten
               </p>
             </div>
-            <div className="flex rounded-lg border border-gray-200/60 bg-white/50 dark:border-gray-700/60 dark:bg-gray-800/50">
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="flex shrink-0 rounded-lg border border-gray-200/60 bg-white/50 dark:border-gray-700/60 dark:bg-gray-800/50">
               {[
                 { id: 'email' as const, label: 'E-Mail', icon: 'M21.75 6.75v10.5a2.25 2.25 0 0 1-2.25 2.25h-15a2.25 2.25 0 0 1-2.25-2.25V6.75m19.5 0A2.25 2.25 0 0 0 19.5 4.5h-15a2.25 2.25 0 0 0-2.25 2.25m19.5 0v.243a2.25 2.25 0 0 1-1.07 1.916l-7.5 4.615a2.25 2.25 0 0 1-2.36 0L3.32 8.91a2.25 2.25 0 0 1-1.07-1.916V6.75' },
                 { id: 'teams' as const, label: 'Teams', icon: 'M20.25 8.511c.884.284 1.5 1.128 1.5 2.097v4.286c0 1.136-.847 2.1-1.98 2.193-.34.027-.68.052-1.02.072v3.091l-3-3c-1.354 0-2.694-.055-4.02-.163a2.115 2.115 0 0 1-.825-.242m9.345-8.334a2.126 2.126 0 0 0-.476-.095 48.64 48.64 0 0 0-8.048 0c-1.131.094-1.976 1.057-1.976 2.192v4.286c0 .837.46 1.58 1.155 1.951m9.345-8.334V6.637c0-1.621-1.152-3.026-2.76-3.235A48.455 48.455 0 0 0 11.25 3c-2.115 0-4.198.137-6.24.402-1.608.209-2.76 1.614-2.76 3.235v6.226c0 1.621 1.152 3.026 2.76 3.235.577.075 1.157.14 1.74.194V21l4.155-4.155' },
@@ -461,7 +487,7 @@ export function InboxPage() {
                 <button
                   key={tab.id}
                   onClick={() => { setActiveTab(tab.id); setSelectedEmail(null); }}
-                  className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium transition-colors first:rounded-l-lg last:rounded-r-lg ${
+                  className={`flex min-h-10 items-center gap-1.5 px-3 py-1.5 text-xs font-medium transition-colors first:rounded-l-lg last:rounded-r-lg lg:min-h-0 ${
                     activeTab === tab.id
                       ? 'bg-indigo-600 text-white'
                       : hasBg ? 'text-white/70 hover:bg-white/10' : 'text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800'
@@ -474,10 +500,20 @@ export function InboxPage() {
                 </button>
               ))}
             </div>
-          </div>
-          <div className="flex items-center gap-3">
             {activeTab === 'email' && (
-              <div className={`hidden items-center gap-1.5 rounded-lg border px-2.5 py-1.5 sm:flex ${hasBg ? 'border-white/20 bg-black/30' : 'border-gray-200/70 bg-white/60 dark:border-gray-700/60 dark:bg-gray-800/50'}`}>
+              <button
+                onClick={() => setMobileSearchOpen(v => !v)}
+                aria-label="E-Mail-Suche"
+                aria-expanded={mobileSearchOpen}
+                className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-lg sm:hidden ${searchActive || mobileSearchOpen ? 'bg-indigo-600 text-white' : hasBg ? 'text-white/70' : 'text-gray-500 dark:text-gray-400'}`}
+              >
+                <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="m21 21-5.197-5.197m0 0A7.5 7.5 0 1 0 5.196 5.196a7.5 7.5 0 0 0 10.607 10.607Z" />
+                </svg>
+              </button>
+            )}
+            {activeTab === 'email' && (
+              <div className={`${mobileSearchOpen ? 'order-last flex w-full' : 'hidden'} items-center gap-1.5 rounded-lg border px-2.5 py-1.5 sm:order-none sm:flex sm:w-auto ${hasBg ? 'border-white/20 bg-black/30' : 'border-gray-200/70 bg-white/60 dark:border-gray-700/60 dark:bg-gray-800/50'}`}>
                 <svg className={`h-4 w-4 shrink-0 ${hasBg ? 'text-white/60' : 'text-gray-400'}`} fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" d="m21 21-5.197-5.197m0 0A7.5 7.5 0 1 0 5.196 5.196a7.5 7.5 0 0 0 10.607 10.607Z" />
                 </svg>
@@ -488,7 +524,7 @@ export function InboxPage() {
                   onChange={(e) => setSearchTerm(e.target.value)}
                   onKeyDown={(e) => { if (e.key === 'Enter') runEmailSearch(); if (e.key === 'Escape') clearEmailSearch(); }}
                   placeholder="E-Mails durchsuchen…"
-                  className={`w-44 bg-transparent text-xs outline-none ${hasBg ? 'text-white placeholder:text-white/50' : 'text-gray-900 placeholder:text-gray-400 dark:text-white dark:placeholder:text-gray-500'}`}
+                  className={`min-h-9 w-full bg-transparent text-sm outline-none sm:w-44 sm:text-xs ${hasBg ? 'text-white placeholder:text-white/50' : 'text-gray-900 placeholder:text-gray-400 dark:text-white dark:placeholder:text-gray-500'}`}
                 />
                 {searching && <span className="h-3 w-3 animate-spin rounded-full border-2 border-indigo-500 border-t-transparent" />}
                 {searchActive && !searching && (
@@ -502,33 +538,34 @@ export function InboxPage() {
             )}
             <button
               onClick={() => setBgPickerOpen(true)}
-              className={`rounded-lg p-2 transition-colors ${hasBg ? 'text-white/70 hover:bg-white/10 hover:text-white' : 'text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-800 dark:hover:text-gray-300'}`}
+              className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-lg transition-colors lg:h-auto lg:w-auto lg:p-2 ${hasBg ? 'text-white/70 hover:bg-white/10 hover:text-white' : 'text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-800 dark:hover:text-gray-300'}`}
               title="Hintergrund ändern"
             >
               <svg className="h-4.5 w-4.5" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" d="m2.25 15.75 5.159-5.159a2.25 2.25 0 0 1 3.182 0l5.159 5.159m-1.5-1.5 1.409-1.409a2.25 2.25 0 0 1 3.182 0l2.909 2.909M3.75 21h16.5a2.25 2.25 0 0 0 2.25-2.25V5.25A2.25 2.25 0 0 0 20.25 3H3.75A2.25 2.25 0 0 0 1.5 5.25v13.5A2.25 2.25 0 0 0 3.75 21Z" />
               </svg>
             </button>
-            <label className={`flex items-center gap-2 text-xs cursor-pointer select-none ${hasBg ? 'text-white/70' : 'text-gray-500 dark:text-gray-400'}`}>
+            <label className={`flex min-h-11 shrink-0 cursor-pointer select-none items-center gap-2 text-xs lg:min-h-0 ${hasBg ? 'text-white/70' : 'text-gray-500 dark:text-gray-400'}`} title="Nur ungelesen">
               <input
                 type="checkbox"
                 checked={unreadOnly}
                 onChange={(e) => setUnreadOnly(e.target.checked)}
-                className="h-3.5 w-3.5 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
+                className="h-5 w-5 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500 lg:h-3.5 lg:w-3.5"
               />
-              Nur ungelesen
+              <span>Ungelesen</span>
             </label>
             <button
               onClick={fetchEmails}
-              className="rounded-lg bg-indigo-600 px-4 py-2 text-xs font-medium text-white shadow-sm transition-all hover:bg-indigo-700 hover:shadow active:scale-[0.97]"
+              className="min-h-11 shrink-0 rounded-lg bg-indigo-600 px-3 py-2 text-xs font-medium text-white shadow-sm transition-all hover:bg-indigo-700 hover:shadow active:scale-[0.97] sm:px-4 lg:min-h-0"
             >
               Aktualisieren
             </button>
             <button
               onClick={() => { setComposeReplyTo(undefined); setShowCompose(true); }}
-              className="rounded-lg bg-emerald-600 px-4 py-2 text-xs font-medium text-white shadow-sm transition-all hover:bg-emerald-700 hover:shadow active:scale-[0.97]"
+              className="min-h-11 shrink-0 rounded-lg bg-emerald-600 px-3 py-2 text-xs font-medium text-white shadow-sm transition-all hover:bg-emerald-700 hover:shadow active:scale-[0.97] sm:px-4 lg:min-h-0"
             >
-              Entwurf schreiben
+              <span className="sm:hidden">Entwurf</span>
+              <span className="hidden sm:inline">Entwurf schreiben</span>
             </button>
           </div>
         </div>
@@ -538,7 +575,7 @@ export function InboxPage() {
 
       {activeTab === 'email' && <>
       {/* Mobile folder tabs */}
-      <div className={`relative flex items-stretch gap-1 overflow-x-auto border-b px-3 md:hidden ${hasBg ? 'border-white/10 bg-black/30 backdrop-blur-sm' : 'border-gray-200/60 bg-white/60 backdrop-blur-sm dark:border-gray-800/60 dark:bg-gray-900/60'} [scrollbar-width:none] [&::-webkit-scrollbar]:hidden`} style={{ WebkitOverflowScrolling: 'touch', maskImage: 'linear-gradient(to right, transparent 0, black 8px, black calc(100% - 24px), transparent 100%)' }}>
+      <div className={`relative flex items-stretch gap-1 overflow-x-auto border-b px-3 md:hidden ${selectedEmail ? 'hidden' : ''} ${hasBg ? 'border-white/10 bg-black/30 backdrop-blur-sm' : 'border-gray-200/60 bg-white/60 backdrop-blur-sm dark:border-gray-800/60 dark:bg-gray-900/60'} [scrollbar-width:none] [&::-webkit-scrollbar]:hidden`} style={{ WebkitOverflowScrolling: 'touch', maskImage: 'linear-gradient(to right, transparent 0, black 8px, black calc(100% - 24px), transparent 100%)' }}>
         {[
           { id: 'inbox', name: 'Posteingang' },
           { id: 'drafts', name: 'Entwürfe' },
@@ -550,7 +587,7 @@ export function InboxPage() {
           <button
             key={folder.id}
             onClick={() => { setActiveFolder(folder.id); setSelectedEmail(null); }}
-            className={`relative shrink-0 whitespace-nowrap px-3 py-2.5 text-xs font-medium transition-colors ${
+            className={`relative min-h-11 shrink-0 whitespace-nowrap px-3 py-2.5 text-xs font-medium transition-colors ${
               activeFolder === folder.id
                 ? hasBg ? 'text-white' : 'text-indigo-600 dark:text-indigo-400'
                 : hasBg ? 'text-white/50' : 'text-gray-500 dark:text-gray-400'
@@ -564,7 +601,7 @@ export function InboxPage() {
 
       {/* Triage-Statistik-Leiste */}
       {triageStats && (triageStats.total_pending > 0 || (triageStats.followups_due ?? 0) > 0) && (
-        <div className={`flex items-center gap-4 border-b px-4 py-2.5 text-xs sm:px-6 backdrop-blur-sm ${hasBg ? 'border-white/10 bg-black/30' : 'border-gray-200/60 bg-white/60 dark:border-gray-800/60 dark:bg-gray-900/60'}`}>
+        <div className={`flex flex-wrap items-center gap-x-3 gap-y-1 border-b px-4 py-2 text-xs backdrop-blur-sm sm:px-6 lg:gap-4 lg:py-2.5 ${selectedEmail ? 'max-lg:hidden' : ''} ${hasBg ? 'border-white/10 bg-black/30' : 'border-gray-200/60 bg-white/60 dark:border-gray-800/60 dark:bg-gray-900/60'}`}>
           <span className={`font-semibold ${hasBg ? 'text-white/80' : 'text-gray-700 dark:text-gray-300'}`}>Triage:</span>
           {Object.entries(triageStats.by_class).map(([cls, count]) => {
             const cfg = TRIAGE_CONFIG[cls];
@@ -788,9 +825,27 @@ export function InboxPage() {
               <div className="h-8 w-8 animate-spin rounded-full border-2 border-indigo-500 border-t-transparent" />
             </div>
           ) : selectedEmail ? (
-            <div className="p-6">
-              {/* Aktionsleiste */}
-              <div className="mb-5 flex flex-wrap items-center gap-2 rounded-xl border border-gray-200/80 bg-white/80 p-3 shadow-sm backdrop-blur-sm dark:border-gray-700/60 dark:bg-gray-900/80">
+            <>
+            <div className="flex flex-col p-4 max-lg:pb-24 lg:p-6">
+              {/* Mobil zuerst die E-Mail selbst: Zurück-Leiste, Kopf, Text.
+                  Die Agent-Einschätzung folgt darunter (Reihenfolge via order). */}
+              <div className={`-mx-4 mb-3 flex items-center gap-2 border-b px-2 py-1.5 max-lg:sticky max-lg:top-0 max-lg:z-10 max-lg:order-first max-lg:backdrop-blur-xl lg:hidden ${hasBg ? 'border-white/10 bg-black/40' : 'border-gray-200/60 bg-white/85 dark:border-gray-800/60 dark:bg-gray-900/85'}`}>
+                <button
+                  onClick={() => setSelectedEmail(null)}
+                  className={`flex min-h-11 items-center gap-1 rounded-lg px-2 text-sm font-medium ${hasBg ? 'text-white/80' : 'text-indigo-600 dark:text-indigo-400'}`}
+                >
+                  <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 19.5 8.25 12l7.5-7.5" />
+                  </svg>
+                  Zurück
+                </button>
+                <span className={`min-w-0 flex-1 truncate text-sm font-semibold ${hasBg ? 'text-white' : 'text-gray-900 dark:text-white'}`}>
+                  {selectedEmail.subject || '(Kein Betreff)'}
+                </span>
+              </div>
+
+              {/* Aktionsleiste (Desktop) */}
+              <div className="mb-5 hidden flex-wrap items-center gap-2 rounded-xl border border-gray-200/80 bg-white/80 p-3 shadow-sm backdrop-blur-sm lg:flex dark:border-gray-700/60 dark:bg-gray-900/80">
                 {selectedTriage && selectedTriage.status === 'pending' && (
                   <TriageBadge triageClass={selectedTriage.triage_class} />
                 )}
@@ -804,27 +859,13 @@ export function InboxPage() {
                 )}
                 <div className="ml-auto flex items-center gap-2">
                   <button
-                    onClick={() => {
-                      setComposeReplyTo(selectedEmail.id);
-                      setShowCompose(true);
-                    }}
+                    onClick={() => openReplyDraft(selectedEmail.id)}
                     className="rounded-lg bg-emerald-600 px-4 py-2 text-xs font-medium text-white shadow-sm transition-all hover:bg-emerald-700 hover:shadow active:scale-[0.97]"
                   >
                     Antwort entwerfen
                   </button>
                   <button
-                    onClick={() => {
-                      const event = new CustomEvent('open-create-task-from-email', {
-                        detail: {
-                          emailId: selectedEmail.id,
-                          subject: selectedEmail.subject,
-                          bodyPreview: selectedEmail.body_preview,
-                          fromAddress: selectedEmail.from_address,
-                          triageId: selectedTriage?.id,
-                        },
-                      });
-                      window.dispatchEvent(event);
-                    }}
+                    onClick={createTaskFromSelected}
                     className="rounded-lg bg-blue-600 px-4 py-2 text-xs font-medium text-white shadow-sm transition-all hover:bg-blue-700 hover:shadow active:scale-[0.97]"
                   >
                     Task erstellen
@@ -840,6 +881,18 @@ export function InboxPage() {
                 </div>
               </div>
 
+              {/* Agent-Einschätzung: mobil einklappbar und unter der E-Mail */}
+              <details
+                open={!isMobile}
+                className="mb-5 max-lg:order-4 max-lg:rounded-xl max-lg:border max-lg:border-gray-200/70 max-lg:bg-white/70 max-lg:dark:border-gray-700/60 max-lg:dark:bg-gray-900/60"
+              >
+                <summary className="flex min-h-11 cursor-pointer list-none items-center gap-2 px-3 text-xs font-semibold text-gray-600 lg:hidden dark:text-gray-300">
+                  <span>Agent-Einschätzung</span>
+                  {selectedTriage && selectedTriage.status === 'pending' && (
+                    <TriageBadge triageClass={selectedTriage.triage_class} />
+                  )}
+                </summary>
+                <div className="max-lg:px-3 max-lg:pb-3">
               {/* Triage-Korrektur: lernen + ausfuehren */}
               {selectedTriage && (
                 <div className="mb-5 rounded-xl border border-indigo-200/70 bg-indigo-50/60 p-3 dark:border-indigo-800/50 dark:bg-indigo-950/30">
@@ -907,9 +960,11 @@ export function InboxPage() {
 
               {/* Kalender-Kontext */}
               <CalendarContext selectedTriage={selectedTriage} emailSubject={selectedEmail.subject} />
+                </div>
+              </details>
 
               {/* E-Mail Header */}
-              <div className="mb-4 flex items-start justify-between">
+              <div className="mb-4 flex items-start justify-between max-lg:order-1">
                 <div>
                   <h2 className="text-lg font-semibold text-gray-900 dark:text-white">
                     {selectedEmail.subject || '(Kein Betreff)'}
@@ -931,21 +986,11 @@ export function InboxPage() {
                     {selectedEmail.received_at ? new Date(selectedEmail.received_at).toLocaleString('de-DE') : ''}
                   </p>
                 </div>
-                <div className="flex gap-2">
-                  <button
-                    onClick={() => setSelectedEmail(null)}
-                    className="rounded-lg p-1.5 text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-800 md:hidden"
-                  >
-                    <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" d="M6 18 18 6M6 6l12 12" />
-                    </svg>
-                  </button>
-                </div>
               </div>
 
               {/* Kategorien */}
               {selectedEmail.categories.length > 0 && (
-                <div className="mb-4 flex gap-1.5">
+                <div className="mb-4 flex flex-wrap gap-1.5 max-lg:order-2">
                   {selectedEmail.categories.map((cat) => (
                     <span key={cat} className={`rounded-full px-2 py-0.5 text-xs font-medium ${getCategoryClass(cat)}`}>
                       {cat}
@@ -960,19 +1005,51 @@ export function InboxPage() {
               )}
 
               {/* Body */}
-              {selectedEmail.body_html ? (
-                <EmailBody html={selectedEmail.body_html} />
-              ) : (
-                <p className="whitespace-pre-wrap text-sm text-gray-700 dark:text-gray-300">
-                  {selectedEmail.body_preview}
-                </p>
-              )}
+              <div className="max-lg:order-3">
+                {selectedEmail.body_html ? (
+                  <EmailBody html={selectedEmail.body_html} />
+                ) : (
+                  <p className="whitespace-pre-wrap text-sm text-gray-700 dark:text-gray-300">
+                    {selectedEmail.body_preview}
+                  </p>
+                )}
+              </div>
 
               {/* Konversations-Thread (aufklappbar) */}
               {selectedEmail.conversation_id && (
-                <EmailThreadPanel conversationId={selectedEmail.conversation_id} />
+                <div className="max-lg:order-5">
+                  <EmailThreadPanel conversationId={selectedEmail.conversation_id} />
+                </div>
               )}
             </div>
+
+            {/* Primäraktionen mobil immer erreichbar, unabhängig von der E-Mail-Länge */}
+            <div
+              className={`fixed inset-x-0 bottom-0 z-20 flex items-center gap-2 border-t px-3 pt-2 backdrop-blur-xl lg:hidden ${hasBg ? 'border-white/10 bg-black/50' : 'border-gray-200/70 bg-white/90 dark:border-gray-800/70 dark:bg-gray-900/90'}`}
+              style={{ paddingBottom: 'max(0.5rem, env(safe-area-inset-bottom, 0px))' }}
+            >
+              <button
+                onClick={() => openReplyDraft(selectedEmail.id)}
+                className="min-h-11 flex-1 rounded-lg bg-emerald-600 px-3 text-sm font-medium text-white shadow-sm active:scale-[0.97]"
+              >
+                Antwort
+              </button>
+              <button
+                onClick={createTaskFromSelected}
+                className="min-h-11 flex-1 rounded-lg bg-blue-600 px-3 text-sm font-medium text-white shadow-sm active:scale-[0.97]"
+              >
+                Task
+              </button>
+              {selectedTriage && selectedTriage.status === 'pending' && (
+                <button
+                  onClick={() => dismissTriage(selectedTriage.id)}
+                  className="min-h-11 rounded-lg bg-gray-200 px-3 text-sm font-medium text-gray-700 dark:bg-gray-800 dark:text-gray-300"
+                >
+                  FYI
+                </button>
+              )}
+            </div>
+            </>
           ) : (
             <div className="flex h-full flex-col items-center justify-center gap-3 p-8 text-center">
               <svg className="h-16 w-16 text-gray-200 dark:text-gray-700" fill="none" viewBox="0 0 24 24" strokeWidth={0.8} stroke="currentColor">
@@ -1063,7 +1140,7 @@ function ComposeDialog({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4 backdrop-blur-sm">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4 backdrop-blur-sm modal-safe">
       <div className="w-full max-w-lg rounded-2xl bg-white p-6 shadow-2xl dark:bg-gray-950">
         <div className="mb-4 flex items-center justify-between">
           <h3 className="text-lg font-semibold text-gray-900 dark:text-white">
@@ -1313,7 +1390,7 @@ function CreateTaskFromEmailListener({ onTaskCreated }: { onTaskCreated: () => v
   if (!open || !eventData) return null;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4 backdrop-blur-sm">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4 backdrop-blur-sm modal-safe">
       <div className="w-full max-w-lg rounded-2xl bg-white p-6 shadow-2xl dark:bg-gray-950">
         <div className="mb-4 flex items-center justify-between">
           <h3 className="text-lg font-semibold text-gray-900 dark:text-white">Task aus E-Mail erstellen</h3>

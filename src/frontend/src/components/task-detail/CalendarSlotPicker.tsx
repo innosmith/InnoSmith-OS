@@ -294,10 +294,10 @@ export default function CalendarSlotPicker({
 
   return (
     <div
-      className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/40 backdrop-blur-sm"
+      className="modal-safe fixed inset-0 z-[9999] flex items-center justify-center bg-black/40 backdrop-blur-sm"
       onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
     >
-      <div className="flex max-h-[85dvh] w-full max-w-lg flex-col rounded-2xl bg-white shadow-2xl dark:bg-gray-950">
+      <div className="flex max-h-full w-full max-w-lg lg:max-h-[85dvh] flex-col rounded-2xl bg-white shadow-2xl dark:bg-gray-950">
         {/* Header */}
         <div className="flex flex-shrink-0 items-center justify-between border-b border-gray-100 px-5 py-3.5 dark:border-gray-800">
           <div className="flex items-center gap-2">

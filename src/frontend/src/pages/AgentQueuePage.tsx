@@ -186,11 +186,13 @@ export function AgentQueuePage() {
       {isGradient && <div className="pointer-events-none absolute inset-0 bg-black/10 dark:bg-black/25" />}
 
       <div className="relative z-10 flex h-full flex-col">
-      <div className={`border-b px-6 py-4 backdrop-blur-xl ${hasBg ? 'border-white/10 bg-black/35' : 'border-white/40 bg-white/50 dark:border-gray-800 dark:bg-gray-900/50'}`}>
-        <div className="flex items-center justify-between">
-          <div>
+      {/* Mobil trägt die Tab-Leiste Zähler und Hintergrund-Button — eine eigene
+          Kopfzeile wäre dort nur verlorene Höhe. */}
+      <div className={`hidden border-b px-4 py-2 backdrop-blur-xl sm:px-6 lg:block lg:py-4 ${hasBg ? 'border-white/10 bg-black/35' : 'border-white/40 bg-white/50 dark:border-gray-800 dark:bg-gray-900/50'}`}>
+        <div className="flex items-center justify-between gap-2">
+          <div className="min-w-0">
             <div className="flex items-center gap-3">
-              <h1 className={`text-xl font-bold ${hasBg ? 'text-white' : 'text-gray-900 dark:text-white'}`}>
+              <h1 className={`hidden text-xl font-bold lg:block ${hasBg ? 'text-white' : 'text-gray-900 dark:text-white'}`}>
                 Agenten
               </h1>
               {activeCount > 0 && (
@@ -200,13 +202,13 @@ export function AgentQueuePage() {
                 </span>
               )}
             </div>
-            <p className={`mt-0.5 text-sm ${hasBg ? 'text-white/70' : 'text-gray-500 dark:text-gray-400'}`}>
+            <p className={`mt-0.5 hidden text-sm lg:block ${hasBg ? 'text-white/70' : 'text-gray-500 dark:text-gray-400'}`}>
               Aufträge, Regeln, Skills und Wissen des Agenten
             </p>
           </div>
           <button
             onClick={() => setBgPickerOpen(true)}
-            className={`rounded-lg p-2 transition-colors ${hasBg ? 'text-white/70 hover:bg-white/10 hover:text-white' : 'text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-800 dark:hover:text-gray-300'}`}
+            className={`shrink-0 rounded-lg p-2 transition-colors ${hasBg ? 'text-white/70 hover:bg-white/10 hover:text-white' : 'text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-800 dark:hover:text-gray-300'}`}
             title="Hintergrund ändern"
           >
             <svg className="h-4.5 w-4.5" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
@@ -217,8 +219,8 @@ export function AgentQueuePage() {
       </div>
 
       {/* Haupt-Tabs */}
-      <div className={`relative z-10 border-b px-4 sm:px-6 backdrop-blur-sm ${hasBg ? 'border-white/10 bg-black/30' : 'border-white/40 bg-white/50 dark:border-gray-800 dark:bg-gray-900/50'}`}>
-        <div className="flex gap-1 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+      <div className={`relative z-10 flex items-center gap-2 border-b px-4 backdrop-blur-sm sm:px-6 ${hasBg ? 'border-white/10 bg-black/30' : 'border-white/40 bg-white/50 dark:border-gray-800 dark:bg-gray-900/50'}`}>
+        <div className="flex min-w-0 flex-1 gap-1 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
           {AGENT_TABS.map((t) => {
             const active = tab === t.id;
             const Icon = t.icon;
@@ -239,18 +241,36 @@ export function AgentQueuePage() {
             );
           })}
         </div>
+        <div className="flex shrink-0 items-center gap-1 lg:hidden">
+          {activeCount > 0 && (
+            <span className="flex items-center gap-1 rounded-full bg-indigo-100 px-2 py-0.5 text-[11px] font-medium text-indigo-700 dark:bg-indigo-900/40 dark:text-indigo-300">
+              <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-indigo-500" />
+              {activeCount}
+            </span>
+          )}
+          <button
+            onClick={() => setBgPickerOpen(true)}
+            className={`flex h-11 w-9 items-center justify-center rounded-lg ${hasBg ? 'text-white/70' : 'text-gray-400 dark:text-gray-500'}`}
+            aria-label="Hintergrund ändern"
+          >
+            <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" d="m2.25 15.75 5.159-5.159a2.25 2.25 0 0 1 3.182 0l5.159 5.159m-1.5-1.5 1.409-1.409a2.25 2.25 0 0 1 3.182 0l2.909 2.909M3.75 21h16.5a2.25 2.25 0 0 0 2.25-2.25V5.25A2.25 2.25 0 0 0 20.25 3H3.75A2.25 2.25 0 0 0 1.5 5.25v13.5A2.25 2.25 0 0 0 3.75 21Z" />
+            </svg>
+          </button>
+        </div>
       </div>
 
       {tab === 'auftraege' && (
-      <div className={`relative z-10 border-b px-4 py-3 sm:px-6 backdrop-blur-sm ${hasBg ? 'border-white/10 bg-black/30' : 'border-white/40 bg-white/50 dark:border-gray-800 dark:bg-gray-900/50'}`}>
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-4">
-            <div className="flex gap-1.5">
+      <div className={`relative z-10 border-b px-4 py-2 backdrop-blur-sm sm:px-6 sm:py-3 ${hasBg ? 'border-white/10 bg-black/30' : 'border-white/40 bg-white/50 dark:border-gray-800 dark:bg-gray-900/50'}`}>
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+          {/* Status- und Typ-Chips mobil in einer Scrollzeile: spart eine Reihe Chrome. */}
+          <div className="flex min-w-0 items-center gap-2 overflow-x-auto sm:gap-4 sm:overflow-visible [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+            <div className="flex shrink-0 gap-1.5 sm:overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
               {(['all', 'active', 'completed', 'failed'] as FilterStatus[]).map((f) => (
                 <button
                   key={f}
                   onClick={() => setFilter(f)}
-                  className={`rounded-lg px-3 py-1.5 text-xs font-medium transition-colors ${
+                  className={`min-h-9 shrink-0 rounded-lg px-3 py-1.5 text-xs font-medium transition-colors lg:min-h-0 ${
                     filter === f
                       ? 'bg-indigo-600 text-white'
                       : hasBg
@@ -262,8 +282,8 @@ export function AgentQueuePage() {
                 </button>
               ))}
             </div>
-            <div className={`h-5 w-px ${hasBg ? 'bg-white/20' : 'bg-gray-200 dark:bg-gray-700'}`} />
-            <div className="flex gap-1.5">
+            <div className={`h-5 w-px shrink-0 ${hasBg ? 'bg-white/20' : 'bg-gray-200 dark:bg-gray-700'}`} />
+            <div className="flex shrink-0 gap-1.5 sm:overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
               {TYPE_FILTERS.map((tf) => {
                 const count = tf.id === 'chat_agent' ? chatAgentCount
                   : tf.id === 'chat_triage' ? chatTriageCount
@@ -274,7 +294,7 @@ export function AgentQueuePage() {
                   <button
                     key={tf.id}
                     onClick={() => setTypeFilter(tf.id)}
-                    className={`rounded-lg px-2.5 py-1.5 text-[11px] font-medium transition-colors ${
+                    className={`min-h-9 shrink-0 rounded-lg px-2.5 py-1.5 text-[11px] font-medium whitespace-nowrap transition-colors lg:min-h-0 ${
                       typeFilter === tf.id
                         ? 'bg-violet-600 text-white'
                         : hasBg
@@ -295,7 +315,7 @@ export function AgentQueuePage() {
             <div className="relative" ref={cleanupRef}>
               <button
                 onClick={() => setCleanupOpen(!cleanupOpen)}
-                className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium transition-colors ${hasBg ? 'text-white/70 hover:bg-white/10 hover:text-white' : 'text-gray-500 hover:bg-gray-100 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200'}`}
+                className={`flex min-h-9 items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium transition-colors lg:min-h-0 ${hasBg ? 'text-white/70 hover:bg-white/10 hover:text-white' : 'text-gray-500 hover:bg-gray-100 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200'}`}
               >
                 <TrashIcon className="h-3.5 w-3.5" />
                 Aufräumen
@@ -451,7 +471,9 @@ export function AgentQueuePage() {
                       : 'border border-white/60 bg-white/70 backdrop-blur-sm dark:border-gray-800 dark:bg-gray-900/70'
                   }`}
                 >
-                  <div className="flex items-start justify-between gap-3">
+                  {/* Mobil Badges als eigene Zeile über dem Titel — nebeneinander
+                      blieben dem Titel nur ~130px und jedes Wort brach um. */}
+                  <div className="flex flex-col-reverse gap-2 sm:flex-row sm:items-start sm:justify-between sm:gap-3">
                     <div className="min-w-0 flex-1">
                       <button
                         onClick={() => setExpandedJobId(isExpanded ? null : job.id)}
@@ -485,7 +507,7 @@ export function AgentQueuePage() {
                       {job.job_type === 'chat_agent' && meta.conversation_id && (
                         <button
                           onClick={(e) => { e.stopPropagation(); navigate(`/chat?conv=${meta.conversation_id}`); }}
-                          className={`rounded-lg p-1.5 transition-colors ${hasBg ? 'text-white/70 hover:bg-white/20 hover:text-white' : 'text-gray-400 hover:bg-indigo-50 hover:text-indigo-600 dark:text-gray-500 dark:hover:bg-indigo-950/30 dark:hover:text-indigo-400'}`}
+                          className={`flex h-10 w-10 items-center justify-center rounded-lg transition-colors sm:h-auto sm:w-auto sm:p-1.5 ${hasBg ? 'text-white/70 hover:bg-white/20 hover:text-white' : 'text-gray-400 hover:bg-indigo-50 hover:text-indigo-600 dark:text-gray-500 dark:hover:bg-indigo-950/30 dark:hover:text-indigo-400'}`}
                           title="Zur Konversation"
                         >
                           <ChatIcon className="h-4 w-4" />
@@ -494,7 +516,7 @@ export function AgentQueuePage() {
                       {(job.status === 'completed' || job.status === 'failed' || job.status === 'awaiting_approval') && (
                           <button
                             onClick={(e) => { e.stopPropagation(); handleDelete(job.id); }}
-                            className={`rounded-lg p-1.5 transition-colors ${hasBg ? 'text-white/70 hover:bg-white/20 hover:text-white' : 'text-gray-400 hover:bg-red-50 hover:text-red-500 dark:text-gray-500 dark:hover:bg-red-950/30 dark:hover:text-red-400'}`}
+                            className={`flex h-10 w-10 items-center justify-center rounded-lg transition-colors sm:h-auto sm:w-auto sm:p-1.5 ${hasBg ? 'text-white/70 hover:bg-white/20 hover:text-white' : 'text-gray-400 hover:bg-red-50 hover:text-red-500 dark:text-gray-500 dark:hover:bg-red-950/30 dark:hover:text-red-400'}`}
                             title="Löschen"
                           >
                             <TrashIcon className="h-4 w-4" />
@@ -503,7 +525,7 @@ export function AgentQueuePage() {
                       {(job.status === 'running' || job.status === 'queued') && (
                           <button
                             onClick={(e) => { e.stopPropagation(); handleCancel(job.id); }}
-                            className={`rounded-lg p-1.5 transition-colors ${hasBg ? 'text-white/70 hover:bg-white/20 hover:text-white' : 'text-gray-400 hover:bg-amber-50 hover:text-amber-500 dark:text-gray-500 dark:hover:bg-amber-950/30 dark:hover:text-amber-400'}`}
+                            className={`flex h-10 w-10 items-center justify-center rounded-lg transition-colors sm:h-auto sm:w-auto sm:p-1.5 ${hasBg ? 'text-white/70 hover:bg-white/20 hover:text-white' : 'text-gray-400 hover:bg-amber-50 hover:text-amber-500 dark:text-gray-500 dark:hover:bg-amber-950/30 dark:hover:text-amber-400'}`}
                             title="Abbrechen"
                           >
                             <StopIcon className="h-4 w-4" />

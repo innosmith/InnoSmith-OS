@@ -274,7 +274,8 @@ export default function DebtorsPage() {
       <div className="relative z-10 flex-1 overflow-y-auto overflow-x-hidden overscroll-x-none p-4 sm:p-6">
         <div className="mb-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div>
-            <h1 className={`text-2xl font-bold ${hasBg ? 'text-white drop-shadow-sm' : 'text-gray-900 dark:text-white'}`}>Debitorensicht</h1>
+            {/* Titel liefert mobil der MobileHeader. */}
+            <h1 className={`hidden text-xl font-bold lg:block lg:text-2xl ${hasBg ? 'text-white drop-shadow-sm' : 'text-gray-900 dark:text-white'}`}>Debitorensicht</h1>
             <p className={`mt-1 text-xs ${textMuted}`}>Toggl: live &middot; Bexio: letzte 2 Jahre &middot; Stand: {new Date().toLocaleString('de-CH')}</p>
           </div>
           <div className="flex items-center gap-2">
@@ -283,7 +284,7 @@ export default function DebtorsPage() {
                 onClick={() => setSelectedMonth(m => shiftMonth(m, -1))}
                 disabled={monthLoading}
                 title="Vorheriger Monat"
-                className={`rounded-md p-1.5 transition-colors disabled:opacity-40 ${hasBg ? 'text-white/70 hover:bg-white/10 hover:text-white' : 'text-gray-500 hover:bg-gray-100 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-700'}`}
+                className={`flex min-h-10 min-w-10 items-center justify-center rounded-md p-1.5 transition-colors disabled:opacity-40 lg:min-h-0 lg:min-w-0 ${hasBg ? 'text-white/70 hover:bg-white/10 hover:text-white' : 'text-gray-500 hover:bg-gray-100 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-700'}`}
               >
                 <ChevronLeftIcon className="h-4 w-4" />
               </button>
@@ -294,15 +295,15 @@ export default function DebtorsPage() {
                 onClick={() => setSelectedMonth(m => shiftMonth(m, 1))}
                 disabled={isCurrentMonth || monthLoading}
                 title="Nächster Monat"
-                className={`rounded-md p-1.5 transition-colors disabled:opacity-40 ${hasBg ? 'text-white/70 hover:bg-white/10 hover:text-white' : 'text-gray-500 hover:bg-gray-100 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-700'}`}
+                className={`flex min-h-10 min-w-10 items-center justify-center rounded-md p-1.5 transition-colors disabled:opacity-40 lg:min-h-0 lg:min-w-0 ${hasBg ? 'text-white/70 hover:bg-white/10 hover:text-white' : 'text-gray-500 hover:bg-gray-100 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-700'}`}
               >
                 <ChevronRightIcon className="h-4 w-4" />
               </button>
             </div>
-            <button onClick={() => setBgPickerOpen(true)} className={`rounded-lg p-2 transition-colors ${hasBg ? 'text-white/70 hover:bg-white/10 hover:text-white' : 'text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-800 dark:hover:text-gray-300'}`} title="Hintergrund ändern">
+            <button onClick={() => setBgPickerOpen(true)} className={`flex min-h-11 min-w-11 items-center justify-center rounded-lg p-2 transition-colors lg:min-h-0 lg:min-w-0 ${hasBg ? 'text-white/70 hover:bg-white/10 hover:text-white' : 'text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-800 dark:hover:text-gray-300'}`} title="Hintergrund ändern">
               <BgImageIcon className="h-5 w-5" />
             </button>
-            <button onClick={handleRefresh} disabled={loading} className={`flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium transition-colors ${hasBg ? 'bg-white/10 text-white/90 hover:bg-white/20 backdrop-blur-sm' : 'border border-gray-200 bg-white text-gray-700 hover:bg-gray-50 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-300 dark:hover:bg-gray-700'}`}>
+            <button onClick={handleRefresh} disabled={loading} className={`flex min-h-11 min-w-11 items-center justify-center gap-2 rounded-lg px-3 py-2 text-sm font-medium transition-colors lg:min-h-0 lg:min-w-0 ${hasBg ? 'bg-white/10 text-white/90 hover:bg-white/20 backdrop-blur-sm' : 'border border-gray-200 bg-white text-gray-700 hover:bg-gray-50 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-300 dark:hover:bg-gray-700'}`}>
               <RefreshIcon className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
               <span className="hidden sm:inline">Aktualisieren</span>
             </button>
@@ -889,11 +890,12 @@ function KpiCard({ label, value, sublabel, icon, status = 'neutral', hasBg = fal
   return (
     <div className={`rounded-xl border border-l-4 ${statusColors[status]} ${bgClass} p-3 sm:p-4 ${className}`}>
       <div className="flex items-center gap-2 lg:gap-3">
-        <div className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg lg:h-10 lg:w-10 ${hasBg ? 'bg-white/10 text-white/70' : 'bg-gray-50 text-gray-500 dark:bg-gray-800 dark:text-gray-400'}`}>{icon}</div>
+        {/* Dekoratives Icon frisst auf 393px die Breite, die der CHF-Betrag braucht. */}
+        <div className={`hidden h-8 w-8 shrink-0 items-center justify-center rounded-lg lg:flex lg:h-10 lg:w-10 ${hasBg ? 'bg-white/10 text-white/70' : 'bg-gray-50 text-gray-500 dark:bg-gray-800 dark:text-gray-400'}`}>{icon}</div>
         <div className="min-w-0 flex-1">
           <p className={`text-[11px] font-medium lg:text-xs ${hasBg ? 'text-white/50' : 'text-gray-500 dark:text-gray-400'}`}>{label}</p>
-          <p className={`text-[15px] font-bold leading-tight lg:text-lg ${hasBg ? 'text-white' : 'text-gray-900 dark:text-white'}`}>{value}</p>
-          <p className={`truncate text-[10px] lg:text-xs ${hasBg ? 'text-white/40' : 'text-gray-400 dark:text-gray-500'}`}>{sublabel}</p>
+          <p className={`text-sm font-bold leading-tight tabular-nums lg:text-lg ${hasBg ? 'text-white' : 'text-gray-900 dark:text-white'}`}>{value}</p>
+          <p className={`text-[10px] lg:truncate lg:text-xs ${hasBg ? 'text-white/40' : 'text-gray-400 dark:text-gray-500'}`}>{sublabel}</p>
         </div>
       </div>
     </div>

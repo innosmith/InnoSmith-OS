@@ -17,6 +17,7 @@ import { arrayMove, SortableContext, horizontalListSortingStrategy } from '@dnd-
 import { api } from '../api/client';
 import { useAuth } from '../contexts/AuthContext';
 import { KanbanColumn } from '../components/KanbanColumn';
+import { ColumnPager } from '../components/ColumnPager';
 import { TaskCard } from '../components/TaskCard';
 import { TaskDetailDialog } from '../components/TaskDetailDialog';
 import { BackgroundPicker } from '../components/BackgroundPicker';
@@ -446,7 +447,7 @@ export function ProjectBoardPage() {
             />
           ) : (
             <h1
-              className={`text-xl font-bold ${
+              className={`hidden text-xl font-bold lg:block ${
                 hasBg ? 'text-white' : 'text-gray-900 dark:text-white'
               } ${isOwner ? 'cursor-pointer' : ''}`}
               onDoubleClick={() => {
@@ -629,7 +630,12 @@ export function ProjectBoardPage() {
         </div>
       </div>
 
-      <div className="relative z-10 flex-1 overflow-x-auto p-4 sm:p-6">
+      <div
+        data-board-scroller
+        className={`relative z-10 flex-1 overflow-x-auto scroll-px-4 p-4 sm:p-6 ${
+          activeTask ? '' : 'snap-x snap-proximity sm:snap-none'
+        }`}
+      >
         <DndContext
           sensors={sensors}
           collisionDetection={collisionDetection}
@@ -637,6 +643,7 @@ export function ProjectBoardPage() {
           onDragOver={handleDragOver}
           onDragEnd={handleDragEnd}
         >
+          <ColumnPager columns={board.columns} hasBg={hasBg} />
           <div
             className="flex gap-4"
             style={{ minHeight: 'calc(100dvh - 180px)' }}
@@ -687,7 +694,7 @@ export function ProjectBoardPage() {
               ))}
             </SortableContext>
             {isOwner && (
-              <div className="flex w-72 shrink-0 flex-col">
+              <div className="flex w-[calc(100vw-2rem)] shrink-0 snap-start flex-col sm:w-72">
                 <button
                   onClick={async () => {
                     if (!id) return;
@@ -732,7 +739,7 @@ export function ProjectBoardPage() {
       />
 
       {membersOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm modal-safe">
           <div className="w-full max-w-lg rounded-2xl border border-gray-200 bg-white p-6 shadow-2xl dark:border-gray-700 dark:bg-gray-900">
             <div className="mb-4 flex items-center justify-between">
               <h2 className="text-lg font-semibold text-gray-900 dark:text-white">

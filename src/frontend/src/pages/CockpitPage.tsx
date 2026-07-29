@@ -477,8 +477,8 @@ export function CockpitPage() {
       <div className={`relative z-20 border-b px-4 py-4 sm:px-6 ${hasBg ? 'border-white/10 bg-black/20 backdrop-blur-sm' : 'border-gray-200 dark:border-gray-800'}`}>
         <div className="flex items-center justify-between">
           <div>
-            <h1 className={`text-xl font-bold ${textPrimary}`}>Cockpit</h1>
-            <p className={`mt-0.5 text-sm ${textSecondary}`}>
+            <h1 className={`hidden text-xl font-bold lg:block ${textPrimary}`}>Cockpit</h1>
+            <p className={`text-sm lg:mt-0.5 ${textSecondary}`}>
               Dein Überblick — Entscheidungen, Agenten, Termine und Fokus
             </p>
           </div>
@@ -1164,7 +1164,7 @@ export function CockpitPage() {
               <div className="mt-3 grid grid-cols-2 gap-4 sm:grid-cols-3">
                 <AiFreigabenCard stats={aiStats} hasBg={hasBg} />
                 <AgendaKpiCard fokus={focusTasks.length} overdue={overdueTasks.length} week={weekTasks.length} hasBg={hasBg} />
-                <CapacityCard weekCapacity={weekCapacity} monthCapacity={monthCapacity} hasBg={hasBg} />
+                <CapacityCard weekCapacity={weekCapacity} monthCapacity={monthCapacity} hasBg={hasBg} className="col-span-2 sm:col-span-1" />
               </div>
             )}
           </section>
@@ -1254,10 +1254,10 @@ export function CockpitPage() {
 
       {/* SIGNA Signal Detail Modal */}
       {signaModalSignal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4" onClick={() => setSignaModalSignal(null)}>
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 modal-safe" onClick={() => setSignaModalSignal(null)}>
           <div className="fixed inset-0 bg-black/50 backdrop-blur-sm" />
           <div
-            className="relative z-10 max-h-[80vh] w-full max-w-2xl overflow-y-auto rounded-2xl border bg-white p-6 shadow-xl dark:border-gray-700 dark:bg-gray-900"
+            className="relative z-10 max-h-full w-full max-w-2xl lg:max-h-[80vh] overflow-y-auto rounded-2xl border bg-white p-6 shadow-xl dark:border-gray-700 dark:bg-gray-900"
             onClick={(e) => e.stopPropagation()}
           >
             <button
@@ -1356,9 +1356,11 @@ function AiFreigabenCard({ stats, hasBg }: { stats: AiStats | null; hasBg: boole
       <div className={`mb-1.5 text-[10px] font-semibold uppercase tracking-wide ${hasBg ? 'text-white/60' : 'text-gray-500 dark:text-gray-400'}`}>
         AI-Aktivität
       </div>
-      <div className="flex gap-3 h-full">
+      {/* Auf 393px ist die Karte ~170px breit: nebeneinander bleibt für «diese Woche»
+          kein Platz, darum mobil untereinander. */}
+      <div className="flex h-full flex-col gap-1.5 sm:flex-row sm:gap-3">
         {/* Links: Freigaben offen */}
-        <div className={`flex flex-col justify-center border-r pr-3 min-w-[60px] ${hasBg ? 'border-white/10' : 'border-gray-100 dark:border-gray-800'}`}>
+        <div className={`flex flex-col justify-center max-sm:border-b max-sm:pb-1.5 sm:min-w-[60px] sm:border-r sm:pr-3 ${hasBg ? 'border-white/10' : 'border-gray-100 dark:border-gray-800'}`}>
           <div className={`text-2xl font-bold lg:text-3xl ${pendingColor}`}>{pending}</div>
           <div className={labelClass}>Freigaben{'\n'}offen</div>
         </div>
@@ -1425,7 +1427,7 @@ function AgendaKpiCard({ fokus, overdue, week, hasBg }: { fokus: number; overdue
 
 type CapData = { total_hours: number; booked_hours: number; meeting_hours: number; blocker_hours: number; free_hours: number; work_days: number };
 
-function CapacityCard({ weekCapacity, monthCapacity, hasBg }: { weekCapacity: CapData | null; monthCapacity: CapData | null; hasBg: boolean }) {
+function CapacityCard({ weekCapacity, monthCapacity, hasBg, className = '' }: { weekCapacity: CapData | null; monthCapacity: CapData | null; hasBg: boolean; className?: string }) {
   const labelClass = `text-[10px] whitespace-nowrap ${hasBg ? 'text-white/50' : 'text-gray-400 dark:text-gray-500'}`;
   const valueClass = `text-xs font-medium ${hasBg ? 'text-white/90' : 'text-gray-700 dark:text-gray-300'}`;
 
@@ -1464,7 +1466,7 @@ function CapacityCard({ weekCapacity, monthCapacity, hasBg }: { weekCapacity: Ca
   );
 
   return (
-    <div className={`rounded-xl border p-3 lg:p-4 ${
+    <div className={`rounded-xl border p-3 lg:p-4 ${className} ${
       hasBg
         ? 'bg-white/10 backdrop-blur-md border-white/20'
         : 'bg-white border-gray-200 dark:bg-gray-900 dark:border-gray-800'
@@ -1680,13 +1682,20 @@ function UpcomingPaymentsCard({ cardClass, textSecondary, textMuted, excludeVend
                 {(p.days_until ?? 999) < 7 && <span className="h-2 w-2 shrink-0 rounded-full bg-red-500" />}
                 {(p.days_until ?? 999) >= 7 && (p.days_until ?? 999) < 30 && <span className="h-2 w-2 shrink-0 rounded-full bg-amber-500" />}
                 {(p.days_until ?? 999) >= 30 && <span className="h-2 w-2 shrink-0 rounded-full bg-green-500" />}
-                <span className="truncate text-gray-900 dark:text-white">{p.vendor}{p.product ? ` – ${p.product}` : ''}</span>
+                <span className="min-w-0">
+                  <span className="block truncate text-gray-900 dark:text-white">{p.vendor}{p.product ? ` – ${p.product}` : ''}</span>
+                  {/* Datum mobil unter den Namen: in einer Zeile blieben dem
+                      Kreditor sonst knapp 100px und der Betrag wurde beschnitten. */}
+                  <span className={`block text-xs tabular-nums sm:hidden ${textMuted}`}>
+                    {formatDateCH(p.next_date)}
+                  </span>
+                </span>
               </div>
               <div className="flex shrink-0 items-center gap-3">
-                <span className={`w-[78px] text-right text-xs tabular-nums ${textMuted}`}>
+                <span className={`hidden w-[78px] text-right text-xs tabular-nums sm:block ${textMuted}`}>
                   {formatDateCH(p.next_date)}
                 </span>
-                <span className="w-[100px] text-right font-medium tabular-nums text-gray-900 dark:text-white">
+                <span className="whitespace-nowrap text-right font-medium tabular-nums text-gray-900 sm:w-[112px] dark:text-white">
                   {p.amount_chf != null
                     ? new Intl.NumberFormat('de-CH', { style: 'currency', currency: 'CHF' }).format(p.amount_chf)
                     : ''}
@@ -1732,7 +1741,7 @@ function PdfModal({ url, onClose }: { url: string; onClose: () => void }) {
   }, [url]);
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={onClose}>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm modal-safe" onClick={onClose}>
       <div className="relative mx-2 h-[90dvh] w-full rounded-2xl bg-white shadow-2xl lg:mx-4 lg:h-[85vh] lg:max-w-6xl dark:bg-gray-900" onClick={e => e.stopPropagation()}>
         <button
           onClick={onClose}

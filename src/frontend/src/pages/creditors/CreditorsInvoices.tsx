@@ -357,11 +357,11 @@ export function CreditorsInvoices({ filter, styleCtx, categories, years }: Props
       {/* Detail Modal */}
       {(selectedInvoice || invoiceDetailLoading) && (
         <div
-          className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/50 backdrop-blur-sm"
+          className="fixed inset-0 z-50 flex items-end justify-center bg-black/50 backdrop-blur-sm sm:items-center modal-safe"
           onClick={() => { if (!invoiceDetailLoading) setSelectedInvoice(null); }}
         >
           <div
-            className="w-full max-h-[95vh] sm:max-h-[85vh] sm:max-w-6xl overflow-auto rounded-t-2xl sm:rounded-2xl bg-white shadow-2xl dark:bg-gray-900"
+            className="max-h-[min(95vh,calc(100dvh-env(safe-area-inset-top,0px)-env(safe-area-inset-bottom,0px)))] w-full overflow-auto rounded-t-2xl bg-white pb-[env(safe-area-inset-bottom,0px)] shadow-2xl sm:max-h-[85vh] sm:max-w-6xl sm:rounded-2xl sm:pb-0 dark:bg-gray-900"
             onClick={e => e.stopPropagation()}
           >
             {invoiceDetailLoading ? (

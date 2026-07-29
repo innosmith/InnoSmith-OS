@@ -51,7 +51,7 @@ export function TracePanel({ jobId, compact }: { jobId: string; compact?: boolea
         <button
           onClick={loadTrace}
           disabled={loading}
-          className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-600 dark:text-gray-500 dark:hover:bg-gray-800 dark:hover:text-gray-300"
+          className="inline-flex min-h-9 items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-600 lg:min-h-0 dark:text-gray-500 dark:hover:bg-gray-800 dark:hover:text-gray-300"
           title="Trace anzeigen"
         >
           {loading ? (
@@ -71,7 +71,7 @@ export function TracePanel({ jobId, compact }: { jobId: string; compact?: boolea
       <button
         onClick={loadTrace}
         disabled={loading}
-        className="flex items-center gap-1.5 rounded-lg border border-gray-200 px-2.5 py-1 text-[11px] font-medium text-gray-500 transition-colors hover:bg-gray-50 hover:text-gray-700 dark:border-gray-700 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200"
+        className="flex min-h-9 items-center gap-1.5 rounded-lg border border-gray-200 px-2.5 py-1 text-[11px] font-medium text-gray-500 transition-colors hover:bg-gray-50 hover:text-gray-700 lg:min-h-0 dark:border-gray-700 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200"
       >
         {loading ? (
           <div className="h-3 w-3 animate-spin rounded-full border border-gray-400 border-t-transparent" />

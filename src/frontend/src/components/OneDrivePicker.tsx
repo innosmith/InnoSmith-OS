@@ -135,9 +135,12 @@ export function OneDrivePicker({ isOpen, onClose, onSelect }: OneDrivePickerProp
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={onClose}>
+    <div
+      className="fixed inset-0 z-50 flex items-end justify-center bg-black/50 px-0 pt-[env(safe-area-inset-top,0px)] pb-[env(safe-area-inset-bottom,0px)] sm:items-center sm:px-4"
+      onClick={onClose}
+    >
       <div
-        className="flex h-[70vh] w-full max-w-2xl flex-col rounded-xl border border-gray-200 bg-white shadow-xl dark:border-gray-700 dark:bg-gray-800"
+        className="flex h-[min(70vh,calc(100dvh-env(safe-area-inset-top,0px)-env(safe-area-inset-bottom,0px)-1rem))] w-full max-w-2xl flex-col rounded-t-xl border border-gray-200 bg-white shadow-xl sm:rounded-xl dark:border-gray-700 dark:bg-gray-800"
         onClick={e => e.stopPropagation()}
       >
         {/* Header */}
@@ -146,7 +149,11 @@ export function OneDrivePicker({ isOpen, onClose, onSelect }: OneDrivePickerProp
             <CloudIcon className="h-5 w-5 text-blue-500" />
             OneDrive-Dateien
           </h3>
-          <button onClick={onClose} className="rounded p-1 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300">
+          <button
+            onClick={onClose}
+            className="rounded p-2 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300"
+            aria-label="Schliessen"
+          >
             <XIcon className="h-5 w-5" />
           </button>
         </div>

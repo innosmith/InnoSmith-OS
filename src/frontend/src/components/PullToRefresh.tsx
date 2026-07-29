@@ -15,6 +15,25 @@ async function clearAllCaches() {
   }
 }
 
+/**
+ * Nächster vertikal scrollbarer Vorfahre des berührten Elements.
+ *
+ * Der äussere Container ist `overflow-hidden` und hat darum immer `scrollTop === 0`.
+ * Ohne diese Suche würde Pull-to-Refresh auch mitten in einer gescrollten Liste
+ * auslösen und die Seite neu laden.
+ */
+function findScrollableAncestor(target: EventTarget | null): HTMLElement | null {
+  let el = target instanceof Element ? (target as HTMLElement) : null;
+  while (el && el !== document.body) {
+    const overflowY = getComputedStyle(el).overflowY;
+    if ((overflowY === 'auto' || overflowY === 'scroll') && el.scrollHeight > el.clientHeight + 1) {
+      return el;
+    }
+    el = el.parentElement;
+  }
+  return null;
+}
+
 interface PullToRefreshProps {
   children: ReactNode;
   scrollContainerRef?: React.RefObject<HTMLElement | null>;
@@ -24,11 +43,14 @@ export function PullToRefresh({ children, scrollContainerRef }: PullToRefreshPro
   const [pullY, setPullY] = useState(0);
   const [refreshing, setRefreshing] = useState(false);
   const startY = useRef(0);
+  const startX = useRef(0);
   const pulling = useRef(false);
+  const armed = useRef(false);
+  const scroller = useRef<HTMLElement | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
 
   const isAtTop = useCallback(() => {
-    const el = scrollContainerRef?.current ?? containerRef.current;
+    const el = scrollContainerRef?.current ?? scroller.current;
     if (!el) return true;
     return el.scrollTop <= 0;
   }, [scrollContainerRef]);
@@ -36,24 +58,39 @@ export function PullToRefresh({ children, scrollContainerRef }: PullToRefreshPro
   const onTouchStart = useCallback(
     (e: TouchEvent) => {
       if (refreshing) return;
+      scroller.current = findScrollableAncestor(e.target);
       if (!isAtTop()) return;
       startY.current = e.touches[0].clientY;
-      pulling.current = true;
+      startX.current = e.touches[0].clientX;
+      armed.current = true;
+      pulling.current = false;
     },
     [refreshing, isAtTop],
   );
 
   const onTouchMove = useCallback(
     (e: TouchEvent) => {
-      if (!pulling.current || refreshing) return;
+      if (!armed.current || refreshing) return;
       const dy = e.touches[0].clientY - startY.current;
+      const dx = e.touches[0].clientX - startX.current;
+
+      // Horizontale Gesten (Kanban-Spalten, Chip-Leisten) nicht kapern.
+      if (!pulling.current) {
+        if (Math.abs(dx) > Math.abs(dy)) {
+          armed.current = false;
+          return;
+        }
+        if (dy <= 0) return;
+        pulling.current = true;
+      }
+
       if (dy < 0) {
         pulling.current = false;
+        armed.current = false;
         setPullY(0);
         return;
       }
-      const dampened = Math.min(dy * RESISTANCE, MAX_PULL);
-      setPullY(dampened);
+      setPullY(Math.min(dy * RESISTANCE, MAX_PULL));
     },
     [refreshing],
   );
@@ -61,6 +98,7 @@ export function PullToRefresh({ children, scrollContainerRef }: PullToRefreshPro
   const onTouchEnd = useCallback(async () => {
     if (!pulling.current && pullY === 0) return;
     pulling.current = false;
+    armed.current = false;
 
     if (pullY >= THRESHOLD) {
       setRefreshing(true);
@@ -100,7 +138,7 @@ export function PullToRefresh({ children, scrollContainerRef }: PullToRefreshPro
         style={{ height: pullY }}
       >
         <div
-          className={`mt-3 flex h-9 w-9 items-center justify-center rounded-full shadow-lg transition-all duration-200 ${
+          className={`mt-[calc(0.75rem+env(safe-area-inset-top,0px))] flex h-9 w-9 items-center justify-center rounded-full shadow-lg transition-all duration-200 ${
             refreshing
               ? 'bg-indigo-500 text-white'
               : pullY >= THRESHOLD

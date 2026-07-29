@@ -140,9 +140,9 @@ export function AnonymizePanel({ isOpen, onClose, onInsertText, initialText = ''
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={onClose}>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 modal-safe" onClick={onClose}>
       <div
-        className="flex max-h-[90vh] w-full max-w-4xl flex-col rounded-xl border border-gray-200 bg-white shadow-xl dark:border-gray-700 dark:bg-gray-800"
+        className="flex max-h-full w-full max-w-4xl lg:max-h-[90vh] flex-col rounded-xl border border-gray-200 bg-white shadow-xl dark:border-gray-700 dark:bg-gray-800"
         onClick={e => e.stopPropagation()}
       >
         {/* Header */}

@@ -16,6 +16,7 @@ import {
 import { arrayMove, SortableContext, horizontalListSortingStrategy } from '@dnd-kit/sortable';
 import { api } from '../api/client';
 import { KanbanColumn } from '../components/KanbanColumn';
+import { ColumnPager } from '../components/ColumnPager';
 import { TaskCard } from '../components/TaskCard';
 import { TaskDetailDialog } from '../components/TaskDetailDialog';
 import { BackgroundPicker } from '../components/BackgroundPicker';
@@ -280,10 +281,10 @@ export function PipelinePage() {
       <div className={`relative z-20 border-b px-4 py-4 sm:px-6 ${hasBg ? 'border-white/10 bg-black/20 backdrop-blur-sm' : 'border-gray-200 dark:border-gray-800'}`}>
         <div className="flex items-center justify-between">
           <div>
-            <h1 className={`text-xl font-bold ${hasBg ? 'text-white' : 'text-gray-900 dark:text-white'}`}>
+            <h1 className={`hidden text-xl font-bold lg:block ${hasBg ? 'text-white' : 'text-gray-900 dark:text-white'}`}>
               Agenda
             </h1>
-            <p className={`mt-0.5 text-sm ${hasBg ? 'text-white/70' : 'text-gray-500 dark:text-gray-400'}`}>
+            <p className={`text-sm lg:mt-0.5 ${hasBg ? 'text-white/70' : 'text-gray-500 dark:text-gray-400'}`}>
               Alle Aufgaben nach Zeithorizont organisiert
             </p>
           </div>
@@ -314,7 +315,12 @@ export function PipelinePage() {
         </div>
       </div>
 
-      <div className="relative z-10 flex-1 overflow-x-auto p-4 sm:p-6">
+      <div
+        data-board-scroller
+        className={`relative z-10 flex-1 overflow-x-auto scroll-px-4 p-4 sm:p-6 ${
+          activeTask ? '' : 'snap-x snap-proximity sm:snap-none'
+        }`}
+      >
         {!loading && projects.length === 0 && (
           <div className={`relative z-20 mb-4 flex items-center gap-3 rounded-xl border px-4 py-3 ${
             hasBg
@@ -350,6 +356,7 @@ export function PipelinePage() {
           onDragOver={handleDragOver}
           onDragEnd={handleDragEnd}
         >
+          <ColumnPager columns={columns} hasBg={hasBg} />
           <div className="flex gap-4" style={{ minHeight: 'calc(100dvh - 180px)' }}>
             <SortableContext
               items={columns.map((col) => col.id)}
@@ -390,7 +397,7 @@ export function PipelinePage() {
                 />
               ))}
             </SortableContext>
-            <div className="flex w-72 shrink-0 flex-col">
+            <div className="flex w-[calc(100vw-2rem)] shrink-0 snap-start flex-col sm:w-72">
               <button
                 onClick={async () => {
                   await api.post('/api/pipeline/columns', { name: 'Neue Spalte' });

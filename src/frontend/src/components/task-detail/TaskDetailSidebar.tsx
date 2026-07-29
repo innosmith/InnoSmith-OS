@@ -272,7 +272,7 @@ export default function TaskDetailSidebar({
       : 'border-gray-200 bg-white text-gray-700 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-300';
 
   return (
-    <div className="flex flex-col gap-0.5 px-5 py-4 bg-gray-50/40 dark:bg-gray-900/20">
+    <div id="task-attribute-panel" className="flex flex-col gap-0.5 bg-gray-50/40 px-5 py-4 scroll-mt-2 dark:bg-gray-900/20">
       {/* Origin Badges */}
       {task.email_message_id && (
         <div className="mb-3 rounded-lg bg-sky-50 px-2.5 py-1.5 dark:bg-sky-950/40">
