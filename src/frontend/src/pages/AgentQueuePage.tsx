@@ -570,7 +570,7 @@ export function AgentQueuePage() {
                       {job.error_message && (
                         <div>
                           <h4 className="text-xs font-medium text-red-500">Fehler</h4>
-                          <p className="mt-1 text-sm text-red-600 dark:text-red-400">{job.error_message}</p>
+                          <p className="mt-1 text-sm text-red-600 wrap-anywhere dark:text-red-400">{job.error_message}</p>
                         </div>
                       )}
                       {!job.output && !job.error_message && (

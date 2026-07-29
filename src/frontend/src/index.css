@@ -48,6 +48,16 @@ html, body, #root {
   padding-right: max(1rem, env(safe-area-inset-right, 0px)) !important;
 }
 
+/* Monospace-Inhalte tragen IDs, Pfade und Tokens ohne Leerzeichen. `anywhere`
+   statt `break-word`, weil nur `anywhere` die Min-Content-Breite senkt und damit
+   auch in Flex- und Grid-Containern ein Aufblähen der Spalte verhindert.
+   Greift ausschliesslich, wenn ein Wort sonst überlaufen würde. */
+pre,
+code,
+.font-mono {
+  overflow-wrap: anywhere;
+}
+
 html {
   scroll-behavior: smooth;
   background-color: #030712;

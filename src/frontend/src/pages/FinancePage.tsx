@@ -1491,9 +1491,11 @@ function InfoTooltip({ text }: { text: string }) {
       >
         <InfoIcon className="h-3.5 w-3.5" />
       </button>
+      {/* Mobil am Viewport verankert: `right-0` am Icon würde bei Icons in der
+          linken Spalte über den linken Bildschirmrand hinauslaufen. */}
       <span
         role="tooltip"
-        className="pointer-events-none absolute right-0 top-5 z-30 w-56 max-w-[75vw] rounded-lg bg-gray-900 p-2 text-[11px] font-normal leading-snug text-white opacity-0 shadow-lg transition-opacity duration-150 group-hover/tip:opacity-100 group-focus-within/tip:opacity-100 dark:bg-gray-700"
+        className="pointer-events-none z-30 rounded-lg bg-gray-900 p-2 text-[11px] font-normal leading-snug text-white opacity-0 shadow-lg transition-opacity duration-150 group-hover/tip:opacity-100 group-focus-within/tip:opacity-100 max-lg:fixed max-lg:inset-x-3 max-lg:bottom-[max(0.75rem,env(safe-area-inset-bottom,0px))] max-lg:top-auto lg:absolute lg:right-0 lg:top-5 lg:w-56 lg:max-w-[75vw] dark:bg-gray-700"
       >
         {text}
       </span>

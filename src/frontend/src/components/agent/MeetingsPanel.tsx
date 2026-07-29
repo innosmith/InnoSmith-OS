@@ -303,7 +303,7 @@ function MeetingDetailView({
   return (
     <div>
       {detail.error_message && (
-        <div className="mb-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-800 dark:border-red-800 dark:bg-red-950/40 dark:text-red-200">
+        <div className="mb-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-800 wrap-anywhere dark:border-red-800 dark:bg-red-950/40 dark:text-red-200">
           <span className="font-medium">Analyse-Fehler: </span>{detail.error_message}
         </div>
       )}

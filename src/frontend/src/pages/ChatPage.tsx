@@ -1971,7 +1971,7 @@ export function ChatPage() {
                         );
                       })()
                     ) : (
-                      <div className="whitespace-pre-wrap" style={{ fontSize: '0.9375rem', lineHeight: 1.7 }}>{msg.content}</div>
+                      <div className="whitespace-pre-wrap wrap-anywhere" style={{ fontSize: '0.9375rem', lineHeight: 1.7 }}>{msg.content}</div>
                     )}
 
                     {msg.attachments && msg.attachments.length > 0 && (

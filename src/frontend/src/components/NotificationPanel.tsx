@@ -171,7 +171,7 @@ export function NotificationPanel({
                   <div className={`mt-0.5 shrink-0 ${cfg.color}`}>
                     <Icon className="h-4.5 w-4.5" />
                   </div>
-                  <div className="min-w-0 flex-1">
+                  <div className="min-w-0 flex-1 wrap-anywhere">
                     <p className={`text-sm leading-snug ${!item.is_read ? 'font-semibold text-gray-900 dark:text-white' : 'text-gray-700 dark:text-gray-300'}`}>
                       {!item.is_read && <span className="mr-1.5 inline-block h-2 w-2 rounded-full bg-indigo-500" />}
                       {item.title}

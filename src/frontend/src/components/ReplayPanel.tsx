@@ -150,7 +150,9 @@ export function ReplayPanel({ onJobCreated }: { onJobCreated?: () => void }) {
       </div>
 
       {/* E-Mail-Liste */}
-      <div className="max-h-64 overflow-y-auto rounded-lg border border-gray-100 dark:border-gray-800">
+      {/* Vier Spalten brauchen rund 690px. Gleichmässig verteilt bliebe mobil
+          kaum Text lesbar, darum horizontal scrollen statt kürzen. */}
+      <div className="max-h-64 overflow-x-auto overflow-y-auto rounded-lg border border-gray-100 dark:border-gray-800">
         {loading ? (
           <div className="flex items-center justify-center py-8">
             <div className="h-5 w-5 animate-spin rounded-full border-2 border-indigo-500 border-t-transparent" />

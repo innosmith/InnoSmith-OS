@@ -521,7 +521,7 @@ export function SearchDialog({
           </p>
           {h.snippet && (
             <p className="mt-0.5 line-clamp-2 text-xs text-gray-500 dark:text-gray-400">
-              {h.snippet}
+              {formatSnippet(h.snippet)}
             </p>
           )}
         </div>
@@ -586,16 +586,26 @@ export function SearchDialog({
   };
 
   return (
+    // Blur getrennt vom Layout: `backdrop-filter` auf dem Vorfahren von
+    // `overflow-hidden` + `rounded-2xl` schneidet in WebKit den linken
+    // Dialogrand um wenige Pixel an.
     <div
       ref={backdropRef}
-      className="fixed inset-0 z-50 flex items-start justify-center bg-black/40 px-4 pt-[env(safe-area-inset-top,0px)] pb-[env(safe-area-inset-bottom,0px)] backdrop-blur-sm"
+      className="fixed inset-0 z-50"
       onClick={(e) => {
-        if (e.target === backdropRef.current) onClose();
+        const t = e.target as HTMLElement;
+        if (t === backdropRef.current || t.dataset.searchBackdrop === '1') onClose();
       }}
     >
+      <div data-search-backdrop="1" className="absolute inset-0 bg-black/40 backdrop-blur-sm" />
+      <div
+        data-search-backdrop="1"
+        className="relative flex h-full items-start justify-center px-4 pt-[env(safe-area-inset-top,0px)] pb-[env(safe-area-inset-bottom,0px)]"
+      >
       <div
         className="mt-2 flex max-h-[min(85dvh,calc(100dvh-env(safe-area-inset-top,0px)-env(safe-area-inset-bottom,0px)-1rem))] w-full max-w-xl flex-col overflow-hidden rounded-2xl border border-gray-200 bg-white shadow-2xl sm:mt-[12dvh] dark:border-gray-700 dark:bg-gray-900"
         onKeyDown={handleKeyDown}
+        onClick={(e) => e.stopPropagation()}
       >
         {/* Suchfeld */}
         <div className="flex items-center gap-3 border-b border-gray-200 px-4 py-3 dark:border-gray-700">
@@ -607,7 +617,8 @@ export function SearchDialog({
             onChange={(e) => setQuery(e.target.value)}
             placeholder='Suchen…'
             title='Phrase: "Vorname Nachname"'
-            className="flex-1 bg-transparent text-sm text-gray-900 outline-none placeholder:text-gray-400 dark:text-white dark:placeholder:text-gray-500"
+            // 16px verhindert iOS-Auto-Zoom, der den Dialog links abschneiden kann.
+            className="flex-1 bg-transparent text-base text-gray-900 outline-none placeholder:text-gray-400 sm:text-sm dark:text-white dark:placeholder:text-gray-500"
           />
           {(loading || docLoading) && (
             <div className="h-4 w-4 animate-spin rounded-full border-2 border-indigo-500 border-t-transparent" />
@@ -619,7 +630,8 @@ export function SearchDialog({
 
         {/* Optionale globale Typ-Filter über alle Treffertypen (nur bei >=2 Arten) */}
         {facets.length >= 2 && (
-          <div className="flex items-center gap-1.5 overflow-x-auto border-b border-gray-100 px-4 py-2 dark:border-gray-800">
+          <div className="overflow-x-auto border-b border-gray-100 dark:border-gray-800">
+          <div className="flex items-center gap-1.5 px-4 py-2">
             <FilterIcon className="h-3.5 w-3.5 shrink-0 text-gray-400 dark:text-gray-500" />
             <button
               onClick={() => selectFilter(null)}
@@ -644,6 +656,7 @@ export function SearchDialog({
                 {f.label} <span className="opacity-60">{f.count}</span>
               </button>
             ))}
+          </div>
           </div>
         )}
 
@@ -1019,6 +1032,7 @@ export function SearchDialog({
           </div>
         )}
       </div>
+      </div>
     </div>
   );
 }
@@ -1034,6 +1048,17 @@ function formatDate(dateStr: string): string {
   if (days === -1) return 'Gestern';
 
   return date.toLocaleDateString('de-DE', { day: 'numeric', month: 'short' });
+}
+
+/** Snippets aus dem Index beginnen oft mitten im Wort. Ohne führende Ellipse
+ *  wirkt der Text links abgeschnitten. */
+function formatSnippet(snippet: string): string {
+  const t = snippet.trim();
+  if (!t) return t;
+  if (t.startsWith('…') || t.startsWith('...')) return t;
+  // Klarer Anfang (Grossbuchstabe, Zitat, Zahl, Klammer) → unverändert
+  if (/^[A-ZÄÖÜ0-9„"«\[\(\*]/.test(t)) return t;
+  return `…${t}`;
 }
 
 function SearchIcon({ className }: { className?: string }) {

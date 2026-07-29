@@ -40,7 +40,7 @@ function TriageFields({ data }: { data: Record<string, unknown> }) {
   if (entries.length === 0) return null;
 
   return (
-    <div className="space-y-1 text-sm">
+    <div className="space-y-1 text-sm wrap-anywhere">
       {entries.map(([key, val]) => {
         if (val === null || val === undefined || val === '') return null;
         const label = TRIAGE_LABEL_MAP[key] || key.replace(/_/g, ' ');
@@ -79,7 +79,7 @@ export function FormattedOutput({ output }: { output: string }) {
       return <EmailBody html={parsed.body_html} />;
     }
     if (parsed.body || parsed.text || parsed.message) {
-      return <p className="whitespace-pre-wrap">{parsed.body || parsed.text || parsed.message}</p>;
+      return <p className="whitespace-pre-wrap wrap-anywhere">{parsed.body || parsed.text || parsed.message}</p>;
     }
     if (parsed.draft_id || parsed.subject || parsed.triage_class) {
       return <TriageFields data={parsed} />;

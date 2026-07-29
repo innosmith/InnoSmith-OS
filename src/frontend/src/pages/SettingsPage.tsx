@@ -1309,7 +1309,7 @@ export function SettingsPage() {
                 Parameter für die Cashflow-Prognose. Stundensätze kommen primär aus Toggl;
                 der Default-Satz greift nur für noch nicht zugesagte (vorläufige) Kapazitätsprojekte.
               </p>
-              <div className="grid gap-4 sm:grid-cols-2">
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                 <div className="rounded-lg border border-gray-200 p-4 dark:border-gray-700">
                   <label className="block text-sm font-medium text-gray-900 dark:text-white">
                     Default-Stundensatz (CHF/h, exkl. MwSt)
@@ -1422,7 +1422,7 @@ export function SettingsPage() {
                   Bestimmt, wie der Netto-Umsatz aus dem fakturierten Brutto-Umsatz abgeleitet wird
                   (Basis für Marge, EBITDA und Personalquote).
                 </p>
-                <div className="grid gap-4 sm:grid-cols-2">
+                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                   <div className="rounded-lg border border-gray-200 p-4 dark:border-gray-700">
                     <label className="block text-sm font-medium text-gray-900 dark:text-white">
                       Abrechnungsmethode
@@ -1467,7 +1467,7 @@ export function SettingsPage() {
                   Für treffende Steuer- und Lohn-/Dividenden-Empfehlungen. Ohne Angabe rechnet die
                   Analyse mit Annahmen und weist dies als Datenlücke aus.
                 </p>
-                <div className="grid gap-4 sm:grid-cols-2">
+                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                   <div className="rounded-lg border border-gray-200 p-4 dark:border-gray-700">
                     <label className="block text-sm font-medium text-gray-900 dark:text-white">
                       Sitz-/Wohnkanton
@@ -2269,7 +2269,7 @@ export function SettingsPage() {
               <p className="mb-4 text-sm text-gray-500 dark:text-gray-400">
                 Regeln, Skills und das Wissen des Agenten sind ins Agenten-Cockpit umgezogen.
               </p>
-              <div className="grid gap-3 sm:grid-cols-3">
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
                 <Link
                   to="/agenten?tab=regeln"
                   className="group rounded-xl border border-gray-200 bg-white p-4 transition-colors hover:border-indigo-300 hover:bg-indigo-50/40 dark:border-gray-700 dark:bg-gray-800/50 dark:hover:border-indigo-500/50 dark:hover:bg-indigo-900/10"

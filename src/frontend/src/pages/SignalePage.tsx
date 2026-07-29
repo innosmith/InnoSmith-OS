@@ -499,7 +499,7 @@ export function SignalePage() {
 
             <div className="mx-auto max-w-3xl px-4 py-4 sm:px-6 sm:py-6">
               {initialLoad && loadingSignals ? (
-                <div className="grid gap-5">{Array.from({ length: 4 }).map((_, i) => <SkeletonCard key={i} hasBg={hasBg} />)}</div>
+                <div className="grid grid-cols-1 gap-5">{Array.from({ length: 4 }).map((_, i) => <SkeletonCard key={i} hasBg={hasBg} />)}</div>
               ) : signals.length === 0 && !loadingSignals ? (
                 <div className={`py-20 text-center ${textMuted}`}>
                   <SignalIcon className="mx-auto mb-3 h-10 w-10 opacity-40" />
@@ -508,7 +508,7 @@ export function SignalePage() {
                 </div>
               ) : (
                 <>
-                  <div className="grid gap-5">
+                  <div className="grid grid-cols-1 gap-5">
                     {signals.map(s => {
                       const isYT = s.type === 'youtube';
                       const isExpanded = expandedId === s.id;
@@ -657,11 +657,11 @@ export function SignalePage() {
               </div>
               <div className="flex-1 overflow-y-auto p-4">
                 {loadingBriefings ? (
-                  <div className="grid gap-2">{Array.from({ length: 4 }).map((_, i) => <SkeletonCard key={i} hasBg={hasBg} />)}</div>
+                  <div className="grid grid-cols-1 gap-2">{Array.from({ length: 4 }).map((_, i) => <SkeletonCard key={i} hasBg={hasBg} />)}</div>
                 ) : briefingItems.length === 0 ? (
                   <div className={`py-16 text-center text-sm ${textMuted}`}>Keine Briefings vorhanden</div>
                 ) : (
-                  <div className="grid gap-2">
+                  <div className="grid grid-cols-1 gap-2">
                     {briefingItems.filter(item => !ddPersonaFilter || item.type === 'daily' || item.persona_name === ddPersonaFilter).map(item => (
                       <button key={`${item.type}-${item.id}`} onClick={() => openBriefingDetail(item)} className={`w-full rounded-xl border px-3.5 py-3 text-left shadow-sm transition-all ${selectedDetail?.id === item.id && selectedDetail?.type === item.type ? cardExpandedGlass : cardGlass}`}>
                         <div className="flex items-center gap-2">

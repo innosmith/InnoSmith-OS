@@ -79,6 +79,13 @@ function formatCHF(value: number | null | undefined): string {
   return new Intl.NumberFormat('de-CH', { style: 'currency', currency: 'CHF' }).format(value);
 }
 
+/** Betrag ohne Währungspräfix. `style: 'currency'` fügt ein geschütztes
+ *  Leerzeichen ein, das den Umbruch in schmalen Tabellenspalten verhindert. */
+function formatAmount(value: number | null | undefined): string {
+  if (value == null) return '–';
+  return new Intl.NumberFormat('de-CH', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(value);
+}
+
 function formatHours(h: number): string {
   return `${h.toFixed(1)}h`;
 }
@@ -742,13 +749,13 @@ function MonthCockpit({ toggl, selectedMonth, monthProgress, hasBg, sectionClass
       {/* Mobile: kompakte Tabelle */}
       <div className="sm:hidden">
         <h3 className={`mb-2 text-sm font-semibold ${textPrimary}`}>Projekt-Aufschlüsselung</h3>
-        <table className="w-full">
+        <table className="w-full table-fixed">
           <thead>
             <tr className={`border-b text-left text-[10px] font-medium uppercase tracking-wider ${hasBg ? 'border-white/10 text-white/40' : 'border-gray-100 text-gray-400 dark:border-gray-700 dark:text-gray-500'}`}>
               <th className="py-2 pl-1 pr-1">Projekt</th>
-              <th className="w-[55px] px-1 py-2 text-right">Zeit</th>
-              <th className="w-[35px] px-1 py-2 text-right">%</th>
-              <th className="w-[90px] py-2 pl-1 pr-1 text-right">CHF</th>
+              <th className="w-[70px] px-1 py-2 text-right">Zeit</th>
+              <th className="w-[40px] px-1 py-2 text-right">%</th>
+              <th className="w-[78px] py-2 pl-1 pr-1 text-right">CHF</th>
             </tr>
           </thead>
           <tbody>
@@ -765,14 +772,14 @@ function MonthCockpit({ toggl, selectedMonth, monthProgress, hasBg, sectionClass
                 </td>
                 <td className={`px-1 py-2 text-right text-[13px] font-semibold tabular-nums ${textPrimary}`}>{formatHoursHM(p.hours)}</td>
                 <td className={`px-1 py-2 text-right text-[12px] tabular-nums ${textSecondary}`}>{p.pct_of_total.toFixed(0)}%</td>
-                <td className={`py-2 pl-1 pr-1 text-right text-[13px] font-semibold tabular-nums ${textPrimary}`}>{p.amount > 0 ? formatCHF(p.amount) : '–'}</td>
+                <td className={`py-2 pl-1 pr-1 text-right text-[13px] font-semibold tabular-nums ${textPrimary}`}>{p.amount > 0 ? formatAmount(p.amount) : '–'}</td>
               </tr>
             ))}
             <tr className={`border-t-2 ${hasBg ? 'border-white/20' : 'border-gray-200 dark:border-gray-600'}`}>
               <td className={`py-2 pl-1 text-[13px] font-bold ${textPrimary}`}>TOTAL</td>
               <td className={`px-1 py-2 text-right text-[13px] font-bold tabular-nums ${textPrimary}`}>{formatHoursHM(toggl.total_hours)}</td>
               <td className={`px-1 py-2 text-right text-[12px] font-bold tabular-nums ${textPrimary}`}>100%</td>
-              <td className={`py-2 pl-1 pr-1 text-right text-[13px] font-bold tabular-nums ${textPrimary}`}>{formatCHF(toggl.total_amount)}</td>
+              <td className={`py-2 pl-1 pr-1 text-right text-[13px] font-bold tabular-nums ${textPrimary}`}>{formatAmount(toggl.total_amount)}</td>
             </tr>
           </tbody>
         </table>

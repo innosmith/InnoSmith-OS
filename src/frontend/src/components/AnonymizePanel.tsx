@@ -229,7 +229,9 @@ export function AnonymizePanel({ isOpen, onClose, onInsertText, initialText = ''
                   <h4 className="mb-2 text-sm font-medium text-gray-700 dark:text-gray-300">
                     Anonymisierte Einträge ({result.diff.length})
                   </h4>
-                  <div className="overflow-hidden rounded-lg border border-gray-200 dark:border-gray-600">
+                  {/* Vorher `overflow-hidden`: Original- und Ersatzwerte wurden
+                      mobil hart abgeschnitten statt scrollbar zu sein. */}
+                  <div className="overflow-x-auto rounded-lg border border-gray-200 dark:border-gray-600">
                     <table className="w-full text-sm">
                       <thead>
                         <tr className="bg-gray-50 dark:bg-gray-700/50">

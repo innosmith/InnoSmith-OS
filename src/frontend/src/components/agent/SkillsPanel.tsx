@@ -129,7 +129,7 @@ export function SkillsPanel() {
             <p className="text-sm text-gray-500 dark:text-gray-400">Keine Skills gefunden.</p>
           </div>
         ) : (
-          <div className="grid gap-4 lg:grid-cols-[250px_1fr]">
+          <div className="grid grid-cols-1 gap-4 lg:grid-cols-[250px_1fr]">
             {/* Liste */}
             <div className={`space-y-1.5 ${selected ? 'hidden lg:block' : ''}`}>
               {skills.map((s) => {

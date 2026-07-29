@@ -136,15 +136,17 @@ export function CreditorsInvoices({ filter, styleCtx, categories, years }: Props
   return (
     <div className="flex flex-col gap-5">
       {/* KPI Strip */}
-      <div className="grid grid-cols-3 gap-4">
+      {/* Mobil zwei Spalten: bei drei Spalten bleiben nur 74px Inhaltsbreite,
+          ein Betrag wie «CHF 12’624.65» braucht 128px. */}
+      <div className="grid grid-cols-2 gap-4 sm:grid-cols-3">
         {[
           { label: 'Ø Rechnung', value: formatCHF(kpis.avg) },
           { label: 'Max. Rechnung', value: formatCHF(kpis.max) },
           { label: 'Anbieter', value: String(kpis.vendors) },
-        ].map(k => (
-          <div key={k.label} className={`${cardClass} ${panelBg} rounded-xl p-4 shadow-sm`}>
+        ].map((k, i) => (
+          <div key={k.label} className={`${cardClass} ${panelBg} rounded-xl p-3 shadow-sm sm:p-4 ${i === 2 ? 'max-sm:col-span-2' : ''}`}>
             <p className={`text-xs font-medium ${textMuted}`}>{k.label}</p>
-            <p className={`text-lg font-bold ${textPrimary}`}>{k.value}</p>
+            <p className={`text-lg font-bold wrap-anywhere ${textPrimary}`}>{k.value}</p>
           </div>
         ))}
       </div>
@@ -444,7 +446,7 @@ function ModalContent({
         </button>
       </div>
 
-      <div className="grid gap-6 lg:grid-cols-5">
+      <div className="grid grid-cols-1 gap-6 lg:grid-cols-5">
         {/* Left: structured data (3 cols) */}
         <div className="lg:col-span-3 space-y-5">
           {/* Rechnungskopf */}

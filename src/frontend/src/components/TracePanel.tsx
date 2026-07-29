@@ -112,8 +112,11 @@ function TraceContent({ trace }: { trace: TraceData }) {
         )}
       </div>
       <div className="max-h-80 space-y-1 overflow-y-auto">
+        {/* `wrap-anywhere` wird geerbt und senkt die Min-Content-Breite der
+            Textspalte, damit Tool-Parameter und Fehler-Previews die Zeile nicht
+            über den Container hinaus aufziehen. */}
         {trace.steps.map((step, i) => (
-          <div key={i} className="flex gap-2 text-[11px]">
+          <div key={i} className="flex gap-2 text-[11px] wrap-anywhere">
             {step.type === 'tool_call' && (
               <>
                 <span className="shrink-0 font-mono text-blue-600 dark:text-blue-400">→</span>
