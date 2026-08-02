@@ -61,6 +61,29 @@ async def _latest_instance_due(
     return result2.scalar_one_or_none()
 
 
+def _resolve_last_spawn_ts(
+    last_spawn: date | None,
+    latest_instance_ts: datetime | None,
+) -> datetime | None:
+    """Kombiniert persistierten Spawn-Merker und abgeleiteten Instanz-Stand.
+
+    Der Merker überlebt Instanz-Löschungen und verhindert so den Respawn
+    einer bereits erzeugten Okkurrenz. Beide Quellen werden als Tagesende-UTC
+    normalisiert; der spätere Wert gewinnt (Merker wandert nur vorwärts).
+    """
+    candidates: list[datetime] = []
+    if last_spawn is not None:
+        candidates.append(
+            datetime.combine(last_spawn, datetime.max.time(), tzinfo=timezone.utc)
+        )
+    if latest_instance_ts is not None:
+        ts = latest_instance_ts
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        candidates.append(ts)
+    return max(candidates) if candidates else None
+
+
 async def _has_active_instance(db: AsyncSession, template_id: uuid.UUID) -> bool:
     result = await db.execute(
         select(func.count()).where(
@@ -323,7 +346,10 @@ async def _check_and_spawn(db: AsyncSession) -> int:
                 if (count_result.scalar_one() or 0) >= tmpl.recurrence_max_instances:
                     continue
 
-            last_ts = await _latest_instance_due(db, tmpl.id)
+            latest_instance_ts = await _latest_instance_due(db, tmpl.id)
+            last_ts = _resolve_last_spawn_ts(
+                tmpl.recurrence_last_spawn, latest_instance_ts
+            )
             target_run = _select_target_occurrence(
                 tmpl.recurrence_rule, now, last_ts, tmpl.created_at
             )
@@ -339,6 +365,8 @@ async def _check_and_spawn(db: AsyncSession) -> int:
                 continue
 
             instance = await _copy_template(db, tmpl, due_date=target_run.date())
+            # Persistierter Merker überlebt Instanz-Löschung → kein Respawn.
+            tmpl.recurrence_last_spawn = target_run.date()
             spawned += 1
             logger.info(
                 "Recurring-Instanz '%s' (id=%s) aus Template %s erzeugt (due=%s)",

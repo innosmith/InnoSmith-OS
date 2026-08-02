@@ -772,13 +772,23 @@ async def get_recurrence_info(
         raise HTTPException(status_code=404, detail="Task not found")
 
     if not task.recurrence_rule:
-        return {"recurrence_rule": None, "next_occurrence": None, "description": None}
+        return {
+            "recurrence_rule": None,
+            "next_occurrence": None,
+            "description": None,
+            "last_spawn": None,
+        }
 
     if not croniter.is_valid(task.recurrence_rule):
         return {
             "recurrence_rule": task.recurrence_rule,
             "next_occurrence": None,
             "description": "Ungueltige Cron-Expression",
+            "last_spawn": (
+                task.recurrence_last_spawn.isoformat()
+                if task.recurrence_last_spawn
+                else None
+            ),
         }
 
     now = datetime.now(timezone.utc)
@@ -791,6 +801,11 @@ async def get_recurrence_info(
         "recurrence_rule": task.recurrence_rule,
         "next_occurrence": next_run.isoformat(),
         "description": description,
+        "last_spawn": (
+            task.recurrence_last_spawn.isoformat()
+            if task.recurrence_last_spawn
+            else None
+        ),
     }
 
 

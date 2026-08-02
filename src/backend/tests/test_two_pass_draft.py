@@ -80,26 +80,54 @@ def _postprocess_patches(job=None, two_pass=True):
 # ── _draft_sampling_overrides ────────────────────────────────────────────────
 
 
-def test_draft_sampling_overrides_carries_config_and_thinking_off():
-    settings = SimpleNamespace(
-        draft_temperature=0.7, draft_top_p=0.8, draft_top_k=20, draft_presence_penalty=1.5
+def _sampling_settings(**over):
+    base = dict(
+        draft_temperature=0.7,
+        draft_top_p=0.8,
+        draft_top_k=20,
+        draft_presence_penalty=0.0,
+        draft_reasoning_effort="none",
     )
-    with patch.object(hw, "get_settings", lambda: settings):
+    base.update(over)
+    return SimpleNamespace(**base)
+
+
+def test_draft_sampling_overrides_carries_config_and_thinking_off():
+    with patch.object(hw, "get_settings", lambda: _sampling_settings()):
         ov = hw._draft_sampling_overrides(disable_thinking=True)
     assert ov["temperature"] == 0.7
     assert ov["top_p"] == 0.8
-    assert ov["presence_penalty"] == 1.5
+    assert ov["presence_penalty"] == 0.0
     assert ov["extra_body"]["top_k"] == 20
     assert ov["extra_body"]["chat_template_kwargs"] == {"enable_thinking": False}
 
 
 def test_draft_sampling_overrides_thinking_on_omits_flag():
-    settings = SimpleNamespace(
-        draft_temperature=0.7, draft_top_p=0.8, draft_top_k=20, draft_presence_penalty=1.5
-    )
-    with patch.object(hw, "get_settings", lambda: settings):
+    with patch.object(hw, "get_settings", lambda: _sampling_settings()):
         ov = hw._draft_sampling_overrides(disable_thinking=False)
     assert "chat_template_kwargs" not in ov["extra_body"]
+    assert "reasoning_effort" not in ov
+
+
+def test_draft_sampling_overrides_sets_reasoning_effort_for_local():
+    """Ollama ignoriert ``enable_thinking``; wirksam ist nur ``reasoning_effort``."""
+    with patch.object(hw, "get_settings", lambda: _sampling_settings()):
+        ov = hw._draft_sampling_overrides(disable_thinking=True, local=True)
+    assert ov["reasoning_effort"] == "none"
+
+
+def test_draft_sampling_overrides_omits_reasoning_effort_for_cloud():
+    """"none" ist kein Standard-OpenAI-Wert -- Cloud-Provider wuerden ihn ablehnen."""
+    with patch.object(hw, "get_settings", lambda: _sampling_settings()):
+        ov = hw._draft_sampling_overrides(disable_thinking=True, local=False)
+    assert "reasoning_effort" not in ov
+    assert ov["extra_body"]["chat_template_kwargs"] == {"enable_thinking": False}
+
+
+def test_draft_sampling_overrides_empty_effort_omits_param():
+    with patch.object(hw, "get_settings", lambda: _sampling_settings(draft_reasoning_effort="")):
+        ov = hw._draft_sampling_overrides(disable_thinking=True, local=True)
+    assert "reasoning_effort" not in ov
 
 
 # ── _run_agent_sync (overrides gesetzt + zurueckgesetzt) ─────────────────────

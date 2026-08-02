@@ -140,14 +140,31 @@ class Settings(BaseSettings):
     # JSON-/Tool-/Klassifikations-Druck. Hebt die sprachliche Qualitaet, jederzeit
     # per Flag reversibel.
     two_pass_draft: bool = True
-    # Prosa-Sampling fuer den Schreib-Pass -- offizielle Qwen-3.6-Instruct-Empfehlung
-    # (temperature=0.7, top_p=0.8, top_k=20, presence_penalty=1.5). Bewusst NICHT
+    # Prosa-Sampling fuer den Schreib-Pass -- Qwens Basis-Empfehlung fuer den
+    # Non-Thinking-Modus (temperature=0.7, top_p=0.8, top_k=20). Bewusst NICHT
     # temp=0: deterministisches Sampling erzeugt flaches, repetitives Deutsch. Nur
     # fuer den Draft-Pass; die Klassifikation bleibt deterministisch.
     draft_temperature: float = 0.7
     draft_top_p: float = 0.8
     draft_top_k: int = 20
-    draft_presence_penalty: float = 1.5
+    # presence_penalty ist NICHT Teil der Basis-Empfehlung, sondern ein Gegenmittel
+    # gegen Endlos-Wiederholungen (Qwen empfiehlt es fuer quantisierte Modelle) mit
+    # dokumentierter Nebenwirkung: "may occasionally result in language mixing and a
+    # slight decrease in model performance". Darum Default 0.
+    # Messung vom 30.07.2026 (scripts/eval/check_sampling_params_honored.py): Ollama
+    # ignoriert den Parameter ohnehin -- 0.0 und 2.0 liefern bei gleichem Seed
+    # byte-identischen Text (Positivkontrolle mit temperature schlaegt an). Der Wert
+    # bleibt konfigurierbar, damit er bei einem Providerwechsel (z. B. vLLM) bewusst
+    # gesetzt werden kann -- dort wuerde er dann auch wirken.
+    draft_presence_penalty: float = 0.0
+    # Thinking im Schreib-/Briefing-Pass abschalten. ACHTUNG: Ollamas OpenAI-
+    # Endpunkt kennt weder ``chat_template_kwargs.enable_thinking`` noch ``think``
+    # -- beide werden stillschweigend ignoriert. Wirksam ist allein
+    # ``reasoning_effort`` (gemessen am 30.07.2026: 9 statt >5000 Completion-Tokens
+    # fuer denselben Satz). Leerer String = Parameter nicht senden.
+    # Gilt nur fuer lokale Modelle: "none" ist kein Standard-OpenAI-Wert und wuerde
+    # von Cloud-Providern abgelehnt.
+    draft_reasoning_effort: str = "none"
 
     # Semantische Suche (user-facing Dokument-/E-Mail-Index, pgvector).
     # Bewusst GETRENNT vom 0.6B-Agent-Index: staerkeres Modell (Qwen3-Embedding-4B,

@@ -322,3 +322,78 @@ class TestSelectTargetOccurrence:
         created = datetime(2026, 6, 1, 7, 0, tzinfo=timezone.utc)
         target = select("0 8 * * MON", now, None, created)
         assert target.tzinfo is not None
+
+
+# ---------------------------------------------------------------------------
+# _resolve_last_spawn_ts — Persistierter Merker vs. Instanz-Ableitung
+# ---------------------------------------------------------------------------
+
+class TestResolveLastSpawnTs:
+    """Prüft, dass der Spawn-Merker Instanz-Löschungen überlebt.
+
+    Simuliert den Phantom-Bug: Instanz gelöscht → Ableitung fällt zurück,
+    Merker bleibt und verhindert den Respawn der gleichen Okkurrenz.
+    """
+
+    def _fn(self):
+        from app.services.recurring import _resolve_last_spawn_ts
+        return _resolve_last_spawn_ts
+
+    def test_marker_alone(self):
+        """Nur Merker gesetzt → Merker als Tagesende-UTC."""
+        resolve = self._fn()
+        result = resolve(date(2026, 8, 1), None)
+        assert result == datetime.combine(
+            date(2026, 8, 1), datetime.max.time(), tzinfo=timezone.utc
+        )
+
+    def test_instance_alone(self):
+        """Nur Instanz-Ableitung → wird unverändert (aware) zurückgegeben."""
+        resolve = self._fn()
+        latest = datetime.combine(
+            date(2026, 7, 1), datetime.max.time(), tzinfo=timezone.utc
+        )
+        result = resolve(None, latest)
+        assert result == latest
+
+    def test_both_none(self):
+        resolve = self._fn()
+        assert resolve(None, None) is None
+
+    def test_marker_wins_over_older_instance(self):
+        """Merker in der Zukunft der Instanzen verhindert Respawn nach Löschung.
+
+        Phantom-Szenario: Instanz 1.8. gelöscht, letzte verbleibende Instanz
+        ist 1.7., Merker steht auf 1.8. → Merker gewinnt, nächste Okkurrenz
+        wird der 1.9. statt erneut der 1.8.
+        """
+        resolve = self._fn()
+        latest = datetime.combine(
+            date(2026, 7, 1), datetime.max.time(), tzinfo=timezone.utc
+        )
+        result = resolve(date(2026, 8, 1), latest)
+        assert result.date() == date(2026, 8, 1)
+
+        from app.services.recurring import _select_target_occurrence
+        now = datetime(2026, 8, 2, 12, 0, tzinfo=timezone.utc)
+        created = datetime(2026, 5, 20, 11, 0, tzinfo=timezone.utc)
+        target = _select_target_occurrence("0 8 1 * *", now, result, created)
+        assert target.date() == date(2026, 9, 1)
+
+    def test_instance_wins_when_newer(self):
+        """Neuere Instanz ohne aktualisierten Merker (Altbestand) gewinnt."""
+        resolve = self._fn()
+        latest = datetime.combine(
+            date(2026, 8, 1), datetime.max.time(), tzinfo=timezone.utc
+        )
+        result = resolve(date(2026, 7, 1), latest)
+        assert result.date() == date(2026, 8, 1)
+
+    def test_naive_instance_ts_normalized(self):
+        """Timezone-naive Instanz-Timestamps werden auf UTC normalisiert."""
+        resolve = self._fn()
+        latest = datetime.combine(date(2026, 7, 1), datetime.max.time())
+        result = resolve(None, latest)
+        assert result is not None
+        assert result.tzinfo is not None
+        assert result.date() == date(2026, 7, 1)

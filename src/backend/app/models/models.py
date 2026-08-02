@@ -107,6 +107,7 @@ class Task(Base):
     recurrence_rule: Mapped[str | None] = mapped_column(Text)
     recurrence_end_date: Mapped[date | None] = mapped_column(Date)
     recurrence_max_instances: Mapped[int | None] = mapped_column(Integer)
+    recurrence_last_spawn: Mapped[date | None] = mapped_column(Date)
     template_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("tasks.id"))
     email_message_id: Mapped[str | None] = mapped_column(Text)
     email_conversation_id: Mapped[str | None] = mapped_column(Text)

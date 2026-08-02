@@ -3638,24 +3638,33 @@ async def _init_triage_agent():
     return _triage_agent
 
 
-def _draft_sampling_overrides(disable_thinking: bool = True) -> dict:
-    """Prosa-Sampling fuer den Schreib-Pass (Qwen-3.6-Instruct-Empfehlung).
+def _draft_sampling_overrides(disable_thinking: bool = True, *, local: bool = True) -> dict:
+    """Prosa-Sampling fuer den Schreib-Pass (Qwen-3.6-Empfehlung fuer Non-Thinking).
 
     ``temperature``/``top_p``/``presence_penalty`` gehen als Standard-Chat-Parameter,
-    ``top_k`` provider-spezifisch via ``extra_body``. ``enable_thinking=False`` passt
-    zur Instruct-Empfehlung (die Prosa-Params sind fuer den Nicht-Thinking-Modus
-    gedacht) und haelt den Schreib-Pass schnell.
+    ``top_k`` provider-spezifisch via ``extra_body``.
+
+    Thinking wird doppelt abgeschaltet, weil kein Parameter bei allen Providern
+    wirkt: ``chat_template_kwargs.enable_thinking`` versteht vLLM, ``reasoning_effort``
+    versteht Ollama. Ollama ignoriert das erstere stillschweigend -- ohne
+    ``reasoning_effort`` erzeugt der Schreib-Pass mehrere Tausend Reasoning-Tokens
+    fuer eine E-Mail von 150 und kann das Token-Budget komplett aufbrauchen (leere
+    Antwort). ``reasoning_effort="none"`` ist kein Standard-OpenAI-Wert, darum nur
+    fuer lokale Modelle (``local=False`` bei Cloud-Override).
     """
     cfg = get_settings()
     extra: dict = {"top_k": cfg.draft_top_k}
-    if disable_thinking:
-        extra["chat_template_kwargs"] = {"enable_thinking": False}
-    return {
+    out: dict = {
         "temperature": cfg.draft_temperature,
         "top_p": cfg.draft_top_p,
         "presence_penalty": cfg.draft_presence_penalty,
-        "extra_body": extra,
     }
+    if disable_thinking:
+        extra["chat_template_kwargs"] = {"enable_thinking": False}
+        if local and cfg.draft_reasoning_effort:
+            out["reasoning_effort"] = cfg.draft_reasoning_effort
+    out["extra_body"] = extra
+    return out
 
 
 def _run_agent_sync(
@@ -3663,10 +3672,17 @@ def _run_agent_sync(
 ) -> str:
     """Synchroner Agent-Lauf (im Thread). Gibt den finalen Antworttext zurueck.
 
-    ``disable_thinking`` setzt SOTA-korrekt ``extra_body.chat_template_kwargs``;
-    standardmaessig False (Thinking an). ``overrides`` erlaubt vollstaendige
-    ``request_overrides`` (z. B. Prosa-Sampling im Draft-Pass) und hat Vorrang --
-    der Aufrufer ist dann fuer den Thinking-Schalter im ``extra_body`` zustaendig.
+    ``disable_thinking`` setzt ``extra_body.chat_template_kwargs``; standardmaessig
+    False (Thinking an). ``overrides`` erlaubt vollstaendige ``request_overrides``
+    (z. B. Prosa-Sampling im Draft-Pass) und hat Vorrang -- der Aufrufer ist dann
+    fuer den Thinking-Schalter zustaendig.
+
+    Achtung: Der ``chat_template_kwargs``-Fallback hier wirkt nur bei Providern wie
+    vLLM. Ollama ignoriert ihn (siehe ``_draft_sampling_overrides``), das dortige
+    Gegenmittel ``reasoning_effort`` ist hier bewusst nicht gesetzt, weil die
+    Locality des Agenten an dieser Stelle nicht bekannt ist und der Wert "none" von
+    Cloud-Providern abgelehnt wuerde. Aufrufer, die Thinking verlaesslich abschalten
+    muessen, geben ``overrides`` aus ``_draft_sampling_overrides`` mit.
     """
     prev_overrides = getattr(agent, "request_overrides", None)
     req: dict | None = None
@@ -3760,6 +3776,11 @@ def _local_override_request(
     overrides: dict = {"model": resolved}
     if disable_thinking:
         overrides["extra_body"] = {"chat_template_kwargs": {"enable_thinking": False}}
+        # Hier ist das Modell per Definition lokal (oben via _is_local_model geprueft),
+        # darum zusaetzlich der Schalter, den Ollama tatsaechlich auswertet.
+        effort = get_settings().draft_reasoning_effort
+        if effort:
+            overrides["reasoning_effort"] = effort
     return overrides
 
 
@@ -3798,7 +3819,11 @@ async def _process_job(agent, job_id, job_type: str, prompt: str, meta: dict) ->
         logger.info("Job %s: LLM-Override aktiv -> %s", job_id, overrides.get("model"))
 
     if is_briefing_job:
-        prose = _draft_sampling_overrides(True)
+        # Locality am Override-Selektor bestimmen, nicht an ``agent.model``: dort steht
+        # bei lokalen Modellen der aufgeloeste Ollama-Name ohne ``ollama/``-Prefix.
+        prose = _draft_sampling_overrides(
+            True, local=_is_local_model(str(meta.get("llm_override") or ""))
+        )
         if overrides:
             # Modell-Override behalten, Prosa-Sampling ergänzen (extra_body mergen).
             merged_extra = {**prose.get("extra_body", {}), **(overrides.get("extra_body") or {})}

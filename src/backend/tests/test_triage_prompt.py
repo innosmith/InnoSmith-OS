@@ -932,14 +932,18 @@ class TestAbsenceContext:
         ``find_free_slots`` liest den Kalender; Ferien stehen aber in
         ``capacity_time_off`` und nicht zwingend als Termin. Ohne verschobenes Fenster
         haelt Graph die Ferientage fuer frei.
+
+        Das Rueckkehrdatum ist relativ zu heute, weil das Fenster nur nach vorne
+        verschoben wird -- ein festes Datum liesse den Test mit der Zeit ablaufen.
         """
         from app.services.hermes_worker import _build_calendar_draft_step
 
+        rueckkehr = date.today() + timedelta(days=5)
         step = _build_calendar_draft_step(
             "Terminvorschlag Meeting", "Wann hätten Sie Zeit für einen Termin?",
-            available_from=date(2026, 7, 27),
+            available_from=rueckkehr,
         )
-        assert 'start="2026-07-27T08:00:00"' in step
+        assert f'start="{rueckkehr.isoformat()}T08:00:00"' in step
 
     def test_scheduling_step_absent_for_non_scheduling_mail(self):
         from app.services.hermes_worker import _build_calendar_draft_step

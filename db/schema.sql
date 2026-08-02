@@ -80,6 +80,7 @@ CREATE TABLE tasks (
     recurrence_rule TEXT,
     recurrence_end_date DATE,
     recurrence_max_instances INT,
+    recurrence_last_spawn DATE,  -- zuletzt gespawnte Okkurrenz (Scheduler-Merker)
     template_id     UUID REFERENCES tasks(id),
     email_message_id TEXT,
     email_conversation_id TEXT,

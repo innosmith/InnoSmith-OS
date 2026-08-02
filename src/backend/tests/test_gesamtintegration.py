@@ -85,6 +85,8 @@ def test_local_override_adds_thinking_switch():
         {"llm_override": "ollama/qwen3.6:8b"}, "qwen3.6:latest", disable_thinking=True,
     )
     assert ov["extra_body"] == {"chat_template_kwargs": {"enable_thinking": False}}
+    # Ollama wertet nur ``reasoning_effort`` aus -- ohne den Parameter bleibt Thinking an.
+    assert ov["reasoning_effort"] == "none"
 
 
 def test_override_skipped_for_placeholder_cloud_and_same_model():
