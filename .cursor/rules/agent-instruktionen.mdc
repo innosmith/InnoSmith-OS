@@ -1,0 +1,75 @@
+---
+description: Wo Agent-Anweisungen leben (Prompt, Skill, Toolset) und wie sie konsistent bleiben
+globs: "**/*hermes*,**/*prompt*,**/*triage*,**/skills/**/*.md"
+alwaysApply: false
+---
+
+# Agent-Anweisungen: eine Quelle pro Aussage
+
+Ein Agentenlauf wird aus **drei** Quellen gesteuert. Sie widersprechen sich leicht,
+und ein Widerspruch fällt niemandem auf, weil jede Quelle für sich plausibel liest.
+
+| Quelle | Ort | Wirkung |
+|----|----|----|
+| **Toolset** | `hermes_config.py` + `_visible_tools()` im jeweiligen MCP-Server | Hart: was nicht registriert ist, kann nicht aufgerufen werden |
+| **Prompt** | `_build_*_prompt()` in `hermes_worker.py` | Weich: das Modell folgt meistens |
+| **Skill** | `~/.hermes/skills/*/SKILL.md` + `references/*.md` | Weich: das Modell folgt meistens |
+
+## Regel 1 — Struktur schlägt Anweisung
+
+Soll ein Agent etwas **nicht** tun, nimm ihm das Tool weg. Ein Verbot im Prompt ist
+eine Bitte, keine Garantie: Das Modell wägt Prompt gegen Skill ab und entscheidet
+gelegentlich anders, als du denkst.
+
+Beispiel aus der Praxis (03.08.2026): Der Klassifikations-Prompt verbot `create_draft`,
+der Triage-Skill verlangte es. Das Modell folgte dem Skill, erzeugte einen Platzhalter
+(nur Anrede und Grussformel), und dessen blosse Existenz unterdrückte den echten
+Schreib-Pass. Der Entwurf ging so als fertiger Vorschlag in die Freigabe.
+
+## Regel 2 — Widersprüche automatisiert prüfen
+
+Prompt, Skill und Toolset werden an drei verschiedenen Orten gepflegt, teils
+ausserhalb des Repos (`~/.hermes/`). Wo eine Aussage an mehreren Orten steht, gehört
+ein Test dazu, der beide Seiten gemeinsam liest.
+
+Vorbild: `src/backend/tests/test_draft_placeholder.py` liest den ausgerollten Skill
+und prüft ihn gegen das `two_pass_draft`-Flag. Kein Test des LLM-Outputs, sondern ein
+Test der Anweisungs-Konsistenz.
+
+## Regel 3 — Kein Verhalten aus blosser Anwesenheit ableiten
+
+Bedingungen wie «wenn schon ein Entwurf da ist, dann...» setzen voraus, dass das
+Artefakt aus der erwarteten Quelle stammt. Frag stattdessen, **wer** es erzeugt hat.
+Ein Artefakt aus dem falschen Pass ist ein Fehler, kein Ergebnis, und wird verworfen.
+
+## Regel 4 — Eval und Produktion teilen den Prompt
+
+Der Schreib-Auftrag steht in `app/services/draft_prompt.py` und wird von beiden
+Seiten importiert: vom Backend (`_build_draft_prompt`) und vom Offline-Eval
+(`scripts/eval/run_llm_eval.py`). Solange das Eval einen eigenen Prompt pflegt, misst
+es ein System, das so nie läuft, und kann Produktionsprobleme grundsätzlich nicht
+finden. Wer den Auftragstext ändert, ändert beide Seiten gleichzeitig.
+
+## Regel 5 — Ein Regel-Ort pro Sachverhalt
+
+Textheuristiken (Anrede, Schlussformel, Zitat-Abschnitt) leben ausschliesslich in
+`app/services/text_style.py` — bewusst ohne DB- und Framework-Abhängigkeiten, damit
+Backend, Tests und Eval dieselbe Funktion aufrufen statt drei ähnliche Regexe zu
+pflegen. Ebenso: Entwurfs-Anweisungen gehören in den `email-style`-Skill, nicht in
+den `email-triage`-Skill.
+
+## Regel 6 — Deterministische Textkorrektur ist keine Lösung
+
+Schreibfehler des Modells (Eszett statt ss, fehlende Umlaute) werden **gemessen**,
+nicht per String-Replacement repariert. Ein Replacement kaschiert die Ursache und
+macht den nächsten Fehler unsichtbar. Metriken dafür: `swiss_violations()` und
+`draft_placeholder_rate` im Eval-Scoreboard. Ursachen sind bisher immer strukturell
+gewesen — ein fehlender Skill im Kontext oder ein Sampling-Parameter
+(`presence_penalty` 1.5 strich Umlaute weg, Fix in `8dfafc4`).
+
+## Vor jeder Änderung an Prompt oder Skill
+
+1. Widerspricht der neue Text einer anderen Quelle (Prompt / Skill / Toolset)?
+2. Lässt sich die Absicht **strukturell** durchsetzen statt formuliert?
+3. Gibt es einen Test, der den Widerspruch fangen würde?
+4. Braucht das Eval eine Metrik, die den Fehlerfall sichtbar macht?

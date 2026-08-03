@@ -449,8 +449,8 @@ TOOLS = [
 # Chat-Agent eine zweite Registrierung im Modus ``admin`` erhaelt.
 #
 # ``create_draft`` fehlt hier absichtlich: ein Entwurf ist keine Aussenwirkung
-# (der Versand bleibt HITL-pflichtig), und die Triage braucht ihn fuer
-# Antwortvorschlaege.
+# (der Versand bleibt HITL-pflichtig). Es wird stattdessen ueber ``_DRAFT_TOOLS``
+# gesteuert, weil es je nach Betriebsart in eine andere Registrierung gehoert.
 _MUTATING_TOOLS: frozenset[str] = frozenset({
     "set_email_categories",
     "move_email_to_folder",
@@ -459,6 +459,14 @@ _MUTATING_TOOLS: frozenset[str] = frozenset({
     "create_calendar_event",
     "create_planner_task",
 })
+
+# Entwurfs-Tools wandern im Zwei-Pass-Betrieb aus ``safe`` nach ``admin``. Grund:
+# Dort schreibt ausschliesslich der separate Schreib-Pass den Entwurf, waehrend
+# der Klassifikations-Lauf nur einordnet. Blieb ``create_draft`` im
+# Klassifikations-Toolset, konnte dieser einen Platzhalter erzeugen (nur Anrede
+# und Gruss), der den echten Schreib-Pass verdraengte -- der Prompt verbot es
+# zwar, der Skill verlangte es, und das Modell folgte sporadisch dem Skill.
+_DRAFT_TOOLS: frozenset[str] = frozenset({"create_draft"})
 
 
 def _tool_mode() -> str:
@@ -475,13 +483,36 @@ def _tool_mode() -> str:
     return mode if mode in ("safe", "admin", "full") else "full"
 
 
+def _triage_may_draft() -> bool:
+    """Darf der ``safe``-Modus Entwuerfe erstellen? Nur im Einpass-Betrieb.
+
+    Das Backend setzt ``GRAPH_TRIAGE_DRAFT`` aus ``two_pass_draft``. Default ist
+    ``1`` (erlaubt), damit eine Standalone-Nutzung des Servers ohne Backend-Config
+    nicht stillschweigend Funktionalitaet verliert.
+    """
+    raw = (os.environ.get("GRAPH_TRIAGE_DRAFT") or "1").strip().lower()
+    return raw not in ("0", "false", "no")
+
+
+def _admin_tools() -> frozenset[str]:
+    """Tools der ``admin``-Registrierung.
+
+    Im Zwei-Pass-Betrieb kommen die Entwurfs-Tools dazu, damit der Schreib-Pass
+    sie behaelt, waehrend die Triage sie nicht mehr sieht. Die Aufteilung
+    zwischen ``safe`` und ``admin`` bleibt in beiden Betriebsarten disjunkt.
+    """
+    if _triage_may_draft():
+        return _MUTATING_TOOLS
+    return _MUTATING_TOOLS | _DRAFT_TOOLS
+
+
 def _visible_tools() -> list[Tool]:
     """Tool-Liste gemaess Betriebsmodus."""
     mode = _tool_mode()
     if mode == "safe":
-        return [t for t in TOOLS if t.name not in _MUTATING_TOOLS]
+        return [t for t in TOOLS if t.name not in _admin_tools()]
     if mode == "admin":
-        return [t for t in TOOLS if t.name in _MUTATING_TOOLS]
+        return [t for t in TOOLS if t.name in _admin_tools()]
     return TOOLS
 
 

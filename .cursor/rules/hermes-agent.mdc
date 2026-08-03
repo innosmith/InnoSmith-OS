@@ -83,7 +83,8 @@ Anonymisierung (`contentConverter`) ist als spaetere Phase vorgesehen.
 | Name | Quellcode | Zweck | Tool-Prefix |
 |------|-----------|-------|-------------|
 | `taskpilot` | `src/mcp-taskpilot/server.py` | DB (Tasks, Projekte, Boards) | `mcp_taskpilot_*` |
-| `graph` | `src/mcp-graph/server.py` | Microsoft Graph (E-Mail, Kalender, Chat, Files, Planner) | `mcp_graph_*` |
+| `graph` | `src/mcp-graph/server.py` | Microsoft Graph, Modus `safe` (Lese-Tools) | `mcp_graph_*` |
+| `graphAdmin` | `src/mcp-graph/server.py` | Derselbe Server, Modus `admin` (schreibende Tools) | `mcp_graphAdmin_*` |
 | `pipedrive` | `src/mcp-pipedrive/server.py` | Pipedrive CRM | `mcp_pipedrive_*` |
 | `bexio` | `src/mcp-bexio/server.py` | Buchhaltung | `mcp_bexio_*` |
 | `toggl` | `src/mcp-toggl/server.py` | Zeiterfassung | `mcp_toggl_*` |
@@ -104,9 +105,49 @@ bzw. `.env.dev`) vorher in `os.environ`. In Docker: `TP_MCP_BASE_DIR=/app`.
 2. Polling alle 10s nach `status='queued'` Jobs.
 3. Prompt-Bau je Jobtyp: `_build_triage_prompt` / `_build_chat_triage_prompt` / `_build_generic_prompt`.
 4. `run_conversation(prompt, system_message=WORKER_SYSTEM_PROMPT)` via `asyncio.to_thread`.
-5. Post-Processing (`_post_process_triage`): JSON-Block parsen, Task anlegen / Draft zuordnen,
-   Status auf `awaiting_approval` (Drafts) oder `completed`.
+5. Post-Processing (`_post_process_triage`): JSON-Block parsen, Task anlegen, bei
+   `auto_reply` den Schreib-Pass starten, Status auf `awaiting_approval` (Entwurf)
+   oder `completed`.
 6. Wartung: `_reap_stale_jobs` (60s), `_cleanup_orphaned_drafts` (300s).
+
+## Zwei-Pass-Entwurf (`two_pass_draft`, Default an)
+
+Ein E-Mail-Triage-Job besteht aus **zwei** Agentenläufen mit klarer Arbeitsteilung:
+
+| Pass | Prompt | Skill | Aufgabe |
+|----|----|----|----|
+| 1 Klassifikation | `_build_triage_prompt` | `email-triage` | Klasse, Label, `rationale` — **kein Entwurf** |
+| 2 Schreiben | `_build_draft_prompt` | `email-style` | Nur der Entwurf, Prosa-Sampling (`_draft_sampling_overrides`) |
+
+Erzwungen wird die Trennung **strukturell**, nicht per Prompt-Formulierung:
+`GRAPH_TRIAGE_DRAFT=0` verschiebt `create_draft` im Zwei-Pass-Betrieb aus der
+`graph`-Registrierung (die der Triage-Agent nutzt) in `graphAdmin`. Der Triage-Agent
+sieht das Tool schlicht nicht; ein Aufruf wird im MCP-Server abgewiesen.
+
+Konsequenzen für Änderungen:
+
+- Der Schreib-Pass läuft bei `auto_reply` **immer**. Ein bereits vorhandener Entwurf
+  darf ihn nie unterdrücken — er stammt dann aus dem falschen Pass und wird per
+  `_delete_draft` verworfen.
+- `create_draft` heisst je nach Betriebsart anders. Immer `_draft_tool_name()` für den
+  Prompt und `_CREATE_DRAFT_TOOLS` für die Callback-Erkennung nutzen, nie den Namen
+  hart schreiben.
+- Der Schreib-Auftrag steht in `app/services/draft_prompt.py` (gemeinsam mit dem Eval).
+- Fehlt dem Entwurf der Inhalt zwischen Anrede und Schlussformel
+  (`has_content_between_greeting_and_closing`), wird er als `draft_quality=placeholder`
+  markiert und die Confidence gedeckelt — verworfen wird er nicht, der Mensch entscheidet.
+
+## Trace-Budget
+
+`metadata_json['trace']` fasst maximal `_MAX_TRACE_EVENTS` (200) Events. Zwei
+Eigenheiten, die schon einmal zu einem unbrauchbaren Trace geführt haben:
+
+- Reasoning kommt als Delta-Strom, teils Token für Token. `_on_reasoning` **bündelt**
+  aufeinanderfolgende Stücke in ein Event; ohne das war das Budget nach rund
+  200 Denk-Tokens erschöpft und kein einziges Tool-Event mehr sichtbar.
+- `_RESERVED_TOOL_EVENTS` (60) bleibt für Tool-Events reserviert.
+- Der Trace wird **nach** dem Post-Processing eingefroren, sonst fehlt der komplette
+  Schreib-Pass. `_tag_trace_pass()` markiert jedes Event mit `classify` bzw. `draft`.
 
 ## Metadata-Keys für AgentJobs (KRITISCH)
 

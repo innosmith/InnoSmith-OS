@@ -104,14 +104,20 @@ async def test_auto_reply_without_draft_downgrades_to_fyi_no_task():
 
 @pytest.mark.asyncio
 async def test_auto_reply_with_draft_awaits_approval():
-    """auto_reply MIT echtem Entwurf -> awaiting_approval, kein Task."""
+    """auto_reply MIT echtem Entwurf -> awaiting_approval, kein Task.
+
+    Der Entwurf stammt hier aus dem Schreib-Pass. Ein Entwurf, den bereits der
+    Klassifikations-Lauf mitbringt, wird dagegen verworfen -- siehe
+    ``test_two_pass_draft.py``.
+    """
     content = '{"triage_class": "auto_reply", "label": "Wichtig"}'
     job = SimpleNamespace(metadata_json={})
     ctx = _patches(job=job)
-    with ctx[0], ctx[1] as create_task, ctx[2], ctx[3], ctx[4], ctx[5], ctx[6]:
+    with ctx[0], ctx[1] as create_task, ctx[2], ctx[3], ctx[4], ctx[5], ctx[6], \
+            patch.object(hw, "_generate_reply_draft", new=AsyncMock(return_value="DRAFT-1")):
         status = await hw._post_process_triage(
             uuid.uuid4(), content, dict(_META),
-            "DRAFT-1", ["search_sender_history", "get_sender_profile", "search_my_replies"], None,
+            None, ["search_sender_history", "get_sender_profile", "search_my_replies"], None,
         )
     assert status == "awaiting_approval"
     create_task.assert_not_called()

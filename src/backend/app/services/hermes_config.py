@@ -272,12 +272,19 @@ def build_config_dict() -> dict:
         # Der Key ``graph`` bleibt bewusst der eingeschraenkte: so behalten die
         # eingespielten Triage-Prompts, -Skills und die Callback-Hooks in
         # hermes_worker.py ihre Tool-Namen (``mcp_graph_*``).
+        #
+        # ``GRAPH_TRIAGE_DRAFT`` verschiebt ``create_draft`` im Zwei-Pass-Betrieb
+        # von ``graph`` nach ``graphAdmin``: dann kann nur noch der Schreib-Pass
+        # (voller Worker-Agent) Entwuerfe erstellen, nicht mehr der reduzierte
+        # Triage-Agent. Ohne diese Trennung erzeugte der Klassifikations-Lauf
+        # gelegentlich einen Platzhalter-Entwurf, der den Schreib-Pass verdraengte.
         "graph": stdio("mcp-graph", {
             "GRAPH_TENANT_ID": "${TP_GRAPH_TENANT_ID}",
             "GRAPH_CLIENT_ID": "${TP_GRAPH_CLIENT_ID}",
             "GRAPH_CLIENT_SECRET": "${TP_GRAPH_CLIENT_SECRET}",
             "GRAPH_USER_EMAIL": "${TP_GRAPH_USER_EMAIL}",
             "GRAPH_TOOL_MODE": "safe",
+            "GRAPH_TRIAGE_DRAFT": "0" if cfg.two_pass_draft else "1",
         }, extra_pythonpath=f"{base}:{base}/email-graph"),
         "graphAdmin": stdio("mcp-graph", {
             "GRAPH_TENANT_ID": "${TP_GRAPH_TENANT_ID}",
@@ -285,6 +292,7 @@ def build_config_dict() -> dict:
             "GRAPH_CLIENT_SECRET": "${TP_GRAPH_CLIENT_SECRET}",
             "GRAPH_USER_EMAIL": "${TP_GRAPH_USER_EMAIL}",
             "GRAPH_TOOL_MODE": "admin",
+            "GRAPH_TRIAGE_DRAFT": "0" if cfg.two_pass_draft else "1",
         }, extra_pythonpath=f"{base}:{base}/email-graph"),
         "pipedrive": stdio("mcp-pipedrive", {
             "TP_PIPEDRIVE_API_TOKEN": "${TP_PIPEDRIVE_API_TOKEN}",

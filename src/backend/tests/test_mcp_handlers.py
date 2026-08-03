@@ -156,3 +156,43 @@ class TestSearchSenderHistoryHandler:
         assert entry["from"] == "sender@test.ch"
         assert entry["from_name"] == "Sender Name"
         assert "Content" in entry["body_text"]
+
+
+class TestToolVisibility:
+    """Sichtbarkeit von ``create_draft`` je Betriebsart.
+
+    Die Trennung ist die strukturelle Absicherung des Zwei-Pass-Entwurfs: im
+    Zwei-Pass-Betrieb darf der Triage-Agent (Registrierung ``graph``, Modus
+    ``safe``) das Tool nicht sehen, sonst kann er wieder einen Platzhalter-Entwurf
+    erzeugen, der den echten Schreib-Pass verdraengt (Vorfall vom 03.08.2026).
+    In beiden Betriebsarten muessen ``safe`` und ``admin`` disjunkt bleiben.
+    """
+
+    @staticmethod
+    def _names(monkeypatch, mode: str, triage_draft: str) -> set[str]:
+        import server
+
+        monkeypatch.setenv("GRAPH_TOOL_MODE", mode)
+        monkeypatch.setenv("GRAPH_TRIAGE_DRAFT", triage_draft)
+        return {t.name for t in server._visible_tools()}
+
+    def test_two_pass_hides_create_draft_from_triage(self, monkeypatch):
+        assert "create_draft" not in self._names(monkeypatch, "safe", "0")
+        assert "create_draft" in self._names(monkeypatch, "admin", "0")
+
+    def test_single_pass_keeps_create_draft_in_triage(self, monkeypatch):
+        assert "create_draft" in self._names(monkeypatch, "safe", "1")
+        assert "create_draft" not in self._names(monkeypatch, "admin", "1")
+
+    @pytest.mark.parametrize("triage_draft", ["0", "1"])
+    def test_safe_and_admin_stay_disjoint(self, monkeypatch, triage_draft):
+        safe = self._names(monkeypatch, "safe", triage_draft)
+        admin = self._names(monkeypatch, "admin", triage_draft)
+        assert not (safe & admin)
+
+    def test_mutating_tools_never_reach_triage(self, monkeypatch):
+        """Unabhaengig vom Entwurfs-Flag: der Triage-Agent mutiert nie Outlook."""
+        for triage_draft in ("0", "1"):
+            safe = self._names(monkeypatch, "safe", triage_draft)
+            assert not (safe & {"send_email", "set_email_categories",
+                                "move_email_to_folder", "mark_as_read"})

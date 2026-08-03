@@ -61,7 +61,8 @@ from app.services.hermes_config import (
     populate_hermes_env,
     write_hermes_config,
 )
-from app.services.learning import record_episode
+from app.services.draft_prompt import render_draft_task
+from app.services.learning import has_content_between_greeting_and_closing, record_episode
 from app.services.notification import (
     notify_agent_awaiting_approval,
     notify_agent_completed,
@@ -144,6 +145,11 @@ _trajectory_shim_installed = False
 # Trace-Sink fuer den aktuellen Job (Worker verarbeitet sequentiell).
 _job_trace: list[dict] = []
 _MAX_TRACE_EVENTS = 200
+# Vom Budget reserviert: Tool-Events sind fuer die Nachvollziehbarkeit wichtiger
+# als Denk-Text und duerfen von ihm nicht verdraengt werden.
+_RESERVED_TOOL_EVENTS = 60
+# Obergrenze pro gebuendeltem Denk-Event (siehe ``_on_reasoning``).
+_MAX_THINKING_CHARS = 4000
 
 # Echte Outlook-Draft-ID des aktuellen Jobs, deterministisch aus dem
 # create_draft-Tool-Ergebnis erfasst. NIEMALS die vom LLM in den JSON-Block
@@ -164,6 +170,26 @@ _job_moved_message_id: str | None = None
 # Schritt 6-7 und fielen sonst aus dem gekappten Trace -- was self_grade und das
 # Kontext-Gate systematisch verfaelschte. Quelle der Wahrheit fuer tools_used.
 _job_tool_names: set[str] = set()
+
+# ``create_draft`` liegt je nach Betriebsart in einer anderen Graph-Registrierung:
+# im Einpass-Betrieb in ``graph`` (safe), im Zwei-Pass-Betrieb in ``graphAdmin``
+# (siehe ``_DRAFT_TOOLS`` in mcp-graph/server.py). Die Erfassung der Draft-ID
+# akzeptiert deshalb beide Namen -- unabhaengig davon, welche Config gerade laeuft.
+_CREATE_DRAFT_TOOLS: frozenset[str] = frozenset({
+    "mcp_graph_create_draft",
+    "mcp_graphAdmin_create_draft",
+})
+
+
+def _draft_tool_name() -> str:
+    """Tool-Name fuer ``create_draft`` im aktuell konfigurierten Betrieb.
+
+    Wird in den Schreib-Prompt gesetzt, damit das Modell das Tool unter dem
+    Namen anspricht, unter dem es tatsaechlich registriert ist.
+    """
+    if get_settings().two_pass_draft:
+        return "mcp_graphAdmin_create_draft"
+    return "mcp_graph_create_draft"
 
 
 def _get_runtime_lock() -> asyncio.Lock:
@@ -236,13 +262,50 @@ def _thinking_disabled(job_type: str | None, skill: str | None) -> bool:
 # ── Trace-Callbacks (Transparenz) ────────────────────────
 
 def _trace_append(event: dict) -> None:
+    """Haengt ein Trace-Event an, mit reserviertem Budget fuer Tool-Events.
+
+    Denk-Events duerfen nur den vorderen Teil des Budgets belegen. Sonst
+    verdraengen sie die Tool-Events, die fuer die Nachvollziehbarkeit eigentlich
+    entscheidend sind -- welches Tool mit welchem Ergebnis lief.
+    """
+    if event.get("type") == "thinking":
+        if len(_job_trace) >= _MAX_TRACE_EVENTS - _RESERVED_TOOL_EVENTS:
+            return
     if len(_job_trace) < _MAX_TRACE_EVENTS:
         _job_trace.append(event)
 
 
+def _tag_trace_pass(pass_name: str) -> None:
+    """Markiert alle noch unmarkierten Trace-Events mit dem laufenden Pass.
+
+    Ein Triage-Job besteht aus zwei Agenten-Laeufen (Klassifikation und Schreiben).
+    Ohne Markierung ist im Cockpit nicht erkennbar, welcher Lauf welches Tool
+    aufgerufen hat -- und ob der Entwurf ueberhaupt vom Schreib-Pass stammt.
+    """
+    for event in _job_trace:
+        if "pass" not in event:
+            event["pass"] = pass_name
+
+
 def _on_reasoning(text: str) -> None:
-    if text:
-        _trace_append({"type": "thinking", "text": str(text)[:2000]})
+    """Denk-Text in den Trace schreiben, aufeinanderfolgende Stuecke gebuendelt.
+
+    Hermes liefert Reasoning als Stream von Deltas -- teils Token fuer Token. Ein
+    Event pro Delta fuellte das Trace-Limit nach rund 200 Denk-Tokens komplett auf
+    (beobachtet: 'The', ' user', ' wants', ...), sodass spaetere Tool-Events und
+    der gesamte Schreib-Pass nie im Trace landeten. Zusammenhaengender Denk-Text
+    wird deshalb an das letzte Denk-Event angehaengt statt neu angelegt.
+    """
+    if not text:
+        return
+    chunk = str(text)
+    if _job_trace and _job_trace[-1].get("type") == "thinking":
+        last = _job_trace[-1]
+        merged = f"{last.get('text', '')}{chunk}"
+        if len(merged) <= _MAX_THINKING_CHARS:
+            last["text"] = merged
+            return
+    _trace_append({"type": "thinking", "text": chunk[:_MAX_THINKING_CHARS]})
 
 
 def _on_tool_start(tc_id, name, args) -> None:
@@ -385,7 +448,7 @@ def _on_tool_complete(tc_id, name, args, result) -> None:
     # Echte Draft-ID deterministisch aus dem Tool-Ergebnis erfassen (statt aus dem
     # vom LLM abgetippten JSON). Unabhaengig vom 200-Event-Trace-Limit -- so geht
     # die ID auch bei langlaufenden, tool-intensiven Jobs nicht verloren.
-    if str(name) == "mcp_graph_create_draft":
+    if str(name) in _CREATE_DRAFT_TOOLS:
         real_id = _extract_draft_id_from_tool_result(result)
         if real_id:
             _job_created_draft_id = real_id  # last-wins: der zuletzt erzeugte Entwurf zaehlt
@@ -1221,46 +1284,32 @@ async def _build_draft_prompt(meta: dict, parsed: dict | None = None) -> str:
     body_block = body_text or preview or "(kein Textinhalt verfügbar)"
     briefing_block = _build_draft_briefing(parsed)
     today = _today_context_line()
+    draft_tool = _draft_tool_name()
 
     thread_load = (
         f'→ **get_thread("{conversation_id}")** -- vollständiger Verlauf, falls der Kontext unklar ist.\n'
         if conversation_id else ""
     )
 
-    return f"""{style_section}{sender_style_block}{anchors_block}{rules_block}{recall_block}{briefing_block}
----
+    # Der eigentliche Schreib-Auftrag kommt aus ``draft_prompt`` -- dieselbe Quelle,
+    # die auch das Offline-Eval nutzt. Vorher pflegte das Eval eine eigene Fassung
+    # und mass damit ein System, das nie in Produktion lief.
+    task_block = render_draft_task(
+        today=today,
+        email_id=email_id,
+        subject=subject,
+        from_name=from_name,
+        from_addr=from_addr,
+        body_block=body_block,
+        thread_load=thread_load,
+        calendar_step=calendar_step,
+        draft_tool=draft_tool,
+    )
 
-{absence_block}## AUFGABE: ANTWORT-ENTWURF SCHREIBEN
-
-Diese E-Mail wurde als **auto_reply** eingestuft. Schreibe jetzt den bestmöglichen
-Antwort-Entwurf im persönlichen Stil von Anthony Smith. Klassifiziere NICHT neu,
-verschiebe nichts, erstelle keinen Task -- schreibe nur den Entwurf.
-
-**Heute:** {today} (Europe/Zurich)
-**E-Mail Message-ID:** {email_id}
-**Betreff:** {subject}
-**Von:** {from_name} <{from_addr}>
-
-**E-MAIL-INHALT (vollständig, bereinigt -- darauf beziehst du dich):**
-{body_block}
-
-### Vorgehen
-1. Der vollständige E-Mail-Inhalt steht oben. Rufe get_email("{email_id}") nur auf,
-   wenn du wirklich zusätzliche Details brauchst.
-{thread_load}2. Nutze die Stil-Anker oben («SO SCHREIBT ANTHONY») und -- für diesen konkreten
-   Kontakt -- **search_my_replies("{from_addr}")** als Ton-/Register-Kalibrierung
-   (Anrede, Länge, Schlussformel). Orientiere dich daran, **kopiere aber nicht
-   wörtlich** -- schreibe passend zum aktuellen Inhalt neu.
-3. **Spiegle das Register** des Absenders (Du/Sie und Grussform, siehe Schreibstil).
-   Schreibt er «Hallo Anthony», antworte «Hallo [Vorname]», nicht «Lieber/Liebe».
-{calendar_step}4. Formuliere natürlich und flüssig, halte dich an den Self-Review im email-style-Skill.
-5. **create_draft** mit **reply_to_id="{email_id}"** (Antwort im selben Thread,
-   NIE ein neuer Thread). Empfänger NICHT manuell überschreiben -- To + CC der
-   Diskussion werden automatisch übernommen. Das Backend erzwingt die Thread-
-   Zugehörigkeit ohnehin deterministisch.
-
-Gib nach dem create_draft-Aufruf eine kurze Bestätigung aus (kein JSON nötig).
-"""
+    return (
+        f"{style_section}{sender_style_block}{anchors_block}{rules_block}"
+        f"{recall_block}{briefing_block}\n---\n\n{absence_block}{task_block}"
+    )
 
 
 async def _build_chat_triage_prompt(job: AgentJob) -> str:
@@ -2056,6 +2105,30 @@ def _build_draft_briefing(parsed: dict | None) -> str:
         "\n---\n\n## BRIEFING AUS DER KLASSIFIKATION (das soll die Antwort leisten)\n"
         + "\n".join(lines) + "\n"
     )
+
+
+async def _delete_draft(draft_id: str) -> None:
+    """Entfernt einen Entwurf aus Outlook. Best-effort, darf den Job nie stoppen.
+
+    Wird gebraucht, wenn ein Entwurf verworfen wird (etwa ein Platzhalter aus dem
+    Klassifikations-Lauf): ohne Loeschung bliebe er als Geist-Entwurf in Outlook
+    stehen, ohne Bezug zu einem Job und ohne dass ihn jemand vermisst.
+    """
+    client = await _build_graph_client()
+    if client is None:
+        return
+    try:
+        await client.delete_message(draft_id)
+        logger.info("Entwurf verworfen (draft_id=%s)", str(draft_id)[:40])
+    except Exception:  # noqa: BLE001 - best-effort
+        logger.warning(
+            "Entwurf konnte nicht geloescht werden (draft_id=%s)", str(draft_id)[:40]
+        )
+    finally:
+        try:
+            await client.close()
+        except Exception:  # noqa: BLE001
+            pass
 
 
 async def _snapshot_agent_draft(draft_id: str) -> dict | None:
@@ -3037,23 +3110,35 @@ async def _post_process_triage(
         logger.warning("Job %s: draft_id vorhanden aber triage_class=%s, korrigiere zu auto_reply", job_id, triage_class)
         triage_class = "auto_reply"
 
-    # Zwei-Pass-Entwurf: Der Klassifikations-Lauf hat (per Design) keinen Entwurf
-    # erstellt. Sobald auto_reply feststeht, schreibt jetzt ein separater,
+    # Zwei-Pass-Entwurf: Sobald auto_reply feststeht, schreibt ein separater,
     # fokussierter Schreib-Pass den Draft mit Prosa-Sampling. Scheitert er, greift
     # unten der Fail-closed-Pfad. forced_class='task' bleibt unberührt.
-    if (
-        triage_class == "auto_reply"
-        and not draft_id
-        and get_settings().two_pass_draft
-    ):
+    #
+    # Der Schreib-Pass laeuft IMMER -- frueher nur bei fehlender draft_id. Diese
+    # Bedingung war der Kern des Vorfalls vom 03.08.2026: der Klassifikations-Lauf
+    # hatte entgegen dem Prompt einen Platzhalter erstellt (nur Anrede und Gruss),
+    # und dessen blosse Existenz unterdrueckte den echten Schreib-Pass. Ein Entwurf
+    # aus Pass 1 ist per Definition ungewollt und wird verworfen.
+    if triage_class == "auto_reply" and get_settings().two_pass_draft:
+        stale_draft_id = draft_id
         draft_id = await _generate_reply_draft(meta, parsed)
         if draft_id:
             # Tools des Schreib-Passes fürs Kontext-Gate mitzählen (get_email/
             # get_thread/search_my_replies liefen erst jetzt).
             tools_used = sorted(_job_tool_names)
             logger.info("Job %s: Zwei-Pass-Draft erstellt (draft_id=%s)", job_id, draft_id)
+            if stale_draft_id and stale_draft_id != draft_id:
+                logger.warning(
+                    "Job %s: Entwurf aus dem Klassifikations-Lauf verworfen "
+                    "(der Triage-Agent sollte create_draft gar nicht haben)", job_id,
+                )
+                await _delete_draft(stale_draft_id)
         else:
             logger.warning("Job %s: Zwei-Pass-Draft lieferte keinen Entwurf", job_id)
+            # Ohne neuen Entwurf zaehlt ein evtl. vorhandener Pass-1-Entwurf nicht
+            # als Ersatz: er ist die Fehlerquelle, nicht die Rueckfallebene.
+            if stale_draft_id:
+                await _delete_draft(stale_draft_id)
 
     if triage_class == "auto_reply" and not draft_id:
         # Fail-closed (Best Practice): ohne echten Entwurf wird NICHT als Task
@@ -3182,6 +3267,24 @@ async def _post_process_triage(
                     existing_meta["draft_conversation_id"] = snapshot.get("conversation_id")
                     existing_meta["draft_to"] = snapshot.get("to")
                     existing_meta["draft_cc"] = snapshot.get("cc")
+                    # Struktureller Platzhalter-Test: fehlt zwischen Anrede und
+                    # Schlussformel jeder Inhalt, ist der Entwurf wertlos. Der
+                    # Entwurf bleibt trotzdem in der Freigabe (nichts wird still
+                    # verworfen), aber sichtbar markiert und mit gedeckelter
+                    # Confidence -- sonst meldet das Cockpit 0.9 fuer zwei Grusszeilen.
+                    if not has_content_between_greeting_and_closing(
+                        snapshot.get("body_html") or ""
+                    ):
+                        logger.warning(
+                            "Job %s: Entwurf ohne Inhaltsteil (nur Anrede/Gruss)", job_id
+                        )
+                        existing_meta["draft_quality"] = "placeholder"
+                        existing_meta["context_warning"] = (
+                            "Der Entwurf enthält keinen Inhalt zwischen Anrede und "
+                            "Schlussformel -- bitte vor dem Senden prüfen."
+                        )
+                        if confidence is None or confidence > 0.3:
+                            existing_meta["confidence"] = 0.3
                 job.metadata_json = existing_meta
             final_status = "awaiting_approval"
             await notify_agent_awaiting_approval(
@@ -3856,7 +3959,10 @@ async def _process_job(agent, job_id, job_type: str, prompt: str, meta: dict) ->
                 )
                 if retry and _extract_json_block(retry) is not None:
                     content = f"{content}\n\n{retry}"
-            trace = list(_job_trace)
+            # Events des Klassifikations-Laufs markieren, bevor der Schreib-Pass
+            # weiterschreibt -- sonst ist im Cockpit nicht unterscheidbar, welcher
+            # Pass welches Tool aufgerufen hat.
+            _tag_trace_pass("classify")
             # tools_used aus der ungekappten Tool-Namen-Menge (nicht aus dem
             # 200-Event-Trace) -- sonst fehlen spaete Tools wie create_draft/
             # search_my_replies und das Kontext-Gate stuft faelschlich herunter.
@@ -3864,6 +3970,11 @@ async def _process_job(agent, job_id, job_type: str, prompt: str, meta: dict) ->
             status = await _post_process_triage(
                 job_id, content, meta, captured_draft_id, tools_used, captured_moved_id
             )
+            # Trace ERST JETZT einfrieren: der Schreib-Pass laeuft im
+            # Post-Processing und war vorher grundsaetzlich nie im Trace sichtbar --
+            # genau deshalb blieb der Platzhalter-Entwurf so lange unauffindbar.
+            _tag_trace_pass("draft")
+            trace = list(_job_trace)
             # Nach dem Post-Processing neu erfassen: ein evtl. Zwei-Pass-Schreib-Pass
             # hat weitere Tools (get_email/get_thread/search_my_replies/create_draft)
             # aufgerufen -- fuer korrekte Observability/Self-Grade mitzaehlen.

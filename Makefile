@@ -139,6 +139,26 @@ test-all: test test-smoke ## Alle automatisierten Tests (Schicht 1-2 + Contract 
 	.venv/bin/python -m pytest tests/contract/ -v
 	@echo "Alle Tests bestanden."
 
+# ── LLM-Eval ──────────────────────────────────────────────
+# Misst Klassifikation UND Entwurfsqualitaet gegen den Golden Set. Nutzt denselben
+# Schreib-Auftrag wie die Produktion (app.services.draft_prompt) -- fruehere
+# Fassungen pflegten einen eigenen Prompt und massen ein Parallelsystem.
+
+EVAL_MODELS ?= qwen3.5:35b
+EVAL_LIMIT  ?= 60
+
+eval: ## LLM-Eval nur Klassifikation, schnell (EVAL_MODELS=..., EVAL_LIMIT=...)
+	.venv/bin/python scripts/eval/run_llm_eval.py \
+		--models "$(EVAL_MODELS)" \
+		--golden scripts/eval/golden_set.jsonl \
+		--limit $(EVAL_LIMIT) --no-drafts --structured
+
+eval-drafts: ## LLM-Eval inkl. Entwuerfe (Aehnlichkeit, Schweizer Schreibung, Platzhalter-Quote)
+	.venv/bin/python scripts/eval/run_llm_eval.py \
+		--models "$(EVAL_MODELS)" \
+		--golden scripts/eval/golden_set.jsonl \
+		--limit $(EVAL_LIMIT) --draft-sampling
+
 # ── Backup ────────────────────────────────────────────────
 
 SYSTEMD_USER_DIR = $(HOME)/.config/systemd/user

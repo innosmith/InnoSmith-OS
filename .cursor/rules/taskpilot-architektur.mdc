@@ -70,6 +70,10 @@ queued → running → awaiting_approval → completed
 - **completed:** Abgeschlossen (automatisch oder nach Freigabe)
 - **failed:** Fehler oder manuell abgebrochen
 
+Ein E-Mail-Triage-Job umfasst **zwei** Agentenläufe: Klassifikation und — bei
+`auto_reply` — einen separaten Schreib-Pass für den Entwurf. Details und die
+strukturelle Trennung der Toolsets stehen in `hermes-agent.mdc`.
+
 ## SSE-Events (Real-Time)
 
 Endpoint: `GET /api/sse/events`

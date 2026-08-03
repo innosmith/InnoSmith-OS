@@ -25,6 +25,20 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import AgentFeedback, AgentJob
 from app.core.principal import system_principal_id
+# Reine Textanalyse liegt in ``text_style`` (ohne DB-/Framework-Abhaengigkeiten),
+# damit auch das Offline-Eval dieselben Regeln nutzen kann. Re-Export, damit
+# bestehende Importe aus diesem Modul weiterhin funktionieren.
+from app.services.text_style import (  # noqa: F401
+    _ANY_GREETING,
+    _CLOSING,
+    _FORMAL_GREETING,
+    _INFORMAL_GREETING,
+    _QUOTE_MARKERS,
+    extract_salutation_signature,
+    has_content_between_greeting_and_closing,
+    html_to_text,
+    strip_quoted_history,
+)
 from ai9.embeddings import embed_text, to_pgvector
 
 logger = logging.getLogger("taskpilot.learning")
@@ -41,118 +55,9 @@ async def _resolve_principal(db: AsyncSession, user_id: uuid.UUID | str | None):
         return uuid.UUID(user_id) if isinstance(user_id, str) else user_id
     return await system_principal_id(db)
 
-# Marker, ab denen der zitierte Original-Thread beginnt -- alles danach wird beim
-# Diff ignoriert, damit nur die echte inhaltliche/stilistische Aenderung zaehlt.
-_QUOTE_MARKERS = [
-    r"\nvon:\s",
-    r"\nfrom:\s",
-    r"\ngesendet:\s",
-    r"\nsent:\s",
-    r"\nam\s.+\sschrieb",
-    r"\non\s.+\swrote",
-    r"\n-{3,}\s*urspr",
-    r"\n_{5,}",
-]
-
-
-def html_to_text(html: str | None) -> str:
-    """Sehr einfache HTML->Text-Konvertierung fuer den Stil-Diff."""
-    if not html:
-        return ""
-    txt = re.sub(r"(?i)<br\s*/?>", "\n", html)
-    txt = re.sub(r"(?i)</p>", "\n", txt)
-    txt = re.sub(r"<[^>]+>", "", txt)
-    txt = (
-        txt.replace("&nbsp;", " ")
-        .replace("&amp;", "&")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", '"')
-        .replace("&#39;", "'")
-    )
-    txt = re.sub(r"[ \t]+", " ", txt)
-    txt = re.sub(r"\n{3,}", "\n\n", txt)
-    return txt.strip()
-
-
-def strip_quoted_history(text_body: str) -> str:
-    """Entfernt den zitierten Original-Thread (Reply-Anhang) fuer einen sauberen Diff."""
-    lowered = text_body.lower()
-    cut = len(text_body)
-    for marker in _QUOTE_MARKERS:
-        m = re.search(marker, lowered)
-        if m and m.start() < cut:
-            cut = m.start()
-    return text_body[:cut].strip()
-
-
 def _normalize(text_body: str) -> str:
     """Whitespace-normalisierte Form fuer den Gleichheits-Vergleich."""
     return re.sub(r"\s+", " ", text_body or "").strip().lower()
-
-
-# Anrede-Marker: formell -> Sie, informell -> eher Du (feiner via Pronomen bestaetigt).
-_FORMAL_GREETING = re.compile(
-    r"^(sehr geehrte[rs]?|guten (?:tag|morgen|abend)|gr[üu]ezi|dear)\b", re.I
-)
-_INFORMAL_GREETING = re.compile(
-    r"^(hallo|hoi|hi|hey|liebe[rs]?|salut|servus|hoi zäme|hoi zäme)\b", re.I
-)
-_ANY_GREETING = re.compile(
-    r"^(sehr geehrte[rs]?|guten (?:tag|morgen|abend)|gr[üu]ezi|dear|hallo|hoi|hi|"
-    r"hey|liebe[rs]?|salut|servus)\b",
-    re.I,
-)
-# Schlussformeln (Phrase, ohne Namenszeile).
-_CLOSING = re.compile(
-    r"^(lg\b|liebe gr[üu]sse|freundliche gr[üu]sse|beste gr[üu]sse|herzliche gr[üu]sse|"
-    r"viele gr[üu]sse|sonnige gr[üu]sse|gr[üu]sse\b|gruss\b|mit freundlichen gr[üu]ssen|"
-    r"besten dank und gr[üu]sse|best regards|kind regards|warm regards|cheers|"
-    r"thanks and regards|thank you)\b",
-    re.I,
-)
-
-
-def extract_salutation_signature(text_body: str) -> dict:
-    """Leitet Anrede, Register (Du/Sie) und Schlussformel aus einer echten Antwort ab.
-
-    Rein und damit testbar. Nutzt bewusst nur robuste Muster (Zeilenanfang), damit
-    keine Halluzination entsteht -- fehlt ein Signal, bleibt der Schluessel aussen vor.
-    Returns z. B. ``{"greeting": "Hallo Peter", "register": "du", "closing": "LG"}``.
-    """
-    clean = strip_quoted_history(html_to_text(text_body)) or html_to_text(text_body)
-    lines = [ln.strip() for ln in clean.splitlines() if ln.strip()]
-    result: dict[str, str] = {}
-    if not lines:
-        return result
-
-    # Anrede: erste passende Zeile in den ersten drei Zeilen.
-    greeting_line = None
-    for ln in lines[:3]:
-        if _ANY_GREETING.match(ln):
-            greeting_line = ln.rstrip(",").strip()
-            break
-    if greeting_line:
-        result["greeting"] = greeting_line[:80]
-
-    # Register: primaer aus der Anrede, sonst aus Pronomen-Haeufigkeit.
-    lowered = clean.lower()
-    if greeting_line and _FORMAL_GREETING.match(greeting_line):
-        result["register"] = "sie"
-    elif greeting_line and _INFORMAL_GREETING.match(greeting_line) and not greeting_line.lower().startswith(("liebe", "lieber")):
-        result["register"] = "du"
-    else:
-        du = len(re.findall(r"\b(du|dich|dir|dein[e]?[nmrs]?)\b", lowered))
-        sie = len(re.findall(r"\b(ihnen|ihre[nmrs]?)\b", lowered))
-        if du or sie:
-            result["register"] = "du" if du >= sie else "sie"
-
-    # Schlussformel: letzte passende Zeile in den letzten sechs Zeilen.
-    for ln in reversed(lines[-6:]):
-        if _CLOSING.match(ln):
-            result["closing"] = ln.rstrip(",").strip()[:60]
-            break
-    return result
 
 
 async def update_learned_tone(

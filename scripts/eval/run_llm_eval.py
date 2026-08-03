@@ -12,6 +12,13 @@ pro Modell:
 3. **Schweizer Rechtschreibung** -- keine ``ß``, keine ``ae/oe/ue``-Ersatzformen.
 4. **Draft-Aehnlichkeit** -- wie nah ist der generierte Entwurf an der real
    versendeten Antwort (nur fuer Datensaetze mit ``gold_reply_html``)?
+5. **Platzhalter-Quote** -- Anteil der Entwuerfe ohne Inhalt zwischen Anrede und
+   Schlussformel. Genau dieser Fall ging am 03.08.2026 als fertiger Vorschlag in
+   die Freigabe, ohne dass irgendeine Messung ihn sichtbar gemacht haette.
+
+Der Schreib-Auftrag stammt aus ``app.services.draft_prompt`` -- derselben Quelle,
+die das Backend im Produktiv-Schreib-Pass verwendet. Fruehere Fassungen pflegten
+hier einen eigenen, kuerzeren Prompt und massen damit ein System, das so nie lief.
 
 Nur Standardbibliothek (urllib/difflib/json) -- keine zusaetzlichen Dependencies.
 
@@ -28,10 +35,23 @@ import ast
 import csv
 import json
 import re
+import sys
 import time
 import urllib.request
 from datetime import datetime
 from pathlib import Path
+
+# Produktions-Bausteine importieren statt nachbauen: der Schreib-Auftrag und die
+# Platzhalter-Erkennung muessen mit dem Backend identisch sein, sonst misst das
+# Eval wieder ein Parallelsystem.
+_BACKEND = Path(__file__).resolve().parents[2] / "src" / "backend"
+if str(_BACKEND) not in sys.path:
+    sys.path.insert(0, str(_BACKEND))
+
+from app.services.draft_prompt import render_draft_task  # noqa: E402
+from app.services.text_style import (  # noqa: E402
+    has_content_between_greeting_and_closing,
+)
 
 VALID_CLASSES = {"auto_reply", "task", "fyi"}
 
@@ -155,16 +175,37 @@ TRIAGE_INSTRUCTION = (
     "triage_class, label, reply_expected (true/false), confidence (0..1), rationale."
 )
 
-DRAFT_INSTRUCTION = (
-    "Du schreibst im Namen von Anthony Smith (InnoSmith GmbH, Schweiz) einen kurzen "
-    "Antwort-Entwurf auf die folgende E-Mail.\n"
+# Das Eval hat weder MCP-Tools noch Skills. Der Systemteil ersetzt nur das, was in
+# Produktion aus dem email-style-Skill kommt; der eigentliche AUFTRAG stammt aus
+# ``render_draft_task`` -- identisch mit dem Produktiv-Schreib-Pass.
+DRAFT_SYSTEM = (
+    "Du schreibst im Namen von Anthony Smith (InnoSmith GmbH, Schweiz) "
+    "Antwort-Entwuerfe auf eingehende E-Mails.\n"
     "Sprache: Schweizer Hochdeutsch. Verbindlich 'ss' statt 'ß' und 'ä/ö/ü' statt "
     "'ae/oe/ue'. Ton: freundlich, klar, direkt, nicht forsch. Spiegle das Register "
     "des Absenders (Du/Sie und Grussform: 'Hallo' -> 'Hallo', nicht automatisch "
     "'Lieber/Liebe'); Anrede passend zum Geschlecht. Schreibe natuerlich und "
     "fluessig, kurz und konkret, keine KI-Floskeln.\n"
-    "Gib NUR den Antworttext aus (keine Erklaerung)."
+    "Du hast in diesem Lauf KEINE Tools. Gib statt eines Tool-Aufrufs den fertigen "
+    "Antworttext direkt aus (keine Erklaerung, kein JSON)."
 )
+
+
+def build_draft_user_prompt(ex: dict) -> str:
+    """Baut den Schreib-Auftrag aus dem Produktions-Template.
+
+    Die dynamischen Kontextbloecke der Produktion (Stil-Anker, Absenderprofil,
+    Abwesenheiten) fehlen hier notwendigerweise -- sie stammen aus der Datenbank.
+    Der Auftragstext selbst ist aber Wort fuer Wort derselbe.
+    """
+    return render_draft_task(
+        today=datetime.now().strftime("%A, %d.%m.%Y"),
+        email_id=ex.get("email_message_id") or "EVAL",
+        subject=ex.get("subject") or "",
+        from_name=ex.get("from_name") or "",
+        from_addr=ex.get("from_address") or "",
+        body_block=(ex.get("body_preview") or "")[:2000],
+    )
 
 
 def build_email_block(ex: dict) -> str:
@@ -238,10 +279,11 @@ def eval_model(base_url: str, model: str, examples: list[dict], do_drafts: bool,
 
     triage_fmt = TRIAGE_FORMAT_SCHEMA if structured else None
     think_flag = False if no_think else None
-    # Prosa-Sampling fuer den Draft-Pass (Qwen-3.6-Instruct-Empfehlung) -- spiegelt
-    # config.draft_* / _draft_sampling_overrides aus dem Prod-Zwei-Pass-Schreiber.
+    # Prosa-Sampling fuer den Draft-Pass -- spiegelt die Defaults aus
+    # ``config.draft_*``. presence_penalty steht auf 0.0: 1.5 hatte dem Modell
+    # Umlaute weggestrichen ("fr" statt "für"), siehe Commit 8dfafc4.
     draft_opts = (
-        {"temperature": 0.7, "top_p": 0.8, "top_k": 20, "presence_penalty": 1.5}
+        {"temperature": 0.7, "top_p": 0.8, "top_k": 20, "presence_penalty": 0.0}
         if draft_sampling else None
     )
 
@@ -252,6 +294,7 @@ def eval_model(base_url: str, model: str, examples: list[dict], do_drafts: bool,
     latencies: list[float] = []
     draft_sims: list[float] = []
     draft_swiss_viol = 0
+    draft_placeholders = 0
     draft_n = 0
     errors = 0
     gold_total: dict[str, int] = defaultdict(int)
@@ -286,7 +329,8 @@ def eval_model(base_url: str, model: str, examples: list[dict], do_drafts: bool,
         # 2) Draft (nur wenn Referenz-Antwort vorhanden)
         if do_drafts and ex.get("gold_reply_html"):
             try:
-                draft_raw, _ = ollama_chat(base_url, model, DRAFT_INSTRUCTION, email, timeout,
+                draft_raw, _ = ollama_chat(base_url, model, DRAFT_SYSTEM,
+                                           build_draft_user_prompt(ex), timeout,
                                            think=think_flag, options=draft_opts)
             except Exception:  # noqa: BLE001
                 continue
@@ -296,6 +340,8 @@ def eval_model(base_url: str, model: str, examples: list[dict], do_drafts: bool,
             sim = difflib.SequenceMatcher(None, draft.lower(), gold.lower()).ratio()
             draft_sims.append(sim)
             draft_swiss_viol += swiss_violations(draft)
+            if not has_content_between_greeting_and_closing(draft):
+                draft_placeholders += 1
             draft_n += 1
 
     # Balanced Accuracy: Mittel der Per-Klasse-Trefferquoten -- robust gegen die
@@ -320,6 +366,10 @@ def eval_model(base_url: str, model: str, examples: list[dict], do_drafts: bool,
         "draft_n": draft_n,
         "avg_draft_similarity": round(sum(draft_sims) / len(draft_sims), 3) if draft_sims else None,
         "draft_swiss_viol_per_mail": round(draft_swiss_viol / draft_n, 2) if draft_n else None,
+        # Anteil Entwuerfe ohne Inhalt zwischen Anrede und Schlussformel. Muss 0
+        # sein -- jeder Wert darueber bedeutet, dass ein Modell leere Huellen
+        # produziert, die im Cockpit wie fertige Vorschlaege aussehen.
+        "draft_placeholder_rate": round(draft_placeholders / draft_n, 3) if draft_n else None,
     }
 
 
@@ -332,7 +382,7 @@ def write_scoreboard(results: list[dict], out_dir: Path) -> None:
     fields = ["model", "n", "errors", "contract_rate", "class_accuracy",
               "balanced_accuracy", "per_class_accuracy", "swiss_viol_per_mail",
               "avg_latency_s", "draft_n", "avg_draft_similarity",
-              "draft_swiss_viol_per_mail"]
+              "draft_swiss_viol_per_mail", "draft_placeholder_rate"]
     with csv_path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fields)
         writer.writeheader()
@@ -346,17 +396,19 @@ def write_scoreboard(results: list[dict], out_dir: Path) -> None:
         "",
         "Sortiert nach Contract-Compliance, dann Balanced Accuracy.",
         "`balanced_accuracy` = Mittel der Per-Klasse-Trefferquoten (robust gegen die fyi-Schieflage).",
+        "`draft_placeholder` = Anteil Entwuerfe ohne Inhalt zwischen Anrede und Schlussformel; Sollwert 0.",
         "",
-        "| Modell | n | Contract | Acc | Balanced-Acc | Per-Klasse (fyi/task/auto_reply) | Swiss/Mail | Draft-Sim | Draft-Swiss/Mail | Latenz (s) |",
-        "|--------|---|----------|-----|--------------|----------------------------------|-----------|-----------|------------------|------------|",
+        "| Modell | n | Contract | Acc | Balanced-Acc | Per-Klasse (fyi/task/auto_reply) | Swiss/Mail | Draft-Sim | Draft-Swiss/Mail | Platzhalter | Latenz (s) |",
+        "|--------|---|----------|-----|--------------|----------------------------------|-----------|-----------|------------------|-------------|------------|",
     ]
     for r in ranked:
         sim = "-" if r["avg_draft_similarity"] is None else f"{r['avg_draft_similarity']:.3f}"
         dsv = "-" if r["draft_swiss_viol_per_mail"] is None else f"{r['draft_swiss_viol_per_mail']:.2f}"
+        ph = "-" if r.get("draft_placeholder_rate") is None else f"{r['draft_placeholder_rate']:.3f}"
         lines.append(
             f"| {r['model']} | {r['n']} | {r['contract_rate']:.3f} | {r['class_accuracy']:.3f} "
             f"| {r['balanced_accuracy']:.3f} | {r['per_class_accuracy']} | {r['swiss_viol_per_mail']:.2f} "
-            f"| {sim} | {dsv} | {r['avg_latency_s']:.1f} |"
+            f"| {sim} | {dsv} | {ph} | {r['avg_latency_s']:.1f} |"
         )
     md_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     print(f"\nScoreboard: {md_path}\n           {csv_path}")

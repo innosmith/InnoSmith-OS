@@ -56,6 +56,29 @@ Tests in `src/backend/tests/`. Ausfuehrung: `make test` oder `cd src/backend && 
 - Prompt-Strings pruefen, nicht LLM-Output
 - LLM-Aufrufe mocken oder ueberspringen
 
+### Anweisungs-Konsistenz pruefen
+Agent-Verhalten entsteht aus Prompt (Code), Skill (`~/.hermes/skills/`) und Toolset
+(MCP-Registrierung). Widersprechen sich zwei davon, entscheidet das Modell — und der
+Widerspruch faellt keinem Unit-Test auf, weil jede Seite fuer sich korrekt ist.
+
+Steht eine Aussage an mehreren Orten, gehoert ein Test dazu, der **beide gemeinsam**
+liest. Vorbild: `test_draft_placeholder.py::test_triage_skill_does_not_instruct_drafting`
+prueft den ausgerollten Skill gegen das `two_pass_draft`-Flag. Solche Tests
+`skip`en, wenn der Skill lokal nicht ausgerollt ist — nie fehlschlagen lassen.
+
+### Regressionstests brauchen den Vorfall im Docstring
+Bei einem Test, der einen konkreten Produktionsfehler absichert, gehoert die
+Fehlerursache in den Docstring (was passierte, warum es unentdeckt blieb). Sonst
+liest der naechste ihn als ueberfluessige Bedingung und entfernt sie wieder — genau
+so wurde `test_two_pass_skipped_when_draft_already_present` zum Schutzschild fuer
+einen Bug statt gegen ihn.
+
+### Eval statt Unit-Test fuer Ausgabequalitaet
+Textqualitaet (Schweizer Schreibung, Platzhalter-Entwuerfe, Stiltreue) wird im
+Golden-Set-Eval gemessen (`make eval-drafts`), nicht in pytest. Das Eval nutzt
+denselben Prompt wie die Produktion (`app/services/draft_prompt.py`) — ein eigener
+Eval-Prompt misst ein System, das so nie laeuft.
+
 ### Wann Tests schreiben
 - Router mit Geschaeftslogik (Auth, RBAC, Member-Restriktionen, Positionen)
 - Services mit nicht-trivialer Logik (Path-Traversal, Cron, Job-Lifecycle)

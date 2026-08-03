@@ -10,9 +10,15 @@ alwaysApply: false
 
 | Klasse | Aktion | HITL | Wann? |
 |--------|--------|------|-------|
-| `auto_reply` | Draft erstellen, Mensch gibt frei | L1 | NUR wenn alle 5 Schwellen-Bedingungen erfüllt |
+| `auto_reply` | Schreib-Pass erstellt den Entwurf, Mensch gibt frei | L1 | NUR wenn alle 5 Schwellen-Bedingungen erfüllt |
 | `task` | Task erstellen mit Kontext-Briefing | L1 | Alles was Arbeit erfordert (Antwort, Aktion oder beides) |
 | `fyi` | Archivieren, zur Kenntnis | L2 | Kein Handlungsbedarf |
+
+**Der Klassifikations-Lauf schreibt keine Entwürfe.** Das erledigt ein separater
+Schreib-Pass (`two_pass_draft`, siehe `hermes-agent.mdc`); `create_draft` steht dem
+Triage-Agenten gar nicht zur Verfügung. Der Beitrag der Triage zum Entwurf ist das
+`rationale` — es ist das Briefing des Schreib-Passes und sollte beschreiben, *was
+die Antwort leisten soll*, nicht nur warum die Klasse gewählt wurde.
 
 ### auto_reply-Schwelle (alle 5 müssen zutreffen)
 1. Information vollständig im Kontext vorhanden

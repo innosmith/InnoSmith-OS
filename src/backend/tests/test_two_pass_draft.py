@@ -197,20 +197,49 @@ async def test_two_pass_draft_failure_falls_back_to_fyi_no_task():
 
 
 @pytest.mark.asyncio
-async def test_two_pass_skipped_when_draft_already_present():
-    """Liegt bereits ein Entwurf vor (Einpass/Modell hat gedraftet), kein zweiter Pass."""
+async def test_two_pass_replaces_stub_draft_from_classification_pass():
+    """Ein Entwurf aus Pass 1 darf den Schreib-Pass NICHT unterdruecken.
+
+    Regression zum Vorfall vom 03.08.2026: Der Klassifikations-Lauf hatte entgegen
+    dem Prompt einen Platzhalter erstellt (nur Anrede und Gruss). Weil damals nur
+    bei fehlender draft_id geschrieben wurde, ging der Platzhalter als fertiger
+    Antwortvorschlag in die Freigabe. Jetzt gilt: der Schreib-Pass laeuft immer,
+    und der Entwurf aus Pass 1 wird verworfen.
+    """
     content = '{"triage_class": "auto_reply", "label": "Wichtig"}'
     job = SimpleNamespace(metadata_json={})
     ctx = _postprocess_patches(job=job, two_pass=True)
-    gen = AsyncMock(return_value="SHOULD-NOT-BE-USED")
+    gen = AsyncMock(return_value="DRAFT-NEU")
+    delete = AsyncMock()
     with ctx[0], ctx[1], ctx[2], ctx[3], ctx[4], ctx[5], ctx[6], ctx[7], \
-            patch.object(hw, "_generate_reply_draft", gen):
+            patch.object(hw, "_generate_reply_draft", gen), \
+            patch.object(hw, "_delete_draft", delete):
         status = await hw._post_process_triage(
-            uuid.uuid4(), content, dict(_META), "DRAFT-EXIST",
+            uuid.uuid4(), content, dict(_META), "DRAFT-STUB",
             ["search_my_replies", "search_sender_history", "get_sender_profile"], None,
         )
-    gen.assert_not_awaited()
+    gen.assert_awaited_once()
+    delete.assert_awaited_once_with("DRAFT-STUB")
+    assert job.metadata_json["draft_id"] == "DRAFT-NEU"
     assert status == "awaiting_approval"
+
+
+@pytest.mark.asyncio
+async def test_stub_draft_discarded_when_write_pass_fails():
+    """Scheitert der Schreib-Pass, ist der Pass-1-Entwurf keine Rueckfallebene."""
+    content = '{"triage_class": "auto_reply", "label": "Wichtig"}'
+    ctx = _postprocess_patches(two_pass=True)
+    gen = AsyncMock(return_value=None)
+    delete = AsyncMock()
+    with ctx[0], ctx[1] as create_task, ctx[2], ctx[3], ctx[4], ctx[5], ctx[6], ctx[7], \
+            patch.object(hw, "_generate_reply_draft", gen), \
+            patch.object(hw, "_delete_draft", delete):
+        status = await hw._post_process_triage(
+            uuid.uuid4(), content, dict(_META), "DRAFT-STUB", [], None,
+        )
+    delete.assert_awaited_once_with("DRAFT-STUB")
+    create_task.assert_not_called()
+    assert status == "completed"
 
 
 # ── _build_draft_prompt ──────────────────────────────────────────────────────
@@ -243,6 +272,8 @@ async def test_build_draft_prompt_forces_reply_to_id_and_calibration():
     # Voller Body ist eingebettet, Datum-Kontext vorhanden.
     assert "Voller Mailtext." in prompt
     assert "Heute:" in prompt
+    # Eine blosse Grussformel ist ausdruecklich kein Entwurf.
+    assert "Inhaltsteil zwischen Anrede und Schlussformel" in prompt
 
 
 @pytest.mark.asyncio
