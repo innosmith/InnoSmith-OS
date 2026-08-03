@@ -296,9 +296,11 @@ def _trace_append(event: dict) -> None:
 def _tag_trace_pass(pass_name: str) -> None:
     """Markiert alle noch unmarkierten Trace-Events mit dem laufenden Pass.
 
-    Ein Triage-Job besteht aus zwei Agenten-Laeufen (Klassifikation und Schreiben).
-    Ohne Markierung ist im Cockpit nicht erkennbar, welcher Lauf welches Tool
-    aufgerufen hat -- und ob der Entwurf ueberhaupt vom Schreib-Pass stammt.
+    Ein Triage-Job besteht aus mehreren Agenten-Laeufen (Klassifikation, Sammeln,
+    Schreiben). Ohne Markierung ist im Cockpit nicht erkennbar, welcher Lauf welches
+    Tool aufgerufen hat -- und ob der Entwurf ueberhaupt vom Schreib-Pass stammt.
+    Der Aufruf erfolgt jeweils direkt nach einem Lauf, solange dessen Events die
+    einzigen unmarkierten sind.
     """
     for event in _job_trace:
         if "pass" not in event:
@@ -4099,6 +4101,7 @@ async def _generate_reply_draft(meta: dict, parsed: dict | None = None) -> str |
     researched = cfg.draft_context_research and need == "substance"
     if researched:
         dossier = await _gather_draft_context(meta, parsed)
+        _tag_trace_pass("gather")
     else:
         logger.info("Kontext-Recherche übersprungen (context_need=%s)", need)
 

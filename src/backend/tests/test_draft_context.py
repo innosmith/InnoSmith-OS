@@ -299,6 +299,37 @@ async def test_generate_reply_draft_gathers_before_writing():
 
 
 @pytest.mark.asyncio
+async def test_gather_events_are_tagged_before_the_writing_pass_starts():
+    """Recherche- und Schreib-Events muessen im Trace unterscheidbar bleiben.
+
+    ``_tag_trace_pass`` markiert alles noch Unmarkierte. Wird der Sammel-Lauf nicht
+    unmittelbar danach markiert, faellt er im Cockpit unter «Entwurf» -- und die
+    Frage «worauf stuetzt sich der Text?» ist wieder nur aus der Quellenliste zu
+    beantworten, nicht aus dem Ablauf.
+    """
+    hw._job_trace.clear()
+    hw._job_trace.append({"type": "tool_start", "name": "klassifikation", "pass": "classify"})
+
+    async def gather(*_a, **_kw):
+        hw._job_trace.append({"type": "tool_start", "name": "semantic_search_documents"})
+        return "**Sachstand:** X"
+
+    meta = {"email_message_id": "M1", "subject": "Rückfrage Testreport", "from_address": "f@sb.ch"}
+    with (
+        patch.object(hw, "get_settings", lambda: _settings()),
+        patch.object(hw, "_agent", object()),
+        patch.object(hw, "_gather_draft_context", gather),
+        patch.object(hw, "_build_draft_prompt", AsyncMock(return_value="PROMPT")),
+        patch.object(hw, "asyncio", _writing_agent()),
+    ):
+        await hw._generate_reply_draft(meta, None)
+
+    passes = [e.get("pass") for e in hw._job_trace]
+    assert passes == ["classify", "gather"]
+    hw._job_trace.clear()
+
+
+@pytest.mark.asyncio
 async def test_generate_reply_draft_skips_gathering_for_scheduling_mail():
     """Terminanfragen laufen wie bisher -- ohne Recherche und ohne Verzoegerung."""
     meta = {

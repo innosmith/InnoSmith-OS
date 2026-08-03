@@ -702,10 +702,14 @@ async def get_agent_job_trace(
     steps: list[dict] = []
     for ev in trace:
         etype = ev.get("type")
+        # Der Pass ordnet das Event einem der Laeufe zu (classify/gather/draft).
+        # Ohne ihn steht im Cockpit eine flache Event-Liste, in der die Recherche
+        # nicht vom Schreiben zu unterscheiden ist.
+        step_pass = ev.get("pass")
         if etype == "thinking":
-            steps.append({"type": "reasoning", "text": str(ev.get("text", ""))[:1000]})
+            steps.append({"type": "reasoning", "text": str(ev.get("text", ""))[:1000], "pass": step_pass})
         elif etype == "tool_start":
-            steps.append({"type": "tool_call", "tool": ev.get("name", "?")})
+            steps.append({"type": "tool_call", "tool": ev.get("name", "?"), "pass": step_pass})
         elif etype == "tool_complete":
             preview = str(ev.get("result", ""))
             is_error = "Fehler" in preview[:80] or "Error" in preview[:80]
@@ -715,6 +719,7 @@ async def get_agent_job_trace(
                 "chars": len(preview),
                 "is_error": is_error,
                 "preview": preview[:300],
+                "pass": step_pass,
             })
 
     if job.output:
