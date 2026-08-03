@@ -7,6 +7,7 @@ import { EmailThreadPanel } from '../EmailThreadPanel';
 import { CrmBadge } from '../CrmBadge';
 import { AgentRationale } from './AgentRationale';
 import { ConfidenceBadge } from './ConfidenceBadge';
+import { ContextSources, type ContextSource } from './ContextSources';
 import { IntentPreview } from './IntentPreview';
 
 /**
@@ -67,6 +68,7 @@ export function ApprovalCard({
   const fromName = (meta.from_name as string) || '';
   const sourceSubject = (meta.subject as string) || '';
   const metaConvId = (meta.conversation_id as string) || '';
+  const contextSources = (meta.context_sources as ContextSource[] | undefined) || null;
 
   const loadPreview = useCallback(() => {
     setLoadingPreview(true);
@@ -174,6 +176,10 @@ export function ApprovalCard({
           {preview.body_preview}
         </div>
       )}
+
+      {/* Herkunft des Fachkontexts — die Kundeneingrenzung passiert hier, beim
+          Lesen, nicht als harter Suchfilter (der kostet Recall). */}
+      <ContextSources sources={contextSources} glassBg={glassBg} />
 
       {!preview && failed && output && (
         <div className={`rounded-lg border p-3 ${glassBg ? 'border-white/20 bg-white/5' : 'border-gray-200 bg-gray-50 dark:border-gray-700 dark:bg-gray-800'}`}>

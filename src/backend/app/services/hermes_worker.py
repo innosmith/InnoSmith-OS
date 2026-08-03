@@ -61,7 +61,11 @@ from app.services.hermes_config import (
     populate_hermes_env,
     write_hermes_config,
 )
-from app.services.draft_prompt import render_draft_task
+from app.services.draft_prompt import (
+    render_dossier_block,
+    render_draft_task,
+    render_gather_task,
+)
 from app.services.learning import has_content_between_greeting_and_closing, record_episode
 from app.services.notification import (
     notify_agent_awaiting_approval,
@@ -179,6 +183,20 @@ _CREATE_DRAFT_TOOLS: frozenset[str] = frozenset({
     "mcp_graph_create_draft",
     "mcp_graphAdmin_create_draft",
 })
+
+# Recherche-Tools, deren Treffer als Quellen-Nachweis erfasst werden. Grundlage der
+# Provenance: bei der Freigabe soll sichtbar sein, WORAUF sich ein Entwurf stuetzt --
+# insbesondere, ob Material eines anderen Kunden eingeflossen ist. Die
+# Kundeneingrenzung passiert bewusst nicht als harter Suchfilter (das kostet Recall),
+# sondern durch Sichtbarkeit im HITL-Review.
+_CONTEXT_SEARCH_TOOLS: frozenset[str] = frozenset({
+    "mcp_taskpilot_semantic_search_documents",
+    "mcp_graph_search_files",
+    "mcp_graph_search_emails",
+})
+
+# Im aktuellen Job recherchierte Quellen (Titel/Typ/Absender/Datum), dedupliziert.
+_job_context_sources: list[dict] = []
 
 
 def _draft_tool_name() -> str:
@@ -439,12 +457,85 @@ def _extract_new_id_from_move_result(result) -> str | None:
     return m.group(1) if m else None
 
 
+def _collect_context_sources(result, limit: int) -> None:
+    """Erfasst die Treffer eines Recherche-Tools als Quellen-Nachweis.
+
+    Das Ergebnis ist mehrfach verschachtelt (Hermes wrappt das MCP-Ergebnis, dessen
+    Text wiederum JSON enthaelt), darum dieselbe rekursive Suche wie bei der
+    Draft-ID. Erfasst wird bewusst nur Metadatum, kein Volltext: Titel, Quelle,
+    Absender und Datum genuegen, damit bei der Freigabe erkennbar ist, worauf sich
+    der Entwurf stuetzt. Best-effort -- ein Parse-Fehler darf den Job nie stoppen.
+    """
+    items = _find_result_items(result)
+    if not items:
+        return
+    seen = {(s.get("source_type"), s.get("title")) for s in _job_context_sources}
+    for item in items:
+        if len(_job_context_sources) >= limit:
+            return
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("title") or item.get("subject") or item.get("name") or "").strip()
+        if not title:
+            continue
+        entry = {
+            "title": title[:160],
+            "source_type": str(item.get("source_type") or item.get("type") or "unbekannt"),
+        }
+        for key, target in (("from", "from"), ("sender", "from"), ("date", "date"),
+                            ("received", "date"), ("url", "url")):
+            value = item.get(key)
+            if value and target not in entry:
+                entry[target] = str(value)[:200]
+        key = (entry["source_type"], entry["title"])
+        if key in seen:
+            continue
+        seen.add(key)
+        _job_context_sources.append(entry)
+
+
+def _find_result_items(obj, depth: int = 0) -> list:
+    """Sucht rekursiv die Trefferliste (``results``/``items``) in einem Tool-Ergebnis."""
+    if depth > 6:
+        return []
+    if isinstance(obj, dict):
+        for key in ("results", "items", "documents", "hits"):
+            value = obj.get(key)
+            if isinstance(value, list):
+                return value
+        for key in ("result", "text", "data", "content"):
+            if key in obj:
+                found = _find_result_items(obj[key], depth + 1)
+                if found:
+                    return found
+        return []
+    if isinstance(obj, list):
+        for item in obj:
+            found = _find_result_items(item, depth + 1)
+            if found:
+                return found
+        return []
+    if isinstance(obj, str):
+        s = obj.strip()
+        if s[:1] in ("{", "["):
+            try:
+                return _find_result_items(json.loads(s), depth + 1)
+            except (json.JSONDecodeError, ValueError):
+                return []
+    return []
+
+
 def _on_tool_complete(tc_id, name, args, result) -> None:
     global _job_created_draft_id, _job_moved_message_id
     # Tool-Namen vollstaendig (ungekappt) erfassen -- dient als verlaessliche
     # Quelle fuer tools_used/self_grade, unabhaengig vom 200-Event-Trace-Limit.
     if name:
         _job_tool_names.add(str(name))
+    if str(name) in _CONTEXT_SEARCH_TOOLS:
+        try:
+            _collect_context_sources(result, get_settings().draft_context_max_sources)
+        except Exception:  # noqa: BLE001 - Provenance darf den Job nie stoppen
+            logger.warning("Quellen-Erfassung fehlgeschlagen (tool=%s)", str(name)[:60])
     # Echte Draft-ID deterministisch aus dem Tool-Ergebnis erfassen (statt aus dem
     # vom LLM abgetippten JSON). Unabhaengig vom 200-Event-Trace-Limit -- so geht
     # die ID auch bei langlaufenden, tool-intensiven Jobs nicht verloren.
@@ -1236,7 +1327,12 @@ Status und Output werden automatisch aus deiner finalen Antwort gespeichert -- r
 """ + (f"\n\n## ZUSÄTZLICHE BENUTZER-REGELN (haben Vorrang!)\n{custom_triage_prompt}" if custom_triage_prompt else "")
 
 
-async def _build_draft_prompt(meta: dict, parsed: dict | None = None) -> str:
+async def _build_draft_prompt(
+    meta: dict,
+    parsed: dict | None = None,
+    dossier: str | None = None,
+    researched: bool = False,
+) -> str:
     """Baut den fokussierten Schreib-Prompt fuer den Zwei-Pass-Draft.
 
     Einzige Aufgabe: den besten Antwort-Entwurf in Anthonys Stimme schreiben --
@@ -1245,6 +1341,12 @@ async def _build_draft_prompt(meta: dict, parsed: dict | None = None) -> str:
     aus der Klassifikation (``parsed``), gelernte Stil-Anker sowie Kontext (Profil,
     Regeln, Lektionen, Datum) und erstellt den Entwurf mit erzwungenem
     ``reply_to_id`` im selben Thread.
+
+    ``dossier`` ist das Ergebnis des Sammel-Laufs (Pass 2a). ``researched``
+    unterscheidet die zwei Faelle, die sonst gleich aussaehen: wurde recherchiert und
+    nichts gefunden, mahnt der Prompt zur Zurueckhaltung; wurde gar nicht recherchiert
+    (Terminanfrage, kein Substanzbedarf), entfaellt der Abschnitt ersatzlos -- ein
+    "nichts gefunden" waere dort schlicht falsch.
     """
     email_id = meta.get("email_message_id", "")
     from_addr = meta.get("from_address", "")
@@ -1306,9 +1408,14 @@ async def _build_draft_prompt(meta: dict, parsed: dict | None = None) -> str:
         draft_tool=draft_tool,
     )
 
+    # Das Dossier steht bewusst NACH dem Briefing und VOR dem Schreibauftrag: es ist
+    # Sachgrundlage, nicht Stilvorgabe, und soll unmittelbar vor dem Auftrag praesent
+    # sein.
+    dossier_block = render_dossier_block(dossier or "") if researched else ""
+
     return (
         f"{style_section}{sender_style_block}{anchors_block}{rules_block}"
-        f"{recall_block}{briefing_block}\n---\n\n{absence_block}{task_block}"
+        f"{recall_block}{briefing_block}{dossier_block}\n---\n\n{absence_block}{task_block}"
     )
 
 
@@ -3771,7 +3878,11 @@ def _draft_sampling_overrides(disable_thinking: bool = True, *, local: bool = Tr
 
 
 def _run_agent_sync(
-    agent, prompt: str, disable_thinking: bool, overrides: dict | None = None
+    agent,
+    prompt: str,
+    disable_thinking: bool,
+    overrides: dict | None = None,
+    max_iterations: int | None = None,
 ) -> str:
     """Synchroner Agent-Lauf (im Thread). Gibt den finalen Antworttext zurueck.
 
@@ -3779,6 +3890,13 @@ def _run_agent_sync(
     False (Thinking an). ``overrides`` erlaubt vollstaendige ``request_overrides``
     (z. B. Prosa-Sampling im Draft-Pass) und hat Vorrang -- der Aufrufer ist dann
     fuer den Thinking-Schalter zustaendig.
+
+    ``max_iterations`` begrenzt die Werkzeug-Runden fuer diesen einen Lauf. Noetig,
+    weil eine Rundengrenze im Prompt nur eine Bitte ist: im Live-Test vom 03.08.2026
+    wiederholte das Modell dieselbe Suchanfrage dreimal und lieferte nie ein
+    Ergebnis, obwohl der Prompt hoechstens fuenf Suchvorgaenge erlaubte. Hermes
+    fordert beim Erreichen der Grenze selbsttaetig eine werkzeuglose Zusammenfassung
+    an -- aus der Endlosschleife wird so ein verwertbares Resultat.
 
     Achtung: Der ``chat_template_kwargs``-Fallback hier wirkt nur bei Providern wie
     vLLM. Ollama ignoriert ihn (siehe ``_draft_sampling_overrides``), das dortige
@@ -3788,6 +3906,7 @@ def _run_agent_sync(
     muessen, geben ``overrides`` aus ``_draft_sampling_overrides`` mit.
     """
     prev_overrides = getattr(agent, "request_overrides", None)
+    prev_iterations = getattr(agent, "max_iterations", None)
     req: dict | None = None
     if overrides is not None:
         req = dict(overrides)
@@ -3795,35 +3914,204 @@ def _run_agent_sync(
         req = {"extra_body": {"chat_template_kwargs": {"enable_thinking": False}}}
     if req is not None:
         agent.request_overrides = req
+    if max_iterations is not None:
+        agent.max_iterations = max_iterations
     try:
         result = agent.run_conversation(prompt, system_message=WORKER_SYSTEM_PROMPT)
     finally:
         if req is not None:
             agent.request_overrides = prev_overrides
+        if max_iterations is not None and prev_iterations is not None:
+            agent.max_iterations = prev_iterations
 
     if isinstance(result, dict):
         return str(result.get("final_response") or "")
     return str(result or "")
 
 
-async def _generate_reply_draft(meta: dict, parsed: dict | None = None) -> str | None:
-    """Zweiter, fokussierter Schreib-Pass (nur bei ``two_pass_draft``).
+def _sender_org_hint(from_addr: str) -> str:
+    """Firmenkennung aus der Absenderdomäne (ohne TLD und ohne Freemailer).
 
-    Erzeugt den Antwort-Entwurf in einem eigenen Agenten-Lauf mit Prosa-Sampling,
-    getrennt von der Klassifikation. ``parsed`` reicht das Briefing (rationale/label)
-    aus Pass 1 weiter. Best-effort: liefert die echte create_draft-ID (ground truth
-    aus dem Tool-Callback) oder ``None``. Bei ``None`` greift im Post-Processing der
-    bestehende Fail-closed-Pfad (auto_reply ohne Draft -> fyi).
+    Dient als Suchbaustein im Sammel-Lauf: «swissbankers» aus
+    ``franziska.koenig@swissbankers.ch``. Bei Freemail-Adressen leer, weil
+    «gmail» als Suchbegriff nur Rauschen erzeugt.
+    """
+    domain = (from_addr or "").split("@")[-1].strip().lower()
+    if not domain or "." not in domain:
+        return ""
+    label = domain.split(".")[0]
+    if label in _FREEMAIL_LABELS:
+        return ""
+    return label
+
+
+_FREEMAIL_LABELS: frozenset[str] = frozenset({
+    "gmail", "googlemail", "outlook", "hotmail", "live", "yahoo", "gmx",
+    "bluewin", "icloud", "me", "protonmail", "proton", "web", "t-online",
+})
+
+
+def _context_need(meta: dict, parsed: dict | None) -> str:
+    """Bestimmt, ob diese Mail eine Fachrecherche braucht: ``none``/``calendar``/``substance``.
+
+    Konditional statt pauschal -- eine reine Terminanfrage («Wann hast du Zeit?»)
+    braucht den Kalender und sonst nichts; eine Recherche dazu kostet nur Zeit und
+    kann fachfremden Kontext einschleppen.
+
+    Reihenfolge: eine ausdrueckliche Angabe aus Pass 1 hat Vorrang, danach greift die
+    bestehende Termin-Heuristik, sonst ``substance``. Der Default ist bewusst
+    ``substance``: eine ueberfluessige Recherche kostet Zeit, eine ausgelassene kostet
+    den Entwurf. Rein und damit testbar.
+    """
+    stated = str(((parsed or {}).get("context_need") or "")).strip().lower()
+    if stated in ("none", "calendar", "substance"):
+        return stated
+    if _looks_like_scheduling(meta.get("subject") or "", meta.get("body_preview") or ""):
+        return "calendar"
+    return "substance"
+
+
+def _gather_sampling_overrides() -> dict:
+    """Sampling fuer den Sammel-Lauf: niedrige Temperatur, kein Thinking.
+
+    Der Sammel-Lauf waehlt Werkzeuge und traegt Fakten zusammen -- dort schadet
+    das Prosa-Sampling des Schreib-Passes (temp 0.7), weil es die Query-Wahl
+    verrauscht. Thinking bleibt aus: gemessen am 03.08.2026 ruft das Modell die
+    Suche auch ohne Reasoning zuverlaessig auf (5 von 5), und Reasoning-Deltas
+    kosten hier nur Zeit.
+    """
+    cfg = get_settings()
+    out: dict = {
+        "temperature": cfg.draft_context_temperature,
+        "top_p": cfg.draft_top_p,
+        "extra_body": {"top_k": cfg.draft_top_k, "chat_template_kwargs": {"enable_thinking": False}},
+    }
+    if cfg.draft_reasoning_effort:
+        out["reasoning_effort"] = cfg.draft_reasoning_effort
+    return out
+
+
+async def _build_gather_prompt(meta: dict, parsed: dict | None = None) -> str:
+    """Baut den Rechercheauftrag fuer Pass 2a (Sammeln, nicht Schreiben)."""
+    from_addr = meta.get("from_address", "")
+    subject = meta.get("subject", "")
+    conversation_id = meta.get("conversation_id", "")
+    body_text = await _load_email_body_text(meta.get("email_message_id", ""))
+    body_block = body_text or (meta.get("body_preview") or "")[:300] or "(kein Textinhalt verfügbar)"
+
+    extra_tools = ""
+    if conversation_id:
+        extra_tools = (
+            f'   Der bisherige Verlauf ist mit **get_thread("{conversation_id}")** '
+            "abrufbar, falls die Vorgeschichte für das Verständnis nötig ist.\n"
+        )
+
+    return render_gather_task(
+        today=_today_context_line(),
+        subject=subject,
+        from_name=meta.get("from_name", ""),
+        from_addr=from_addr,
+        body_block=body_block,
+        briefing_block=_build_draft_briefing(parsed),
+        sender_org=_sender_org_hint(from_addr),
+        topic_hint=subject,
+        max_rounds=_GATHER_MAX_ROUNDS,
+        extra_tools=extra_tools,
+    )
+
+
+# Obergrenze der Recherche-Runden. Die Literatur zu agentischem Retrieval nennt
+# 3-5 Runden als Bereich, in dem der Nutzen noch die Latenz rechtfertigt; darueber
+# hinaus wiederholt das Modell meist nur Varianten derselben Anfrage.
+_GATHER_MAX_ROUNDS = 5
+
+
+async def _gather_draft_context(meta: dict, parsed: dict | None = None) -> str | None:
+    """Pass 2a: lokaler, agentischer Sammel-Lauf vor dem Schreiben.
+
+    Laeuft bewusst LOKAL und mit echten Namen -- Retrieval funktioniert nur so.
+    Liefert ein Markdown-Dossier oder ``None``. Best-effort: scheitert die
+    Recherche, schreibt der Draft-Pass wie bisher ohne Fachkontext weiter.
+
+    Der Sammel-Agent ist der Triage-Agent (reduzierte Allowlist ohne ``web`` und
+    ohne ``graphAdmin``): er kann suchen und lesen, aber weder Entwuerfe erstellen
+    noch den Outlook-Zustand veraendern.
+    """
+    agent = _triage_agent or _agent
+    if agent is None:
+        logger.warning("Kontext-Recherche: kein Agent verfügbar")
+        return None
+    try:
+        prompt = await _build_gather_prompt(meta, parsed)
+    except Exception:  # noqa: BLE001 - best-effort
+        logger.exception("Kontext-Recherche: Prompt-Bau fehlgeschlagen")
+        return None
+    try:
+        dossier = await asyncio.to_thread(
+            _run_agent_sync,
+            agent,
+            prompt,
+            True,
+            _gather_sampling_overrides(),
+            _GATHER_MAX_ROUNDS + 1,
+        )
+    except Exception:  # noqa: BLE001 - best-effort
+        logger.exception("Kontext-Recherche: Sammel-Lauf fehlgeschlagen")
+        return None
+    text = (dossier or "").strip()
+    if not text:
+        return None
+    cap = get_settings().draft_context_max_chars
+    if len(text) > cap:
+        text = text[:cap].rstrip() + " […]"
+    logger.info(
+        "Kontext-Recherche abgeschlossen: %d Zeichen Dossier, %d Quellen",
+        len(text), len(_job_context_sources),
+    )
+    return text
+
+
+async def _generate_reply_draft(meta: dict, parsed: dict | None = None) -> str | None:
+    """Zweiter Pass (nur bei ``two_pass_draft``): Kontext sammeln, dann schreiben.
+
+    Ablauf:
+
+    1. **Pass 2a (lokal, agentisch):** ``_gather_draft_context`` recherchiert mit
+       echten Namen den Fachkontext und verdichtet ihn zu einem Dossier.
+    2. **Pass 2b (schreiben):** Lokal per Werkzeug ``create_draft`` -- oder, wenn
+       ``draft_model`` ein Cloud-Modell nennt, werkzeuglos auf Basis des
+       ANONYMISIERTEN Prompts, mit anschliessender Deanonymisierung und
+       server-seitiger Entwurfserstellung.
+
+    ``parsed`` reicht das Briefing (rationale/label) aus Pass 1 weiter. Best-effort:
+    liefert die echte Draft-ID oder ``None``. Bei ``None`` greift im Post-Processing
+    der bestehende Fail-closed-Pfad (auto_reply ohne Draft -> fyi).
     """
     global _job_created_draft_id
     if _agent is None:
         logger.warning("Zwei-Pass-Draft: kein Worker-Agent verfügbar")
         return None
+
+    cfg = get_settings()
+    _job_context_sources.clear()
+    dossier: str | None = None
+    need = _context_need(meta, parsed)
+    researched = cfg.draft_context_research and need == "substance"
+    if researched:
+        dossier = await _gather_draft_context(meta, parsed)
+    else:
+        logger.info("Kontext-Recherche übersprungen (context_need=%s)", need)
+
     try:
-        prompt = await _build_draft_prompt(meta, parsed)
+        prompt = await _build_draft_prompt(meta, parsed, dossier, researched)
     except Exception:  # noqa: BLE001 - best-effort
         logger.exception("Zwei-Pass-Draft: Prompt-Bau fehlgeschlagen")
         return None
+
+    draft_model = (cfg.draft_model or "").strip()
+    if draft_model and not _is_local_model(draft_model):
+        return await _write_draft_with_cloud_model(meta, prompt, draft_model)
+
     # Nur den in DIESEM Pass erstellten Entwurf erfassen.
     _job_created_draft_id = None
     try:
@@ -3834,6 +4122,172 @@ async def _generate_reply_draft(meta: dict, parsed: dict | None = None) -> str |
         logger.exception("Zwei-Pass-Draft: Schreib-Pass fehlgeschlagen")
         return None
     return _job_created_draft_id
+
+
+async def _anonymize_for_cloud(text: str) -> tuple[str, str]:
+    """Maskiert Personen-/Firmenbezüge vor dem Versand an ein Cloud-Modell.
+
+    Nutzt dieselbe Strecke wie die Finanzanalyse (contentConverter + Mapping-Store),
+    damit es genau eine Anonymisierungs-Implementierung im System gibt. Gibt
+    ``(maskierter_text, session_id)`` zurueck. Wirft bei Fehlschlag -- der Aufrufer
+    faellt dann auf das lokale Modell zurueck (fail-closed).
+    """
+    from ai9 import content_converter as cc
+    from ai9 import mapping_store
+
+    result = await cc.call_tool(
+        "anonymize_content",
+        text=text,
+        entities=",".join(_CLOUD_ANON_ENTITIES),
+        language="de",
+    )
+    if not isinstance(result, dict):
+        raise RuntimeError("Anonymisierung lieferte kein Mapping")
+    anon = result.get("anonymized_text") or ""
+    if not anon:
+        raise RuntimeError("Anonymisierung lieferte leeren Text")
+    session_id, _diff = mapping_store.store_mapping(result.get("mapping_keys", {}))
+    return anon, session_id
+
+
+async def _deanonymize_from_cloud(text: str, session_id: str) -> str:
+    """Setzt die Originalwerte in der Cloud-Antwort wieder ein."""
+    from ai9 import content_converter as cc
+    from ai9 import mapping_store
+
+    keys = mapping_store.get_mapping_keys(session_id)
+    if not keys:
+        return text
+    result = await cc.call_tool("deanonymize_content", text=text, mapping_keys=keys)
+    return result if isinstance(result, str) else str(result)
+
+
+# Entitaeten analog zur Finanzanalyse-Pipeline (contentConverter-Konvention).
+_CLOUD_ANON_ENTITIES = ["PERSON", "ORG", "LOCATION", "EMAIL", "PHONE", "IBAN"]
+
+
+async def _write_draft_with_cloud_model(
+    meta: dict, prompt: str, model: str
+) -> str | None:
+    """Pass 2b mit Cloud-Modell: anonymisiert, werkzeuglos, deanonymisiert.
+
+    Die automatische Barriere ist hier nicht abschaltbar: E-Mail-Entwuerfe entstehen
+    unbeaufsichtigt, der Kontext ist vorher nicht pruefbar. Schlaegt die
+    Anonymisierung fehl, wird NICHT an die Cloud gesendet, sondern auf das lokale
+    Modell zurueckgefallen (fail-closed).
+
+    Werkzeuglos ist Absicht, nicht Einschraenkung: ein maskiertes Modell wuerde mit
+    Platzhaltern suchen ("PERSON_1 KreditorenBot") und nichts finden. Das Sammeln
+    ist deshalb bereits in Pass 2a passiert; das Cloud-Modell bekommt das Ergebnis
+    und schreibt daraus. Den Entwurf legt das Backend deterministisch an -- damit
+    ist die Thread-Zugehoerigkeit ohnehin garantiert.
+    """
+    global _job_created_draft_id
+
+    try:
+        anon_prompt, session_id = await _anonymize_for_cloud(prompt)
+    except Exception as exc:  # noqa: BLE001 - fail-closed auf lokal
+        logger.warning(
+            "Cloud-Entwurf: Anonymisierung fehlgeschlagen (%s) -- lokaler Schreib-Pass",
+            exc,
+        )
+        _job_created_draft_id = None
+        try:
+            await asyncio.to_thread(
+                _run_agent_sync, _agent, prompt, True, _draft_sampling_overrides(True)
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("Cloud-Entwurf: lokaler Rückfall ebenfalls fehlgeschlagen")
+            return None
+        return _job_created_draft_id
+
+    try:
+        cloud_agent = await asyncio.to_thread(_build_cloud_job_agent, model)
+        text = await asyncio.to_thread(
+            _run_agent_sync,
+            cloud_agent,
+            f"{anon_prompt}\n\n{_CLOUD_WRITER_SUFFIX}",
+            True,
+            _draft_sampling_overrides(True, local=False),
+        )
+    except Exception:  # noqa: BLE001 - best-effort
+        logger.exception("Cloud-Entwurf: Schreib-Lauf fehlgeschlagen (Modell %s)", model)
+        return None
+
+    if not (text or "").strip():
+        logger.warning("Cloud-Entwurf: leere Antwort von %s", model)
+        return None
+
+    try:
+        text = await _deanonymize_from_cloud(text, session_id)
+    except Exception:  # noqa: BLE001 - lieber kein Entwurf als ein maskierter
+        logger.exception("Cloud-Entwurf: De-Anonymisierung fehlgeschlagen -- verworfen")
+        return None
+
+    draft_id = await _create_reply_draft_from_text(meta.get("email_message_id", ""), text)
+    if draft_id:
+        _job_created_draft_id = draft_id
+        _job_tool_names.add("cloud_draft_writer")
+        logger.info("Cloud-Entwurf erstellt (Modell %s, draft_id=%s)", model, draft_id[:40])
+    return draft_id
+
+
+_CLOUD_WRITER_SUFFIX = (
+    "WICHTIG: Du hast in diesem Lauf KEINE Werkzeuge. Der gesamte Kontext steht oben. "
+    "Gib ausschliesslich den fertigen E-Mail-Text aus -- Anrede, Inhalt, Schlussformel. "
+    "Keine Betreffzeile, keine Erklärungen, keine Meta-Kommentare, kein Markdown-"
+    "Codeblock. Personen- und Firmennamen erscheinen als Platzhalter (etwa "
+    "<PERSON_1>); übernimm sie unverändert -- sie werden nach dem Schreiben "
+    "automatisch durch die echten Namen ersetzt."
+)
+
+
+def _plain_text_to_html(text: str) -> str:
+    """Wandelt den Entwurfstext in schlichtes HTML (Absätze, Zeilenumbrüche)."""
+    from html import escape
+
+    blocks = [b.strip() for b in re.split(r"\n\s*\n", (text or "").strip()) if b.strip()]
+    if not blocks:
+        return ""
+    return "".join(
+        "<p>" + "<br>".join(escape(line) for line in block.splitlines()) + "</p>"
+        for block in blocks
+    )
+
+
+async def _create_reply_draft_from_text(email_id: str, text: str) -> str | None:
+    """Legt einen Reply-Entwurf im Original-Thread an (server-seitig, ohne LLM-Tool).
+
+    Wird vom werkzeuglosen Cloud-Schreibpfad genutzt. ``createReplyAll`` uebernimmt
+    Empfaenger und Betreff aus der Originalmail -- damit ist die Thread-Zugehoerigkeit
+    garantiert und es gibt keine vom Modell erfundenen Adressaten.
+    """
+    if not email_id:
+        return None
+    body_html = _plain_text_to_html(text)
+    if not body_html:
+        return None
+    client = await _build_graph_client()
+    if client is None:
+        logger.warning("Cloud-Entwurf: Graph nicht konfiguriert")
+        return None
+    try:
+        created = await client.create_draft(
+            subject="",
+            body_html=body_html,
+            to_recipients=[],
+            reply_to_id=email_id,
+            reply_all=True,
+        )
+        return (created or {}).get("id")
+    except Exception:  # noqa: BLE001 - best-effort
+        logger.exception("Cloud-Entwurf: Entwurf konnte nicht angelegt werden")
+        return None
+    finally:
+        try:
+            await client.close()
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def _enforce_autonomy_status(meta: dict, content: str) -> str:
@@ -3904,6 +4358,7 @@ async def _process_job(agent, job_id, job_type: str, prompt: str, meta: dict) ->
     _job_created_draft_id = None
     _job_moved_message_id = None
     _job_tool_names.clear()
+    _job_context_sources.clear()
     disable_thinking = _thinking_disabled(job_type, meta.get("skill"))
 
     # Briefings sind reine Prosa-Synthese (alle Daten stehen im Prompt): sie laufen
@@ -4046,6 +4501,13 @@ async def _process_job(agent, job_id, job_type: str, prompt: str, meta: dict) ->
             new_meta = dict((job.metadata_json if job else None) or meta)
             new_meta["trace"] = trace
             new_meta["tools_used"] = tools_used
+            # Provenance: worauf sich ein Entwurf stuetzt, gehoert an die Freigabe.
+            # Die Kundeneingrenzung laeuft bewusst ueber diese Sichtbarkeit und
+            # nicht ueber einen harten Suchfilter -- ein Filter kostet Recall und
+            # braucht Metadaten, die der Index nicht hat, waehrend ohnehin jede
+            # externe Mail vor dem Versand gelesen wird (HITL L1).
+            if _job_context_sources:
+                new_meta["context_sources"] = list(_job_context_sources)
             if job_type == "email_triage":
                 grade = _compute_self_grade(meta, new_meta, tools_used)
                 new_meta["self_grade"] = grade

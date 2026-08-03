@@ -166,6 +166,29 @@ class Settings(BaseSettings):
     # von Cloud-Providern abgelehnt.
     draft_reasoning_effort: str = "none"
 
+    # Kontext-Recherche vor dem Schreiben (Pass 2a). Der Schreib-Prompt wies
+    # bisher nirgends an, Fachkontext zu suchen. Messung vom 03.08.2026 (5 Laeufe
+    # je Variante gegen qwen3.6 ueber LiteLLM): mit dem Produktions-Prompt rief das
+    # Modell die semantische Suche in 0 von 5 Laeufen auf, mit expliziter Anweisung
+    # in 5 von 5. Die duennen Entwuerfe sind also kein Tool-Calling-Defekt und kein
+    # Modellentscheid, sondern eine fehlende Anweisung. Ein eigener Sammel-Lauf holt
+    # den Kontext und uebergibt ihn als Dossier an den Schreib-Pass.
+    draft_context_research: bool = True
+    # Sampling des Sammel-Laufs: niedrige Temperatur, weil hier Werkzeuge gewaehlt
+    # und Fakten zusammengetragen werden -- nicht formuliert.
+    draft_context_temperature: float = 0.2
+    # Obergrenzen fuers Dossier (Prompt-Budget des Schreib-Passes schuetzen).
+    draft_context_max_sources: int = 10
+    draft_context_max_chars: int = 6000
+
+    # Schreib-Modell fuer Pass 2b. Leer = lokales Standardmodell. Ein Cloud-Modell
+    # schreibt ausschliesslich auf Basis des ANONYMISIERTEN Dossiers und OHNE
+    # Werkzeuge; den Entwurf legt danach das Backend deterministisch an. Grund fuer
+    # die Werkzeuglosigkeit: ein maskiertes Modell wuerde mit Platzhaltern suchen
+    # ("PERSON_1 KreditorenBot") und nichts finden -- Sammeln gehoert deshalb in den
+    # lokalen Pass 2a.
+    draft_model: str = ""
+
     # Semantische Suche (user-facing Dokument-/E-Mail-Index, pgvector).
     # Bewusst GETRENNT vom 0.6B-Agent-Index: staerkeres Modell (Qwen3-Embedding-4B,
     # native 2560d) fuer maximale Retrieval-Qualitaet (MTEB-Multilingual 69.45 vs
