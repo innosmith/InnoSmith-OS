@@ -18,6 +18,7 @@ from app.auth.deps import MEMBER_RESTRICTED_TASK_FIELDS, check_project_access, g
 from app.routers.uploads import _scan_with_clamav
 from app.database import get_db
 from app.models import ActivityLog, AgentJob, Attachment, BoardColumn, BoardMember, ChecklistItem, EmailTriage, FollowupSuggestion, MeetingTranscript, Project, Task, User
+from app.services.email_links import outlook_deeplink
 from app.services.notification import notify_mentions, notify_task_assigned
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "..", "email-graph"))
@@ -393,6 +394,7 @@ async def get_task(
     task_out = TaskOut.model_validate(task)
     task_out.assignee_user = await _resolve_assignee_user(task.assignee, db)
     if task.email_message_id:
+        task_out.source_email_web_link = outlook_deeplink(task.email_message_id)
         et_result = await db.execute(
             select(EmailTriage.subject, EmailTriage.from_name, EmailTriage.from_address)
             .where(EmailTriage.message_id == task.email_message_id)

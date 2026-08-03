@@ -180,6 +180,26 @@ class Settings(BaseSettings):
     # Obergrenzen fuers Dossier (Prompt-Budget des Schreib-Passes schuetzen).
     draft_context_max_sources: int = 10
     draft_context_max_chars: int = 6000
+    # Werkzeug-Umfang des Sammel-Laufs. False = graph + taskpilot + capacity;
+    # True = zusaetzlich toggl, pipedrive, bexio, signa -- also dieselben
+    # Fachsysteme, die auch der Mensch nutzt (Leitprinzip Team-Modell).
+    #
+    # Gemessen am 03.08.2026 (je 4 Laeufe gegen qwen3.6, OneMBA-Fall, echte
+    # Werkzeug-Implementierungen; scripts/live_gather_capacity.py):
+    #
+    #                              schmal (7 Tools)   breit (59 Tools)
+    #   Fachsystem aufgerufen            4/4                4/4
+    #   Dossier als Markdown             4/4                0/4
+    #   Altfakt mit Zeitbezug            4/4                4/4
+    #   Laeufe mit Doppelabfrage         3/4                0/4
+    #   Werkzeug-Aufrufe im Mittel       5.0                2.0
+    #
+    # Beide Umfaenge beheben den Fehler. Breit arbeitet sparsamer, kippt aber
+    # reproduzierbar von Markdown auf JSON -- und das Dossier geht als Text in den
+    # Schreib-Prompt, wo ein JSON-Blob schlechter lesbar ist. Darum bleibt schmal
+    # der Default; das Flag haelt den breiten Umfang fuer den Fall offen, dass eine
+    # Mail ein Fachsystem braucht, das dort fehlt.
+    draft_context_wide_tools: bool = False
 
     # Schreib-Modell fuer Pass 2b. Leer = lokales Standardmodell. Ein Cloud-Modell
     # schreibt ausschliesslich auf Basis des ANONYMISIERTEN Dossiers und OHNE

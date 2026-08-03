@@ -129,3 +129,44 @@ async def test_template_nulls_due_date_and_blocks_completion(client_as_owner):
     assert resp.json()["due_date"] is None
 
     await client_as_owner.delete(f"/api/tasks/{task_id}")
+
+
+# ---------------------------------------------------------------------------
+# Quell-E-Mail: Outlook-Link kommt als Feld, nicht mehr im Beschreibungstext
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.db
+async def test_detail_exposes_outlook_deeplink(client_as_owner):
+    """GET /api/tasks/{id} liefert source_email_web_link zu email_message_id.
+
+    Vorher hängte der Worker die rohe URL an die Beschreibung, wo sie über ein
+    Dutzend Zeilen umbrach. Jetzt baut der Detail-Endpoint sie als Feld.
+    """
+    from app.services.email_links import outlook_deeplink
+
+    message_id = "AAMk=test/router+id"
+    resp = await client_as_owner.post(
+        "/api/tasks", json=_minimal_task_body(email_message_id=message_id)
+    )
+    assert resp.status_code == 201
+    task_id = resp.json()["id"]
+
+    resp = await client_as_owner.get(f"/api/tasks/{task_id}")
+    assert resp.status_code == 200
+    assert resp.json()["source_email_web_link"] == outlook_deeplink(message_id)
+
+    await client_as_owner.delete(f"/api/tasks/{task_id}")
+
+
+@pytest.mark.db
+async def test_detail_link_is_null_without_email(client_as_owner):
+    resp = await client_as_owner.post("/api/tasks", json=_minimal_task_body())
+    assert resp.status_code == 201
+    task_id = resp.json()["id"]
+
+    resp = await client_as_owner.get(f"/api/tasks/{task_id}")
+    assert resp.status_code == 200
+    assert resp.json()["source_email_web_link"] is None
+
+    await client_as_owner.delete(f"/api/tasks/{task_id}")

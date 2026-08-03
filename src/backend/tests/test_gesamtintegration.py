@@ -9,6 +9,7 @@ Abgedeckt:
 Kein DB/Netz nötig — alle async Helfer sind gemockt.
 """
 
+import re
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -67,6 +68,111 @@ def test_triage_tool_scoping_flag_default_on():
     from app.config import Settings
 
     assert Settings().triage_tool_scoping is True
+
+
+# ---------------------------------------------------------------------------
+# Recherche-Lauf (Pass 2a) — eigener Werkzeug-Umfang
+# ---------------------------------------------------------------------------
+
+def test_gather_allowlist_includes_the_capacity_system():
+    """Der Sammel-Lauf teilte bisher die Allowlist der Klassifikation und sah damit
+    nur Graph und die TaskPilot-DB.
+
+    Stunden- und Verfuegbarkeitsfragen musste er darum aus dem Mailarchiv beantworten
+    -- so entstand am 03.08.2026 eine Budgetzahl vom 02.07. als heutiger Stand.
+    """
+    with patch.object(hw, "get_configured_server_keys", return_value=list(hw._KNOWN_MCP_SERVERS)):
+        allow = hw.build_gather_allowlist(wide=False)
+
+    assert "capacity" in allow
+    assert "graph" in allow and "taskpilot" in allow
+
+
+def test_gather_allowlist_keeps_web_out_and_cannot_mutate_outlook():
+    """Datenminimierung: keine E-Mail-Inhalte in externe Suchanfragen. Und der
+    Recherche-Lauf soll lesen, nicht den Postfach-Zustand aendern."""
+    with patch.object(hw, "get_configured_server_keys", return_value=list(hw._KNOWN_MCP_SERVERS)):
+        for wide in (False, True):
+            allow = hw.build_gather_allowlist(wide=wide)
+            assert "web" not in allow
+            assert "graphAdmin" not in allow
+
+
+def test_wide_scope_adds_the_remaining_specialist_systems():
+    """Leitprinzip Team-Modell: dieselben Fachsysteme wie der Mensch. Ob der
+    zusaetzliche Prompt-Ballast die Werkzeugwahl verschlechtert, ist eine Messfrage
+    -- darum ein Flag und kein fester Umfang."""
+    with patch.object(hw, "get_configured_server_keys", return_value=list(hw._KNOWN_MCP_SERVERS)):
+        narrow = hw.build_gather_allowlist(wide=False)
+        wide = hw.build_gather_allowlist(wide=True)
+
+    for server in ("toggl", "pipedrive", "bexio", "signa"):
+        assert server not in narrow
+        assert server in wide
+
+
+def test_gather_allowlist_respects_configured_servers():
+    """Ein nicht registrierter Server darf nicht in der Allowlist landen."""
+    with patch.object(hw, "get_configured_server_keys", return_value=["graph"]):
+        allow = hw.build_gather_allowlist(wide=True)
+
+    assert "graph" in allow
+    for server in ("capacity", "taskpilot", "bexio"):
+        assert server not in allow
+
+
+def test_system_map_only_names_tools_that_really_exist():
+    """Beim Bauen stand «search_deals» in der Systemkarte -- Pipedrive kennt aber nur
+    «search_crm». Ein erfundener Werkzeugname kostet eine Recherche-Runde und
+    hinterlaesst einen Fehler im Trace, ohne dass jemand die Ursache sieht.
+
+    Die Namen der Karte sind darum an die tatsaechlichen MCP-Definitionen gebunden.
+    """
+    import importlib.util
+    import sys
+    from pathlib import Path
+
+    src = Path(__file__).resolve().parents[2]
+
+    def tool_names(subdir: str, *libs: str) -> set[str]:
+        for lib in libs:
+            sys.path.insert(0, str(src / lib))
+        spec = importlib.util.spec_from_file_location(f"probe_{subdir}", src / subdir / "server.py")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        return {t.name for t in module.TOOLS}
+
+    available = (
+        tool_names("mcp-graph", "email-graph")
+        | tool_names("mcp-pipedrive", "pipedrive")
+        | tool_names("mcp-bexio", "bexio")
+        | tool_names("mcp-toggl", "toggl")
+        | tool_names("mcp-capacity", "capacity", "toggl")
+    )
+
+    from app.services.draft_prompt import GATHER_TASK_TEMPLATE
+
+    # Nur snake_case: fett gesetzte deutsche Woerter («**zuerst**») sind keine Werkzeuge.
+    pattern = r"\*\*([a-z]+(?:_[a-z]+)+)\*\*"
+    named = set(re.findall(pattern, GATHER_TASK_TEMPLATE))
+    with patch.object(hw, "get_settings", lambda: SimpleNamespace(draft_context_wide_tools=True)):
+        named |= set(re.findall(pattern, hw._gather_extra_systems()))
+
+    # ``semantic_search_documents`` liegt im taskpilot-Server, den dieser Test nicht
+    # laedt (er braucht eine DB-Verbindung beim Import).
+    named.discard("semantic_search_documents")
+
+    assert named, "Systemkarte nennt keine Werkzeuge -- Test waere wirkungslos"
+    assert named <= available, f"Unbekannte Werkzeuge in der Systemkarte: {named - available}"
+
+
+def test_wide_tools_flag_defaults_off():
+    """Der Kapazitaets-Server deckt den belegten Fehlerfall ab; der breite Umfang
+    bleibt bis zur Messung aus."""
+    from app.config import Settings
+
+    assert Settings().draft_context_wide_tools is False
 
 
 # ---------------------------------------------------------------------------

@@ -455,6 +455,20 @@ _SEARCH_QUERY_INSTRUCT = (
     "that answer or relate to it.\nQuery: "
 )
 
+# Herkunftsangaben, die JEDER Treffer tragen muss -- in beiden Zweigen der
+# Hybrid-Suche identisch, damit die RRF-Fusion sie unabhaengig vom Trefferpfad
+# durchreicht.
+#
+# Das Datum fehlte hier lange, und das war teuer: am 03.08.2026 uebernahm der
+# Schreib-Pass den Satz «fuer Juli haben wir noch 14h Budget» aus einer Mail vom
+# 02.07.2026 als heutigen Stand. Das Modell konnte die Aktualitaet nicht pruefen,
+# weil sie nie im Trefferobjekt stand. Datum als YYYY-MM-DD (nicht als voller
+# ISO-Zeitstempel) haelt den Kontext knapp und bleibt mit «heute» vergleichbar.
+_PROVENANCE_COLUMNS = (
+    "to_char(source_modified_at, 'YYYY-MM-DD') AS date, "
+    "metadata->>'from' AS \"from\", "
+)
+
 
 async def _embed_query(query: str) -> list[float] | None:
     """Erzeugt ein Query-Embedding via lokalem Ollama (Such-Modell). Best-effort."""
@@ -516,6 +530,7 @@ async def _semantic_search_documents(p: asyncpg.Pool, arguments: dict) -> list[T
                 filt += f" AND user_id = ${len(params)}::uuid"
             rows = await p.fetch(
                 "SELECT source_type, source_id, title, url, mime, "
+                + _PROVENANCE_COLUMNS +
                 "left(content_text, 260) AS snippet, "
                 "1 - (embedding <=> $1::halfvec) AS similarity "
                 "FROM semantic_documents" + filt +
@@ -541,6 +556,7 @@ async def _semantic_search_documents(p: asyncpg.Pool, arguments: dict) -> list[T
             filt += f" AND user_id = ${len(params)}::uuid"
         rows = await p.fetch(
             "SELECT source_type, source_id, title, url, mime, "
+            + _PROVENANCE_COLUMNS +
             "ts_headline('german', content_text, q, "
             "'MaxFragments=2,MinWords=5,MaxWords=22,StartSel=<b>,StopSel=</b>') AS snippet "
             "FROM semantic_documents, websearch_to_tsquery('german', $1) q "

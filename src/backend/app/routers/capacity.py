@@ -27,7 +27,14 @@ from app.auth.deps import get_current_user, require_role
 from app.database import async_session
 from app.models import CapacityAllocation, CapacityProject, CapacityTimeOff, Project, User
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "toggl"))
+_SRC = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(_SRC / "toggl"))
+sys.path.insert(0, str(_SRC / "capacity"))
+from capacity_report import (  # noqa: E402
+    Allocation,
+    actual_minutes_by_toggl_project,
+    planned_minutes,
+)
 from toggl_client import TogglClient, TogglConfig  # noqa: E402
 
 logger = logging.getLogger("taskpilot.capacity")
@@ -1002,39 +1009,21 @@ async def get_monthly_actual(
         )
         alloc_rows = (await session.execute(stmt)).all()
 
-    WEEKS_PER_MONTH = 52 / 12
-
-    week_allocs_cur: dict[str, list[int]] = defaultdict(list)
-    day_total_cur: dict[str, int] = defaultdict(int)
-    week_allocs_prev: dict[str, list[int]] = defaultdict(list)
-    day_total_prev: dict[str, int] = defaultdict(int)
-
-    for alloc, proj in alloc_rows:
-        cid = str(proj.id)
-        if month_start <= alloc.week_start <= month_end:
-            if alloc.allocation_type == "day":
-                day_total_cur[cid] += alloc.minutes
-            else:
-                week_allocs_cur[cid].append(alloc.minutes)
-        if prev_month and prev_start <= alloc.week_start <= prev_end:
-            if alloc.allocation_type == "day":
-                day_total_prev[cid] += alloc.minutes
-            else:
-                week_allocs_prev[cid].append(alloc.minutes)
-
-    planned_cur: dict[str, int] = defaultdict(int)
-    planned_prev_map: dict[str, int] = defaultdict(int)
-
-    for cid, mins in week_allocs_cur.items():
-        planned_cur[cid] = int(round(sum(mins) / len(mins) * WEEKS_PER_MONTH))
-    for cid, d in day_total_cur.items():
-        planned_cur[cid] += d
-
-    if prev_month:
-        for cid, mins in week_allocs_prev.items():
-            planned_prev_map[cid] = int(round(sum(mins) / len(mins) * WEEKS_PER_MONTH))
-        for cid, d in day_total_prev.items():
-            planned_prev_map[cid] += d
+    # Monatsnormierung liegt in src/capacity/capacity_report.py, damit Cockpit und
+    # Agent (mcp-capacity) garantiert dieselben Zahlen nennen.
+    allocations = [
+        Allocation(
+            project_id=str(proj.id),
+            week_start=alloc.week_start,
+            minutes=alloc.minutes,
+            allocation_type=alloc.allocation_type,
+        )
+        for alloc, proj in alloc_rows
+    ]
+    planned_cur = planned_minutes(allocations, month_start, month_end)
+    planned_prev_map = (
+        planned_minutes(allocations, prev_start, prev_end) if prev_month else {}
+    )
 
     # Toggl-Projekt-IDs sammeln (direkt + aggregiert)
     direct = [p for p in cap_projects if p.toggl_project_id]
@@ -1081,30 +1070,12 @@ async def get_monthly_actual(
         if not cl:
             return {}
         try:
-            toggl_set = set(all_toggl_ids)
             summary = await cl.get_summary_by_project(
                 start_date=m_start.isoformat(),
                 end_date=m_end.isoformat(),
                 billable=None,
             )
-            result: dict[int, int] = {}
-            for group in summary:
-                pid = group.get("id", 0)
-                if pid not in toggl_set:
-                    continue
-                sub_groups = group.get("sub_groups") or group.get("items") or []
-                group_secs = 0.0
-                for item in sub_groups:
-                    rates = item.get("rates") or []
-                    for rate_info in rates:
-                        group_secs += rate_info.get("billable_seconds", 0) or 0
-                    secs_total = item.get("seconds", 0) or item.get("time", 0) or 0
-                    if not rates:
-                        group_secs += secs_total
-                    elif secs_total > group_secs:
-                        group_secs = secs_total
-                if group_secs > 0:
-                    result[pid] = int(group_secs / 60)
+            result = actual_minutes_by_toggl_project(summary, set(all_toggl_ids))
             _toggl_cache[cache_key] = result
             return result
         except Exception as e:

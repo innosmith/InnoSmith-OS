@@ -72,6 +72,8 @@ export interface TaskDetail {
   pipedrive_person_id: number | null;
   source_email_subject: string | null;
   source_email_from: string | null;
+  /** Outlook-Web-Deeplink, vom Backend aus email_message_id berechnet. */
+  source_email_web_link?: string | null;
   meeting_subject: string | null;
   tags: Tag[];
   checklist_items: ChecklistItem[];

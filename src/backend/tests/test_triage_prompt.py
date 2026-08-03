@@ -9,6 +9,7 @@ Prüft:
 import re
 import uuid
 from datetime import date, timedelta
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch, AsyncMock
 
@@ -462,39 +463,141 @@ class TestStripInternalNotes:
         assert _strip_internal_notes(None) is None
 
 
-class TestEmailReferenceBlock:
-    """Jede E-Mail-Task soll einen Quell-Block mit Outlook-Deeplink tragen."""
+class TestStripInternalNotesKeepsStructure:
+    """Regression: die Reinigung darf die Markdown-Struktur nicht einebnen.
 
-    def test_deeplink_built_from_message_id(self):
-        from app.services.hermes_worker import _outlook_deeplink
-        link = _outlook_deeplink("AAMk=abc/def+ghi")
-        assert link is not None
-        assert link.startswith("https://outlook.office.com/mail/deeplink/read/")
-        # Sonderzeichen muessen URL-encodiert sein (kein rohes '/', '=' oder '+').
-        assert "abc/def" not in link
-        assert "%3D" in link or "%2F" in link or "%2B" in link
+    Vorfall (03.08.2026): Jede E-Mail-Task erschien im Cockpit als eine einzige
+    Textwand -- die Aufzählung des Agenten stand ohne Zeilenumbruch hintereinander
+    («... folgender Punkte: 1. **A:** ... 2. **B:** ...»). Ursache war diese
+    Funktion: sie splittete an ``\\n+`` und fügte mit ``" ".join(...)`` zusammen,
+    kollabierte also jeden Zeilenumbruch zu einem Leerzeichen. Kein Test sah das,
+    weil alle bestehenden Fälle mit einzeiligem Text arbeiteten.
+    """
 
-    def test_deeplink_none_without_id(self):
-        from app.services.hermes_worker import _outlook_deeplink
-        assert _outlook_deeplink(None) is None
+    def test_markdown_list_keeps_line_breaks(self):
+        from app.services.hermes_worker import _strip_internal_notes
+        text = (
+            "Valentin bittet um vier Punkte bis Ende Woche.\n"
+            "\n"
+            "- **Produktivübertragung:** Anpassungen übertragen.\n"
+            "- **Assembly-Startseite:** Vorschau aufsetzen."
+        )
+        assert _strip_internal_notes(text) == text
 
-    def test_reference_block_contains_sender_subject_link(self):
-        from app.services.hermes_worker import _email_reference_block
-        meta = {
-            "from_name": "Test Sender",
-            "from_address": "test@example.com",
-            "subject": "Wichtiger Betreff",
-            "email_message_id": "AAMk123",
-        }
-        block = _email_reference_block(meta)
-        assert "Test Sender" in block
-        assert "test@example.com" in block
-        assert "Wichtiger Betreff" in block
-        assert "outlook.office.com" in block
+    def test_blank_line_separates_paragraphs(self):
+        from app.services.hermes_worker import _strip_internal_notes
+        cleaned = _strip_internal_notes("Erster Absatz.\n\nZweiter Absatz.")
+        assert cleaned == "Erster Absatz.\n\nZweiter Absatz."
 
-    def test_reference_block_empty_without_data(self):
-        from app.services.hermes_worker import _email_reference_block
-        assert _email_reference_block({}) == ""
+    def test_indentation_of_nested_list_survives(self):
+        from app.services.hermes_worker import _strip_internal_notes
+        text = "- Oberpunkt\n  - Unterpunkt"
+        assert _strip_internal_notes(text) == text
+
+    def test_noise_line_dropped_without_flattening_the_rest(self):
+        from app.services.hermes_worker import _strip_internal_notes
+        text = (
+            "- Vertrag prüfen\n"
+            "- Die Mail liess sich via Graph API nicht laden (404).\n"
+            "- Termin bestätigen"
+        )
+        cleaned = _strip_internal_notes(text)
+        assert cleaned == "- Vertrag prüfen\n- Termin bestätigen"
+
+    def test_noise_removed_inside_a_line_keeps_neighbouring_lines(self):
+        from app.services.hermes_worker import _strip_internal_notes
+        text = "Erste Zeile. HTTPStatusError: 400 Bad Request.\nZweite Zeile."
+        assert _strip_internal_notes(text) == "Erste Zeile.\nZweite Zeile."
+
+    def test_excess_blank_lines_are_collapsed(self):
+        from app.services.hermes_worker import _strip_internal_notes
+        assert _strip_internal_notes("A.\n\n\n\nB.") == "A.\n\nB."
+
+
+class TestNoSourceEmailBlockInDescription:
+    """Die Beschreibung enthält keine Herkunftsangaben mehr.
+
+    Vorfall (03.08.2026): Jede E-Mail-Task trug am Ende der Beschreibung einen
+    «Quell-E-Mail»-Block mit Absender, Betreff und Outlook-Link. Dieselben Angaben
+    standen schon im Sidebar-Badge und im Thread-Panel; der Block kostete rund acht
+    Zeilen in der schmalen Spalte und schob die eigentliche Aufgabe aus dem Blick.
+    Absender und Betreff kommen jetzt aus den Task-Feldern, der Link aus
+    ``TaskOut.source_email_web_link``.
+    """
+
+    def test_helpers_are_gone(self):
+        import app.services.hermes_worker as hw
+        assert not hasattr(hw, "_email_reference_block")
+        assert not hasattr(hw, "_outlook_deeplink")
+
+    def test_worker_never_appends_outlook_url(self):
+        """Kein Codepfad im Worker darf eine Outlook-URL in Text schreiben."""
+        import app.services.hermes_worker as hw
+        source = Path(hw.__file__).read_text(encoding="utf-8")
+        assert "outlook.office.com" not in source
+        # Die Markdown-Überschrift des alten Blocks (Kommentare dürfen ihn erwähnen).
+        assert "**Quell-E-Mail**" not in source
+
+
+class TestTaskDescriptionSkillContract:
+    """Konsistenz zwischen ausgerolltem Skill und dem, was das Backend wirklich tut.
+
+    Vorfall (03.08.2026): ``references/triage-rules.md`` behauptete,
+    ``task_description`` werde «vom Backend NICHT ausgewertet» und sei «dekorativ»
+    -- im Widerspruch zu ``SKILL.md`` und zu ``_post_process_triage``, das den Wert
+    an ``_create_email_task`` weiterreicht. Das Modell hatte damit keinen Anlass,
+    die Beschreibung sauber zu formatieren. Beide Seiten wurden nirgends gemeinsam
+    gelesen, deshalb fiel der Widerspruch niemandem auf.
+    """
+
+    SKILL_DIR = Path.home() / ".hermes" / "skills" / "email-triage"
+
+    def _texts(self) -> dict[str, str]:
+        if not self.SKILL_DIR.is_dir():
+            return {}
+        files = [
+            self.SKILL_DIR / "SKILL.md",
+            *sorted((self.SKILL_DIR / "references").glob("*.md")),
+        ]
+        return {f.name: f.read_text(encoding="utf-8") for f in files if f.is_file()}
+
+    def test_backend_really_consumes_task_description(self):
+        """Gegenprobe im Code: ohne sie waere die Skill-Forderung unbegruendet."""
+        import inspect
+        from app.services import hermes_worker
+
+        source = inspect.getsource(hermes_worker._post_process_triage)
+        assert 'parsed.get("task_description")' in source
+        assert "task_description=task_description" in source
+
+    def test_skill_does_not_call_task_description_decorative(self):
+        texts = self._texts()
+        if not texts:
+            pytest.skip("Triage-Skill nicht ausgerollt")
+
+        offenders: list[str] = []
+        for name, text in texts.items():
+            for lineno, line in enumerate(text.splitlines(), start=1):
+                if "task_description" not in line:
+                    continue
+                if re.search(r"dekorativ|NICHT ausgewertet", line, re.IGNORECASE):
+                    offenders.append(f"{name}:{lineno}: {line.strip()[:110]}")
+        assert not offenders, (
+            "Der Skill bezeichnet task_description als dekorativ, obwohl das Backend "
+            "den Wert in die Aufgabe uebernimmt:\n" + "\n".join(offenders)
+        )
+
+    def test_skill_specifies_markdown_format_for_task_description(self):
+        """Positivprobe: die Formatvorgabe muss auffindbar sein."""
+        texts = self._texts()
+        if not texts:
+            pytest.skip("Triage-Skill nicht ausgerollt")
+
+        combined = "\n".join(texts.values())
+        assert "Format von `task_description`" in combined
+        assert "Markdown-Liste" in combined
+        # Der Quell-Link kommt deterministisch vom Backend, nicht vom Modell.
+        assert "Quell-E-Mail" in combined
 
 
 class TestSelfGradeStyleAnchor:

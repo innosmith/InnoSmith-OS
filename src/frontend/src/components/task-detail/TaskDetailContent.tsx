@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { marked } from 'marked';
+import TurndownService from 'turndown';
 import {
   DndContext,
   closestCenter,
@@ -20,7 +21,16 @@ import { CSS } from '@dnd-kit/utilities';
 import { api } from '../../api/client';
 import type { TaskDetail, ChecklistItem, TaskUpdatePayload } from '../../types';
 import { RichTextEditor } from '../RichTextEditor';
-import { SectionLabel, DescIcon, ChecklistIcon, GripIcon, TrashIcon } from './shared';
+import { EmailThreadPanel } from '../EmailThreadPanel';
+import { SectionLabel, DescIcon, ChecklistIcon, GripIcon, TrashIcon, MailIcon } from './shared';
+
+/** Wandelt TipTap-HTML zurück zu Markdown (Speicherformat bleibt Markdown-First). */
+const turndown = new TurndownService({
+  headingStyle: 'atx',
+  bulletListMarker: '-',
+  hr: '---',
+  codeBlockStyle: 'fenced',
+});
 
 interface TaskDetailContentProps {
   task: TaskDetail;
@@ -195,7 +205,7 @@ export default function TaskDetailContent({
   const titleRef = useRef<HTMLInputElement>(null);
 
   const [editingDesc, setEditingDesc] = useState(false);
-  const [descValue, setDescValue] = useState(task.description ?? '');
+  const [descValue, setDescValue] = useState('');
   const descDirtyRef = useRef(false);
 
   const [editingItemId, setEditingItemId] = useState<string | null>(null);
@@ -204,13 +214,23 @@ export default function TaskDetailContent({
   const [convertedTask, setConvertedTask] = useState<{ id: string; title: string } | null>(null);
   const convertTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // Beschreibungen sind Markdown (bleach strippt HTML beim Speichern). Die frühere
+  // HTML-Heuristik traf fälschlich auf «Von: Name <addr@domain>» im Quell-Block.
+  const descriptionHtml = useMemo(
+    () => (task.description ? (marked.parse(task.description, { breaks: true }) as string) : ''),
+    [task.description],
+  );
+
   useEffect(() => {
     setTitleValue(task.title);
   }, [task.title]);
 
   useEffect(() => {
-    setDescValue(task.description ?? '');
-  }, [task.description]);
+    if (!editingDesc) {
+      setDescValue(descriptionHtml);
+      descDirtyRef.current = false;
+    }
+  }, [descriptionHtml, editingDesc]);
 
   useEffect(() => {
     if (editingTitle && titleRef.current) {
@@ -218,6 +238,25 @@ export default function TaskDetailContent({
       titleRef.current.select();
     }
   }, [editingTitle]);
+
+  // Betreff und Absender als eine Kopfzeile -- zugeklappt ist das alles, was es an
+  // Herkunftsinfo braucht; früher stand dasselbe zusätzlich in der Beschreibung.
+  const sourceEmailSubtitle = useMemo(() => {
+    const parts = [task.source_email_subject, task.source_email_from && `von ${task.source_email_from}`];
+    return parts.filter(Boolean).join(' · ');
+  }, [task.source_email_subject, task.source_email_from]);
+
+  const outlookButton = task.source_email_web_link ? (
+    <a
+      href={task.source_email_web_link}
+      target="_blank"
+      rel="noopener noreferrer"
+      title="Original mit Anhängen in Outlook öffnen"
+      className="flex shrink-0 items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium text-indigo-600 transition-colors hover:bg-indigo-50 dark:text-indigo-400 dark:hover:bg-indigo-950/40"
+    >
+      Outlook <ArrowUpRightIcon className="h-3 w-3" />
+    </a>
+  ) : undefined;
 
   const saveTitle = useCallback(async () => {
     const trimmed = titleValue.trim();
@@ -231,17 +270,13 @@ export default function TaskDetailContent({
 
   const saveDescriptionAndClose = useCallback(async () => {
     if (descDirtyRef.current) {
-      await updateTask({ description: descValue });
+      // TipTap liefert HTML; Backend speichert Markdown → Round-Trip via turndown.
+      const markdown = turndown.turndown(descValue);
+      await updateTask({ description: markdown });
       descDirtyRef.current = false;
     }
     setEditingDesc(false);
   }, [descValue, updateTask]);
-
-  const descriptionHtml = useMemo(() => {
-    if (!task.description) return '';
-    if (/<[a-z][\s\S]*>/i.test(task.description)) return task.description;
-    return marked.parse(task.description, { breaks: true }) as string;
-  }, [task.description]);
 
   const checklist = [...(task.checklist_items ?? [])].sort((a, b) => a.position - b.position);
   const doneCount = checklist.filter((i) => i.is_checked).length;
@@ -405,7 +440,11 @@ export default function TaskDetailContent({
           </div>
         ) : (
           <div
-            onClick={() => setEditingDesc(true)}
+            onClick={(e) => {
+              // Links in der Leseansicht öffnen, statt den Editor zu starten.
+              if ((e.target as HTMLElement).closest('a')) return;
+              setEditingDesc(true);
+            }}
             className="cursor-text rounded-lg transition-colors hover:bg-gray-50 dark:hover:bg-gray-800/30"
           >
             {task.description ? (
@@ -413,6 +452,7 @@ export default function TaskDetailContent({
                 <RichTextEditor
                   content={descriptionHtml}
                   editable={false}
+                  openLinksOnClick
                   minHeight="40px"
                 />
               </div>
@@ -424,6 +464,30 @@ export default function TaskDetailContent({
           </div>
         )}
       </div>
+
+      {/* Quell-E-Mail: hier statt in der Sidebar, weil die Originalmail in der
+          breiten Spalte lesbar bleibt. Zugeklappt ist es eine einzige Zeile. */}
+      {task.email_message_id && (
+        <div>
+          {task.email_conversation_id ? (
+            <EmailThreadPanel
+              conversationId={task.email_conversation_id}
+              title="Quell-E-Mail"
+              subtitle={sourceEmailSubtitle}
+              action={outlookButton}
+              roomy
+            />
+          ) : (
+            <div className="mt-2 flex items-center gap-2 rounded-lg border border-gray-200 px-3 py-2 dark:border-gray-700">
+              <MailIcon className="h-3.5 w-3.5 shrink-0 text-gray-400 dark:text-gray-500" />
+              <span className="min-w-0 flex-1 truncate text-xs text-gray-500 dark:text-gray-400">
+                {sourceEmailSubtitle || 'Quell-E-Mail'}
+              </span>
+              {outlookButton}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Checkliste */}
       <div>

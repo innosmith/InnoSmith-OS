@@ -8,6 +8,8 @@ interface RichTextEditorProps {
   content: string;
   onChange?: (html: string) => void;
   editable?: boolean;
+  /** In der Leseansicht Links per Klick öffnen (Default: false). */
+  openLinksOnClick?: boolean;
   placeholder?: string;
   className?: string;
   minHeight?: string;
@@ -18,6 +20,7 @@ export function RichTextEditor({
   content,
   onChange,
   editable = true,
+  openLinksOnClick = false,
   placeholder,
   className = '',
   minHeight = '120px',
@@ -31,8 +34,12 @@ export function RichTextEditor({
         orderedList: { keepMarks: true, keepAttributes: false },
       }),
       Link.configure({
-        openOnClick: false,
-        HTMLAttributes: { class: 'text-indigo-500 underline cursor-pointer' },
+        openOnClick: openLinksOnClick,
+        HTMLAttributes: {
+          class: 'text-indigo-500 underline cursor-pointer',
+          target: '_blank',
+          rel: 'noopener noreferrer',
+        },
       }),
       Underline,
     ],

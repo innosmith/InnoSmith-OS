@@ -180,6 +180,9 @@ class TaskOut(TaskBase):
     assignee_user: AssigneeUser | None = None
     source_email_subject: str | None = None
     source_email_from: str | None = None
+    # Aus email_message_id berechnet, nicht gespeichert -- so gibt es genau einen Ort,
+    # an dem die Outlook-URL entsteht (app/services/email_links.py).
+    source_email_web_link: str | None = None
     meeting_subject: str | None = None
     created_at: datetime
     updated_at: datetime

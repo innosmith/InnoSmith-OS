@@ -23,9 +23,20 @@ Formuliere KEINE Antwort, erstelle KEINEN Entwurf, verschiebe nichts.
 **E-MAIL-INHALT:**
 {body_block}
 {briefing_block}
+### Wo welches Wissen liegt
+Fakten, die sich fortlaufend ändern, holst du aus dem **Fachsystem** -- nicht aus
+älteren E-Mails. Ein Mailfund dazu ist ein Hinweis mit Datum, keine Tatsache:
+
+- Kapazität, Auslastung, geplante und erfasste Stunden → **get_capacity_overview**
+- Ferien, Feiertage, Krankheit, «ab wann wieder erreichbar» → **get_absences**
+- Freie Termine und Kalender → **find_free_slots**, **list_calendar_events**
+{extra_systems}- Projektstand, frühere Zusagen, Dokumente, Mailverlauf → **semantic_search_documents**
+
 ### Vorgehen
 1. Überlege, welches Sachwissen für eine gute Antwort fehlt: Projektstand, frühere
-   Zusagen, Zahlen, Termine, Vorgehensweisen, offene Punkte.
+   Zusagen, Zahlen, Termine, Vorgehensweisen, offene Punkte. Betrifft die Mail
+   Stunden, Kapazität, Verfügbarkeit oder Abwesenheit, rufe **zuerst** das
+   zuständige Fachsystem oben auf.
 2. Suche mit **semantic_search_documents** danach. Nutze **mehrere schmale Abfragen**
    statt einer überladenen -- die Stichwortsuche verknüpft alle Begriffe mit UND.
    Bewährte Bausteine: Name des Absenders, Firmenname ohne Domain-Endung
@@ -44,9 +55,13 @@ keine Antwortformulierungen:
 **Sachstand:** Was ist zum Thema bekannt (Projektstand, Zahlen, Entscheide)?
 **Frühere Zusagen:** Was wurde diesem Kontakt gegenüber bereits zugesagt oder geklärt?
 **Offene Punkte:** Was ist ungeklärt und gehört in die Antwort?
+**Stand womöglich veraltet:** Zeitraumbezogene Angaben (Budget, Kapazität, Termine,
+Verfügbarkeit) aus Quellen, die älter sind als der laufende Monat -- mit ihrem Datum
+und dem Zeitraum, auf den sie sich bezogen.
 **Nicht gefunden:** Wonach du gesucht hast, ohne Treffer.
 
-Jede Aussage mit Quelle in Klammern (Titel oder Absender + Datum). Was du nicht
+Jede Aussage mit Quelle **und Datum** in Klammern -- die Suchtreffer liefern das Feld
+`date`. Ohne Datum ist eine zeitraumbezogene Angabe nicht verwertbar. Was du nicht
 belegen kannst, lässt du weg.
 """
 
@@ -76,6 +91,11 @@ Drei Leitplanken:
    also auch Material aus anderen Mandaten. Erfahrung daraus darfst du
    verallgemeinert einbringen («das habe ich in vergleichbaren Projekten schon
    gemacht»), nie mit Namen, Zahlen oder Details eines Dritten.
+4. **Alte Zahlen bleiben alt.** Was unter «Stand womöglich veraltet» steht oder ein
+   Datum aus einem vergangenen Zeitraum trägt, nennst du nur mit diesem Bezug
+   («im Juli standen dafür noch 14h») -- nie als heutigen Stand. Und du sagst nie
+   zu, welches Budget noch abrufbar ist: Stundenzahlen aus der Planung sind kein
+   Vertragskontingent. Im Zweifel fragst du nach, statt zuzusagen.
 """
 
 
@@ -139,6 +159,7 @@ def render_gather_task(
     topic_hint: str = "",
     max_rounds: int = 5,
     extra_tools: str = "",
+    extra_systems: str = "",
 ) -> str:
     """Rendert den Sammel-Auftrag (Pass 2a). Rein und damit ohne Seiteneffekte testbar."""
     return GATHER_TASK_TEMPLATE.format(
@@ -152,6 +173,7 @@ def render_gather_task(
         topic_hint=topic_hint or subject,
         max_rounds=max_rounds,
         extra_tools=extra_tools,
+        extra_systems=extra_systems,
     )
 
 

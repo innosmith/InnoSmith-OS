@@ -36,8 +36,6 @@ import uuid
 import httpx
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from urllib.parse import quote
-
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import selectinload
 
@@ -142,6 +140,7 @@ WORKER_SYSTEM_PROMPT = (
 _worker_task: asyncio.Task | None = None
 _agent = None  # persistenter Worker-AIAgent (volle Allowlist)
 _triage_agent = None  # persistenter Triage-AIAgent (reduzierte Allowlist, Paket C)
+_gather_agent = None  # persistenter Recherche-AIAgent (Pass 2a, Fachsystem-Zugang)
 _runtime_ready = False
 _runtime_lock: asyncio.Lock | None = None
 _trajectory_shim_installed = False
@@ -2536,40 +2535,35 @@ def _strip_internal_notes(text: str | None) -> str | None:
 
     Der Agent schreibt gelegentlich technische Hinweise (404, HTTPStatusError,
     createReplyAll, "via Graph API nicht lesbar") in task_description/Rationale.
-    Solche Saetze lesen sich im Cockpit wie ein Fehlschlag ("ging nicht") und
-    gehoeren nicht in die nutzersichtbare Aufgabe -- sie werden satzweise entfernt.
+    Solche Sätze lesen sich im Cockpit wie ein Fehlschlag ("ging nicht") und
+    gehören nicht in die nutzersichtbare Aufgabe -- sie werden satzweise entfernt.
+
+    Zeilenumbrüche und Absatzstruktur bleiben erhalten (Listen, Leerzeilen), damit
+    Markdown im Frontend lesbar gerendert wird. Früher kollabierte die Funktion alle
+    Zeilen zu einem Fliesstext -- Aufzählungen im Cockpit waren dadurch unlesbar.
     """
     if not text:
         return text
-    parts = re.split(r"(?<=[.!?])\s+|\n+", text)
-    kept = [p for p in parts if p.strip() and not _INTERNAL_NOISE_RE.search(p)]
-    cleaned = " ".join(s.strip() for s in kept).strip()
+    out_lines: list[str] = []
+    for raw_line in text.splitlines():
+        # Einrückung für verschachtelte Listen bewahren; Trailing-Spaces entfernen.
+        # Komplett leere Zeilen bleiben als Absatztrenner erhalten.
+        indent_len = len(raw_line) - len(raw_line.lstrip(" \t"))
+        indent = raw_line[:indent_len]
+        content = raw_line[indent_len:].rstrip()
+        if not content:
+            out_lines.append("")
+            continue
+        # Rauschen satzweise *innerhalb* der Zeile entfernen.
+        parts = re.split(r"(?<=[.!?])\s+", content)
+        kept = [p for p in parts if p.strip() and not _INTERNAL_NOISE_RE.search(p)]
+        if not kept:
+            continue
+        cleaned_line = " ".join(s.strip() for s in kept)
+        out_lines.append(indent + cleaned_line)
+    cleaned = "\n".join(out_lines)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
     return cleaned or None
-
-
-def _outlook_deeplink(message_id: str | None) -> str | None:
-    """Baut einen Outlook-Web-Deeplink auf eine E-Mail aus ihrer Graph-Message-ID."""
-    if not message_id:
-        return None
-    return f"https://outlook.office.com/mail/deeplink/read/{quote(message_id, safe='')}"
-
-
-def _email_reference_block(meta: dict) -> str:
-    """Strukturierter Quell-E-Mail-Block (Von/Betreff/Deeplink) fuer Task-Beschreibungen."""
-    lines: list[str] = []
-    from_name = (meta.get("from_name") or "").strip()
-    from_addr = (meta.get("from_address") or "").strip()
-    subject = (meta.get("subject") or "").strip()
-    if from_addr or from_name:
-        lines.append(f"Von: {from_name} <{from_addr}>".strip())
-    if subject:
-        lines.append(f"Betreff: {subject}")
-    deeplink = _outlook_deeplink(meta.get("email_message_id"))
-    if deeplink:
-        lines.append(f"E-Mail oeffnen: {deeplink}")
-    if not lines:
-        return ""
-    return "\n\n---\nQuell-E-Mail:\n" + "\n".join(lines)
 
 
 _SUBJECT_PREFIX_RE = re.compile(r"^(?:\s*(?:re|aw|fw|wg|fwd|antw| w)\s*:\s*)+", re.IGNORECASE)
@@ -2925,15 +2919,16 @@ async def _create_email_task(
     )
     next_pos = (max_pos_result.scalar_one_or_none() or 0) + 1
 
-    # Nutzersichtbare Beschreibung saeubern (interne API-/Fehler-Diagnosen raus)
-    # und immer mit einem Quell-E-Mail-Block (Von/Betreff/Deeplink) abschliessen,
-    # damit jede E-Mail-Task die Herkunft + einen Link zur Original-Mail traegt.
+    # Nutzersichtbare Beschreibung saeubern (interne API-/Fehler-Diagnosen raus).
+    # Kein Quell-E-Mail-Block mehr: Absender und Betreff zeigt die Detailansicht aus
+    # den Task-Feldern, die Originalmail liest man dort inline ueber die
+    # conversation_id. Der Block war eine dritte Kopie derselben Angaben und kostete
+    # in jeder Aufgabe rund acht Zeilen plus eine mehrzeilig umbrechende URL.
     base_desc = _strip_internal_notes(task_description) or f"Erstellt aus E-Mail: {meta.get('subject', '')}"
-    full_desc = base_desc + _email_reference_block(meta)
 
     new_task = Task(
         title=task_title,
-        description=full_desc,
+        description=base_desc,
         project_id=matched_project.id,
         board_column_id=first_col.id,
         board_position=next_pos,
@@ -3518,7 +3513,7 @@ LOCAL_CORE_TOOLSETS: list[str] = [
 # Fallback-Server-Keys, falls config.yaml (noch) nicht lesbar ist. Deckt sich mit
 # build_config_dict() in hermes_config.py.
 _KNOWN_MCP_SERVERS: list[str] = [
-    "taskpilot", "graph", "graphAdmin", "pipedrive", "toggl", "bexio",
+    "taskpilot", "capacity", "graph", "graphAdmin", "pipedrive", "toggl", "bexio",
     "signa", "invoiceinsight", "scripts", "sandbox", "contentConverter",
 ]
 
@@ -3566,6 +3561,32 @@ def build_triage_allowlist() -> list[str]:
     configured = set(get_configured_server_keys() or _KNOWN_MCP_SERVERS)
     servers = [s for s in _TRIAGE_MCP_SERVERS if s in configured]
     return [*core, *servers]
+
+
+# Fachsysteme fuer den Recherche-Lauf (Pass 2a). Der Sammel-Lauf teilte bisher die
+# Allowlist der Klassifikation -- er sah also nur Graph und die TaskPilot-DB und
+# musste Fragen zu Stunden, Rechnungs- oder Angebotsstand aus dem Mailarchiv
+# beantworten. Genau daraus entstand am 03.08.2026 die veraltete Budgetzahl.
+#
+# ``schmal`` deckt den beobachteten Fehlerfall ab, ``breit`` gibt dem Agenten
+# dieselben Fachsysteme, die auch der Mensch nutzt (Leitprinzip Team-Modell). Was
+# besser traegt, ist eine Messfrage: mehr Werkzeugdefinitionen kosten Kontext und
+# koennen die Werkzeugwahl eines kleinen Modells verschlechtern. Deshalb ein Flag
+# statt einer Annahme.
+_GATHER_MCP_SERVERS_NARROW: list[str] = ["graph", "taskpilot", "capacity"]
+_GATHER_MCP_SERVERS_WIDE: list[str] = [
+    "graph", "taskpilot", "capacity", "toggl", "pipedrive", "bexio", "signa",
+]
+
+
+def build_gather_allowlist(wide: bool | None = None) -> list[str]:
+    """Allowlist fuer den Recherche-Lauf. ``web`` bleibt aus (Datenminimierung)."""
+    if wide is None:
+        wide = get_settings().draft_context_wide_tools
+    core = [t for t in LOCAL_CORE_TOOLSETS if t != "web"]
+    wanted = _GATHER_MCP_SERVERS_WIDE if wide else _GATHER_MCP_SERVERS_NARROW
+    configured = set(get_configured_server_keys() or _KNOWN_MCP_SERVERS)
+    return [*core, *[s for s in wanted if s in configured]]
 
 
 def count_tools(enabled_toolsets: list[str] | None) -> int:
@@ -3850,6 +3871,32 @@ async def _init_triage_agent():
     return _triage_agent
 
 
+async def _init_gather_agent():
+    """Initialisiert den Recherche-Agenten (Pass 2a) mit eigener Allowlist.
+
+    Bisher liehen sich Klassifikation und Recherche denselben Agenten. Das war
+    bequem und fachlich falsch: der Lauf, der recherchieren soll, hatte keinen
+    Zugang zu den Fachsystemen. Eigene Instanz, damit der Umfang unabhaengig von
+    der Klassifikation einstellbar ist. Best-effort mit Rueckfall auf den
+    Triage-Agenten.
+    """
+    global _gather_agent
+    if _gather_agent is not None:
+        return _gather_agent
+    if not await ensure_runtime_ready():
+        return None
+    try:
+        allow = build_gather_allowlist()
+        _gather_agent = await asyncio.to_thread(
+            _build_worker_agent, allow, "taskpilot-worker-gather",
+        )
+        logger.info("Hermes Recherche-AIAgent initialisiert (Toolsets: %s)", allow)
+    except Exception:
+        logger.exception("Hermes Recherche-AIAgent-Initialisierung fehlgeschlagen")
+        _gather_agent = None
+    return _gather_agent
+
+
 def _draft_sampling_overrides(disable_thinking: bool = True, *, local: bool = True) -> dict:
     """Prosa-Sampling fuer den Schreib-Pass (Qwen-3.6-Empfehlung fuer Non-Thinking).
 
@@ -4019,6 +4066,22 @@ async def _build_gather_prompt(meta: dict, parsed: dict | None = None) -> str:
         topic_hint=subject,
         max_rounds=_GATHER_MAX_ROUNDS,
         extra_tools=extra_tools,
+        extra_systems=_gather_extra_systems(),
+    )
+
+
+def _gather_extra_systems() -> str:
+    """Systemkarten-Zeilen fuer die Fachsysteme des breiten Umfangs.
+
+    Nur nennen, was der Agent auch aufrufen kann -- ein Verweis auf ein Werkzeug,
+    das nicht in seiner Allowlist steht, produziert nur Fehlversuche.
+    """
+    if not get_settings().draft_context_wide_tools:
+        return ""
+    return (
+        "- Verkaufschancen, Deals, Angebotsstand → **search_crm**\n"
+        "- Rechnungen und Offerten → **search_invoices**\n"
+        "- Erfasste Zeit auf Toggl-Ebene → **search_time_entries**\n"
     )
 
 
@@ -4035,11 +4098,12 @@ async def _gather_draft_context(meta: dict, parsed: dict | None = None) -> str |
     Liefert ein Markdown-Dossier oder ``None``. Best-effort: scheitert die
     Recherche, schreibt der Draft-Pass wie bisher ohne Fachkontext weiter.
 
-    Der Sammel-Agent ist der Triage-Agent (reduzierte Allowlist ohne ``web`` und
-    ohne ``graphAdmin``): er kann suchen und lesen, aber weder Entwuerfe erstellen
-    noch den Outlook-Zustand veraendern.
+    Der Sammel-Agent hat eine eigene Allowlist (``build_gather_allowlist``): Zugang
+    zu den Fachsystemen, aber ohne ``web`` und ohne ``graphAdmin``. Er kann also
+    suchen und lesen, aber weder Entwuerfe erstellen noch den Outlook-Zustand
+    veraendern. Rueckfall auf Triage- bzw. Worker-Agent, falls der Bau scheitert.
     """
-    agent = _triage_agent or _agent
+    agent = await _init_gather_agent() or _triage_agent or _agent
     if agent is None:
         logger.warning("Kontext-Recherche: kein Agent verfügbar")
         return None

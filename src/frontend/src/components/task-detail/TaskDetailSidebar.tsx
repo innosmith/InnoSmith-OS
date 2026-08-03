@@ -3,7 +3,6 @@ import { useNavigate } from 'react-router-dom';
 import type { TaskDetail, Tag, TaskUpdatePayload, PipelineColumn, Project, BoardColumn, AgentJob } from '../../types';
 import { FileText } from 'lucide-react';
 import { api } from '../../api/client';
-import { EmailThreadPanel } from '../EmailThreadPanel';
 import { MeetingSourcePanel } from '../MeetingSourcePanel';
 
 const CalendarSlotPickerLazy = lazy(() => import('./CalendarSlotPicker'));
@@ -274,24 +273,11 @@ export default function TaskDetailSidebar({
   return (
     <div id="task-attribute-panel" className="flex flex-col gap-0.5 bg-gray-50/40 px-5 py-4 scroll-mt-2 dark:bg-gray-900/20">
       {/* Origin Badges */}
+      {/* Nur noch das Herkunfts-Badge. Betreff, Absender und der Thread stehen unter
+          der Beschreibung, wo die Originalmail die volle Breite bekommt. */}
       {task.email_message_id && (
-        <div className="mb-3 rounded-lg bg-sky-50 px-2.5 py-1.5 dark:bg-sky-950/40">
-          <div className="flex items-center gap-1.5 text-[11px] font-medium text-sky-600 dark:text-sky-400">
-            <MailIcon className="h-3 w-3 shrink-0" /> Aus E-Mail erstellt
-          </div>
-          {task.source_email_subject && (
-            <div className="mt-1 truncate text-[11px] text-sky-700/80 dark:text-sky-300/70">
-              {task.source_email_subject}
-            </div>
-          )}
-          {task.source_email_from && (
-            <div className="truncate text-[10px] text-sky-600/60 dark:text-sky-400/50">
-              von {task.source_email_from}
-            </div>
-          )}
-          {task.email_conversation_id && (
-            <EmailThreadPanel conversationId={task.email_conversation_id} compact />
-          )}
+        <div className="mb-3 flex items-center gap-1.5 rounded-lg bg-sky-50 px-2.5 py-1.5 text-[11px] font-medium text-sky-600 dark:bg-sky-950/40 dark:text-sky-400">
+          <MailIcon className="h-3 w-3 shrink-0" /> Aus E-Mail erstellt
         </div>
       )}
       {task.calendar_event_id && !task.email_message_id && (

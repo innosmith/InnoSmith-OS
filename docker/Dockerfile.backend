@@ -93,6 +93,7 @@ COPY src/backend/migrations/ /app/migrations/
 
 # MCP-Server
 COPY src/mcp-taskpilot/ /app/mcp-taskpilot/
+COPY src/mcp-capacity/ /app/mcp-capacity/
 COPY src/mcp-graph/ /app/mcp-graph/
 COPY src/mcp-pipedrive/ /app/mcp-pipedrive/
 COPY src/mcp-toggl/ /app/mcp-toggl/
@@ -108,8 +109,9 @@ COPY src/pipedrive/ /app/pipedrive/
 COPY src/bexio/ /app/bexio/
 COPY src/toggl/ /app/toggl/
 COPY src/signa/ /app/signa/
+COPY src/capacity/ /app/capacity/
 
-ENV PYTHONPATH=/app:/app/email-graph:/app/pipedrive:/app/bexio:/app/toggl:/app/signa
+ENV PYTHONPATH=/app:/app/email-graph:/app/pipedrive:/app/bexio:/app/toggl:/app/signa:/app/capacity
 
 # Entrypoint (Hermes-Config wird zur Laufzeit vom Backend generiert)
 COPY docker/entrypoint.sh /app/

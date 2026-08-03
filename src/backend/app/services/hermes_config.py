@@ -294,6 +294,19 @@ def build_config_dict() -> dict:
             "GRAPH_TOOL_MODE": "admin",
             "GRAPH_TRIAGE_DRAFT": "0" if cfg.two_pass_draft else "1",
         }, extra_pythonpath=f"{base}:{base}/email-graph"),
+        # Kapazitätsplanung: braucht DB (Plan) UND Toggl (Ist). Eigener Server statt
+        # Anbau an taskpilot, weil die Domäne eine andere ist -- und weil der Agent
+        # sonst Stunden- und Verfügbarkeitsfragen aus dem E-Mail-Archiv beantwortet,
+        # was am 03.08.2026 nachweislich zu einer veralteten Budgetzahl im Entwurf führte.
+        "capacity": stdio("mcp-capacity", {
+            "TP_DB_HOST": "${TP_DB_HOST}",
+            "TP_DB_PORT": "${TP_DB_PORT}",
+            "TP_DB_USER": "${TP_DB_USER}",
+            "TP_DB_PASSWORD": "${TP_DB_PASSWORD}",
+            "TP_DB_NAME": "${TP_DB_NAME}",
+            "TP_TOGGL_API_TOKEN": "${TP_TOGGL_API_TOKEN}",
+            "TP_TOGGL_WORKSPACE_ID": "${TP_TOGGL_WORKSPACE_ID}",
+        }, extra_pythonpath=f"{base}:{base}/capacity:{base}/toggl"),
         "pipedrive": stdio("mcp-pipedrive", {
             "TP_PIPEDRIVE_API_TOKEN": "${TP_PIPEDRIVE_API_TOKEN}",
             "TP_PIPEDRIVE_DOMAIN": "${TP_PIPEDRIVE_DOMAIN}",

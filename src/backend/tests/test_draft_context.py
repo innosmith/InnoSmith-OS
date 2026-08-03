@@ -34,6 +34,7 @@ def _settings(**over):
         draft_context_temperature=0.2,
         draft_context_max_sources=10,
         draft_context_max_chars=6000,
+        draft_context_wide_tools=False,
         draft_model="",
         draft_temperature=0.7,
         draft_top_p=0.8,
@@ -205,6 +206,69 @@ def test_dossier_block_forbids_naming_other_clients():
     text = render_dossier_block("**Sachstand:** Schulung bei Firma B durchgeführt.")
     assert "Andere Kunden bleiben ungenannt" in text
     assert "verallgemeinert" in text
+
+
+def test_gather_task_routes_volatile_facts_to_the_specialist_system():
+    """Der Ausloeser dieses Pakets: Am 03.08.2026 nannte ein Entwurf «14h Budget fuer
+    Juli» als heutigen Stand -- die Zahl stammte aus einer Mail vom 02.07.2026.
+
+    Zugang allein behebt das nicht. Der Agent hatte den Kalender schon vorher und
+    fragte trotzdem das Archiv. Die Systemkarte sagt darum ausdruecklich, welches
+    System fortlaufend veraenderliche Fakten beantwortet -- und dass ein Mailfund
+    dazu ein datierter Hinweis ist, keine Tatsache.
+    """
+    text = render_gather_task(
+        today="Heute", subject="Kapazität August", from_name="S", from_addr="s@sb.ch",
+        body_block="Wie viele Stunden hast du noch?",
+    )
+    assert "get_capacity_overview" in text
+    assert "get_absences" in text
+    assert "älteren E-Mails" in text
+    assert "keine Tatsache" in text
+
+
+def test_gather_task_only_names_systems_the_agent_may_call():
+    """Ein Verweis auf ein Werkzeug ausserhalb der Allowlist produziert Fehlversuche.
+
+    Die Systemkarte waechst darum mit dem Werkzeug-Umfang mit.
+    """
+    kwargs = dict(
+        today="Heute", subject="Angebot", from_name="S", from_addr="s@sb.ch", body_block="?",
+    )
+    narrow = render_gather_task(**kwargs)
+    wide = render_gather_task(
+        **kwargs,
+        extra_systems="- Verkaufschancen, Deals, Angebotsstand → **search_deals**\n",
+    )
+
+    assert "search_deals" not in narrow
+    assert "search_deals" in wide
+
+
+def test_gather_task_demands_a_date_for_every_fact():
+    """Ohne Datum ist eine zeitraumbezogene Angabe nicht pruefbar -- genau daran
+    scheiterte der Juli-Fall. Die Suche liefert das Feld inzwischen mit."""
+    text = render_gather_task(
+        today="Heute", subject="Budget", from_name="S", from_addr="s@sb.ch", body_block="?",
+    )
+    assert "Stand womöglich veraltet" in text
+    assert "`date`" in text
+
+
+def test_dossier_block_binds_old_numbers_to_their_period():
+    """Der Schreib-Pass darf eine Juli-Zahl nennen -- aber nur als Juli-Zahl."""
+    text = render_dossier_block("**Stand womöglich veraltet:** 14h Juli-Budget (02.07.2026)")
+
+    assert "Alte Zahlen bleiben alt" in text
+    assert "nie als heutigen Stand" in text
+
+
+def test_dossier_block_forbids_promising_available_budget():
+    """Die Planung ist kein Vertragskontingent. Der Entwurf sagte «14h verfügbar» --
+    eine Zusage, die aus Planungsstunden gar nicht folgt."""
+    text = render_dossier_block("**Sachstand:** 14h geplant")
+
+    assert "Vertragskontingent" in text
 
 
 def test_gather_task_forbids_repeating_queries():
