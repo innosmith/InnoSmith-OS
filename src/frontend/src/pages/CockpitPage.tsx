@@ -632,8 +632,10 @@ export function CockpitPage() {
               </div>
             </section>
 
-            {/* Rechte Spalte: Heute + E-Mails & CRM gestapelt */}
-            <div className="space-y-4">
+            {/* Rechte Spalte: Heute + E-Mails & CRM gestapelt.
+                Flex-Spalte über die volle Zeilenhöhe, damit die untere Kachel den
+                Raum bis zum Ende der Agenda ausfüllt statt eine Lücke zu lassen. */}
+            <div className="flex h-full flex-col gap-4">
 
             {/* Kalender heute */}
             <section className={`rounded-xl border p-4 ${cardClass}`}>
@@ -692,8 +694,10 @@ export function CockpitPage() {
               )}
             </section>
 
-            {/* E-Mails & CRM (zurück in der Agenda/Heute-Zeile) */}
-            <section className={`rounded-xl border p-4 ${cardClass}`}>
+            {/* E-Mails & CRM (zurück in der Agenda/Heute-Zeile).
+                flex-1 füllt die Resthöhe, min-h-0 lässt die Liste darin scrollen
+                statt die Kachel über die Zeilenhöhe hinaus zu dehnen. */}
+            <section className={`flex min-h-0 flex-1 flex-col rounded-xl border p-4 ${cardClass}`}>
               <div className="mb-3 flex items-center justify-between">
                 <h2 className={`text-sm font-semibold uppercase tracking-wider ${textSecondary}`}>
                   E-Mails & CRM
@@ -716,7 +720,7 @@ export function CockpitPage() {
                   </a>
                 </div>
               </div>
-              <div className="space-y-1.5 max-h-80 overflow-y-auto">
+              <div className="min-h-[5rem] flex-1 space-y-1.5 overflow-y-auto">
                 {flaggedEmails.map(email => (
                   <div
                     key={email.id}
@@ -766,7 +770,7 @@ export function CockpitPage() {
                   );
                 })}
                 {flaggedEmails.length === 0 && pipedriveActivities.length === 0 && (
-                  <div className={`flex h-20 items-center justify-center rounded-lg text-sm ${textMuted}`}>
+                  <div className={`flex h-full min-h-20 items-center justify-center rounded-lg text-sm ${textMuted}`}>
                     Keine E-Mails oder Aufgaben
                   </div>
                 )}

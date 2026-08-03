@@ -75,8 +75,8 @@ class TestScheduledFor:
         result = _scheduled_for("weekly_briefing", {"briefing_weekly_day": 4}, now)
         assert result == datetime(2026, 7, 3, 17, 0, tzinfo=_TZ)
 
-    def test_monthly_letzter_kalendertag(self):
-        # 31.07. 18:00 -> Slot heute 17:00
+    def test_monthly_letzter_arbeitstag(self):
+        # 31.07.2026 ist ein Freitag -> Slot heute 17:00
         now = datetime(2026, 7, 31, 18, 0, tzinfo=_TZ)
         result = _scheduled_for("monthly_briefing", {}, now)
         assert result == datetime(2026, 7, 31, 17, 0, tzinfo=_TZ)
@@ -86,9 +86,81 @@ class TestScheduledFor:
         result = _scheduled_for("monthly_briefing", {}, now)
         assert result == datetime(2026, 6, 30, 17, 0, tzinfo=_TZ)
 
+    def test_monthly_ueberspringt_wochenende(self):
+        """31.05.2026 ist ein Sonntag — das Briefing gehört auf Freitag den 29.
+
+        Vorher lief das Monatsbriefing am letzten Kalendertag. Fiel der auf ein
+        Wochenende, erschien die Planung für den nächsten Monat erst, wenn
+        dieser bereits begonnen hatte.
+        """
+        now = datetime(2026, 5, 31, 20, 0, tzinfo=_TZ)
+        result = _scheduled_for("monthly_briefing", {}, now)
+        assert result == datetime(2026, 5, 29, 17, 0, tzinfo=_TZ)
+
+    def test_monthly_ueberspringt_abwesenheit(self):
+        """Ferien am Monatsende verschieben das Briefing auf davor.
+
+        Ein Monatsbriefing, das während der Ferien erscheint, ist bei der
+        Rückkehr veraltet — die Planung findet vor der Abwesenheit statt.
+        """
+        now = datetime(2026, 7, 31, 18, 0, tzinfo=_TZ)
+        off = {date(2026, 7, d) for d in (29, 30, 31)}
+        result = _scheduled_for("monthly_briefing", {}, now, off)
+        assert result == datetime(2026, 7, 28, 17, 0, tzinfo=_TZ)
+
     def test_unbekannter_typ(self):
         now = datetime(2026, 7, 2, 8, 0, tzinfo=_TZ)
         assert _scheduled_for("quarterly_briefing", {}, now) is None
+
+
+class TestBriefingAnweisungsKonsistenz:
+    """Prompt und Datensammlung müssen dasselbe Briefing beschreiben.
+
+    Vorfall: Das Monatsbriefing nannte Umsatzzahlen, die um Grössenordnungen
+    falsch waren. Ursache war nicht das Modell, sondern die Kombination aus
+    einem Prompt, der eine Monatsbilanz verlangte, und einer Datenlage, die
+    Fakturierung vor Monatsende erwartete. Ein Widerspruch zwischen den beiden
+    Seiten fällt keinem Test auf, der nur eine Seite liest — deshalb hier
+    beide gemeinsam.
+    """
+
+    def _quellen(self, builder_name: str) -> str:
+        import inspect
+
+        from app.services import briefing_data
+
+        return inspect.getsource(getattr(briefing_data, builder_name))
+
+    def test_monatsbriefing_ohne_finanzsektionen(self):
+        src = self._quellen("build_monthly_context")
+        for begriff in ("umsatz_sollist", "coverage", "kreditoren", "revenue"):
+            assert begriff not in src, f"Finanz-Sektion «{begriff}» wieder im Monatsbriefing"
+
+    def test_monatsprompt_verbietet_finanzzahlen(self):
+        from app.services.hermes_worker import _BRIEFING_INSTRUCTIONS
+
+        prompt = _BRIEFING_INSTRUCTIONS["monthly_briefing"]
+        assert "Umsatz" in prompt and "NICHT" in prompt
+        assert "Monatsbilanz" not in prompt
+
+    def test_tagesbriefing_verlangt_keine_priorisierung(self):
+        """Das Tagesbriefing sammelt keine Aufgabenlisten — also darf der Prompt
+        auch keine Top-3-Auswahl verlangen, sonst erfindet das Modell sie."""
+        from app.services.hermes_worker import _BRIEFING_INSTRUCTIONS
+
+        prompt = _BRIEFING_INSTRUCTIONS["daily_briefing"]
+        assert "KEINE Top-3-Liste" in prompt
+        src = self._quellen("build_daily_context")
+        assert "_sec_focus_tasks" not in src
+        assert "_sec_tasks_due_today" not in src
+
+    def test_alle_briefings_verbieten_tabellen(self):
+        from app.services.hermes_worker import _build_briefing_prompt
+
+        import inspect
+
+        src = inspect.getsource(_build_briefing_prompt)
+        assert "KEINE Markdown-Tabelle" in src
 
 
 class TestParseTime:

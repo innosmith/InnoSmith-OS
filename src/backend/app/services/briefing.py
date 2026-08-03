@@ -9,6 +9,10 @@ Dedupe: pro Briefing-Typ und Periode genau ein Job (Vergleich gegen den
 berechneten Auslösezeitpunkt). Verpasste Zeitfenster (z. B. System war aus)
 werden nur innerhalb einer Karenzfrist nachgeholt — veraltete Briefings
 bringen keinen Nutzen mehr.
+
+Das Monatsbriefing läuft am letzten **Arbeitstag** des Monats: Wochenenden und
+Abwesenheiten aus ``capacity_time_off`` werden übersprungen, damit das Briefing
+vor und nicht während der Ferien erscheint.
 """
 
 import asyncio
@@ -21,7 +25,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import select
 
 from app.database import async_session
-from app.models import AgentJob, User
+from app.models import AgentJob, CapacityTimeOff, User
 from app.core.principal import get_owner
 
 logger = logging.getLogger("taskpilot.briefing")
@@ -37,7 +41,7 @@ _DEFAULTS = {
     "briefing_weekly_day": 6,       # 0=Montag … 6=Sonntag
     "briefing_weekly_time": "17:00",
     "briefing_monthly_enabled": True,
-    "briefing_monthly_time": "17:00",  # am letzten Kalendertag des Monats
+    "briefing_monthly_time": "17:00",  # am letzten Arbeitstag des Monats
 }
 
 # Karenzfrist: wie lange nach dem Soll-Zeitpunkt ein Briefing noch nachgeholt wird.
@@ -64,12 +68,31 @@ def _parse_time(value: str | None, fallback: str) -> dtime:
         return dtime(int(h), int(m))
 
 
-def _scheduled_for(briefing_type: str, settings: dict, now: datetime) -> datetime | None:
+def _last_workday(year: int, month: int, off_days: set[date]) -> date:
+    """Letzter Arbeitstag eines Monats — Wochenenden und Abwesenheiten übersprungen.
+
+    Anthony plant den kommenden Monat gegen Monatsende, aber der konkrete Tag
+    hängt von Ferien und Feiertagen ab. Ein Briefing, das während der Ferien
+    erscheint, ist zum Zeitpunkt der Planung veraltet.
+    """
+    d = date(year, month, cal_mod.monthrange(year, month)[1])
+    while d.day > 1 and (d.weekday() >= 5 or d in off_days):
+        d -= timedelta(days=1)
+    return d
+
+
+def _scheduled_for(
+    briefing_type: str,
+    settings: dict,
+    now: datetime,
+    off_days: set[date] | None = None,
+) -> datetime | None:
     """Berechnet den jüngsten Soll-Zeitpunkt (<= now) für einen Briefing-Typ.
 
     Gibt None zurück, wenn der Typ deaktiviert ist oder der Soll-Zeitpunkt in
     der Zukunft liegt bzw. ausserhalb der Karenzfrist.
     """
+    off_days = off_days or set()
     def _enabled(key: str) -> bool:
         val = settings.get(key)
         return _DEFAULTS[key] if val is None else bool(val)
@@ -106,12 +129,15 @@ def _scheduled_for(briefing_type: str, settings: dict, now: datetime) -> datetim
         if not _enabled("briefing_monthly_enabled"):
             return None
         t = _parse_time(settings.get("briefing_monthly_time"), _DEFAULTS["briefing_monthly_time"])
-        # Letzter Kalendertag des aktuellen Monats; sonst des Vormonats.
-        last_day = date(today.year, today.month, cal_mod.monthrange(today.year, today.month)[1])
-        candidate = datetime.combine(last_day, t, tzinfo=_TZ)
+        # Letzter Arbeitstag des aktuellen Monats; sonst des Vormonats.
+        candidate = datetime.combine(
+            _last_workday(today.year, today.month, off_days), t, tzinfo=_TZ
+        )
         if candidate > now:
             prev_month_end = today.replace(day=1) - timedelta(days=1)
-            candidate = datetime.combine(prev_month_end, t, tzinfo=_TZ)
+            candidate = datetime.combine(
+                _last_workday(prev_month_end.year, prev_month_end.month, off_days), t, tzinfo=_TZ
+            )
         return candidate
 
     return None
@@ -195,9 +221,20 @@ async def check_briefings_due() -> int:
             return 0
         settings = dict(owner.settings or {})
 
+        # Abwesenheiten des laufenden und des Vormonats: sie verschieben den
+        # Auslösetag des Monatsbriefings auf den letzten Arbeitstag davor.
+        window_start = (now.date().replace(day=1) - timedelta(days=1)).replace(day=1)
+        off_days = set(
+            (
+                await db.execute(
+                    select(CapacityTimeOff.date).where(CapacityTimeOff.date >= window_start)
+                )
+            ).scalars().all()
+        )
+
         due: list[tuple[str, datetime]] = []
         for briefing_type in ("daily_briefing", "weekly_briefing", "monthly_briefing"):
-            scheduled = _scheduled_for(briefing_type, settings, now)
+            scheduled = _scheduled_for(briefing_type, settings, now, off_days)
             if scheduled is None:
                 continue
             if now - scheduled > _GRACE[briefing_type]:

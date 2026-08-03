@@ -26,6 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth.deps import get_current_user, require_role
 from app.database import async_session
 from app.models import CapacityAllocation, CapacityProject, CapacityTimeOff, Project, User
+from app.services.finance_settings import get_forecast_settings_from_settings
 
 _SRC = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(_SRC / "toggl"))
@@ -724,35 +725,77 @@ async def get_weekly_summary(
 # ── Aggregation: Forecast Revenue ────────────────────────────────────────────
 
 
+def _workdays_in_range(start: date, end: date) -> list[date]:
+    """Arbeitstage (Mo–Fr) von ``start`` bis ``end`` inklusive."""
+    return [
+        d
+        for d in (start + timedelta(days=i) for i in range((end - start).days + 1))
+        if d.weekday() < 5
+    ]
+
+
 @router.get("/forecast-revenue", response_model=list[ForecastMonth])
 async def get_forecast_revenue(
     from_date: str = Query(..., alias="from"),
     to_date: str = Query(..., alias="to"),
     user: User = Depends(require_role("owner")),
 ):
-    """Monatliche Umsatzprognose basierend auf geplanter Kapazität x Stundensatz."""
+    """Monatliche Umsatzprognose basierend auf geplanter Kapazität x Stundensatz.
+
+    Zwei Eigenheiten, die die Prognose früher um mehr als eine Grössenordnung
+    verfälscht haben:
+
+    - **Stundensatz:** Projekte ohne eigenen ``hourly_rate`` wurden komplett
+      ignoriert. Da in der Praxis nur einzelne Projekte einen individuellen Satz
+      tragen, blieb fast die gesamte verrechenbare Kapazität unsichtbar. Jetzt
+      greift der ``default_hourly_rate`` aus den Owner-Settings.
+    - **Monatszuordnung:** Eine Wochen-Allokation wurde vollständig dem Monat
+      ihres Montags zugeschlagen. Die Woche ab 27.07. landete damit ganz im
+      Juli, obwohl vier von fünf Arbeitstagen im August liegen. Jetzt werden die
+      Minuten arbeitstagweise auf die berührten Monate verteilt, und Wochen, die
+      in das Fenster hineinreichen, werden mitgezählt.
+    """
     d_from = date.fromisoformat(from_date)
     d_to = date.fromisoformat(to_date)
+
+    fs = get_forecast_settings_from_settings(getattr(user, "settings", None))
 
     async with async_session() as session:
         stmt = (
             select(CapacityAllocation, CapacityProject)
             .join(CapacityProject)
-            .where(CapacityAllocation.week_start >= d_from)
+            # Eine Woche, die vor ``d_from`` beginnt, kann in das Fenster
+            # hineinreichen -- sonst fehlen die ersten Tage des Zeitraums.
+            .where(CapacityAllocation.week_start >= d_from - timedelta(days=6))
             .where(CapacityAllocation.week_start <= d_to)
             .where(CapacityProject.status == "bestätigt")
             .where(CapacityProject.is_billable == True)  # noqa: E712
-            .where(CapacityProject.hourly_rate.isnot(None))
         )
         result = await session.execute(stmt)
         rows = result.all()
 
     monthly: dict[str, dict] = defaultdict(lambda: {"revenue": 0.0, "hours": 0.0})
     for alloc, proj in rows:
-        month_key = alloc.week_start.strftime("%Y-%m")
-        hours = alloc.minutes / 60
-        monthly[month_key]["hours"] += hours
-        monthly[month_key]["revenue"] += hours * float(proj.hourly_rate or 0)
+        rate = float(proj.hourly_rate) if proj.hourly_rate is not None else fs.default_hourly_rate
+        if alloc.allocation_type == "week":
+            span_start = alloc.week_start
+            span_end = alloc.week_start + timedelta(days=6)
+        else:
+            span_start = span_end = alloc.week_start
+
+        workdays = _workdays_in_range(span_start, span_end) or [span_start]
+        in_window = [d for d in workdays if d_from <= d <= d_to]
+        if not in_window:
+            continue
+
+        # Minuten gleichmässig auf die Arbeitstage der Allokation verteilen und
+        # nur die Tage innerhalb des Fensters zählen.
+        minutes_per_day = alloc.minutes / len(workdays)
+        for day in in_window:
+            month_key = day.strftime("%Y-%m")
+            hours = minutes_per_day / 60
+            monthly[month_key]["hours"] += hours
+            monthly[month_key]["revenue"] += hours * rate
 
     return [
         ForecastMonth(month=k, revenue=round(v["revenue"], 2), hours=round(v["hours"], 2))

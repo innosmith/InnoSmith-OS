@@ -469,3 +469,70 @@ async def test_time_off_duplicate_409(client_as_owner):
     for entry in list_resp.json():
         if entry["date"] == "2026-12-26":
             await client_as_owner.delete(f"/api/capacity/time-off/{entry['id']}")
+
+
+# ── Umsatzprognose: Regressionstests zu falschen Monatszahlen ────────────────
+
+
+@pytest.mark.db
+async def test_forecast_revenue_nutzt_default_stundensatz(client_as_owner):
+    """Projekte ohne eigenen Stundensatz zählen mit dem Default-Satz mit.
+
+    Vorfall: Die Prognose filterte auf ``hourly_rate IS NOT NULL``. In der
+    Praxis trägt fast kein Kapazitätsprojekt einen individuellen Satz, weshalb
+    die Prognose nahezu die gesamte verrechenbare Kapazität verschwieg — im
+    Monatsbriefing erschien ein Soll-Umsatz von wenigen Hundert Franken.
+    """
+    proj = await client_as_owner.post(
+        "/api/capacity/projects",
+        json={"name": "Prognose-ohne-Satz", "status": "bestätigt", "is_billable": True},
+    )
+    project_id = proj.json()["id"]
+    # Montag 03.05.2027, ganze Woche innerhalb des Monats
+    await client_as_owner.post("/api/capacity/allocations", json={
+        "capacity_project_id": project_id,
+        "week_start": "2027-05-03",
+        "minutes": 600,
+        "allocation_type": "week",
+    })
+
+    resp = await client_as_owner.get(
+        "/api/capacity/forecast-revenue", params={"from": "2027-05-01", "to": "2027-05-31"}
+    )
+    assert resp.status_code == 200
+    mai = next(m for m in resp.json() if m["month"] == "2027-05")
+    assert mai["hours"] == pytest.approx(10.0)
+    assert mai["revenue"] > 0
+
+    await client_as_owner.delete(f"/api/capacity/projects/{project_id}")
+
+
+@pytest.mark.db
+async def test_forecast_revenue_teilt_woche_ueber_monatsgrenze(client_as_owner):
+    """Eine Woche über die Monatsgrenze wird arbeitstagweise aufgeteilt.
+
+    Vorfall: Die Allokation wurde vollständig dem Monat ihres Montags
+    zugeschlagen. Die Woche ab Montag 31.05.2027 landete damit ganz im Mai,
+    obwohl vier der fünf Arbeitstage im Juni liegen.
+    """
+    proj = await client_as_owner.post(
+        "/api/capacity/projects",
+        json={"name": "Prognose-Monatsgrenze", "status": "bestätigt", "is_billable": True},
+    )
+    project_id = proj.json()["id"]
+    await client_as_owner.post("/api/capacity/allocations", json={
+        "capacity_project_id": project_id,
+        "week_start": "2027-05-31",
+        "minutes": 1500,
+        "allocation_type": "week",
+    })
+
+    resp = await client_as_owner.get(
+        "/api/capacity/forecast-revenue", params={"from": "2027-05-01", "to": "2027-06-30"}
+    )
+    by_month = {m["month"]: m for m in resp.json()}
+    # 1 von 5 Arbeitstagen im Mai (Mo 31.05.), 4 im Juni (Di–Fr 01.–04.06.)
+    assert by_month["2027-05"]["hours"] == pytest.approx(5.0)
+    assert by_month["2027-06"]["hours"] == pytest.approx(20.0)
+
+    await client_as_owner.delete(f"/api/capacity/projects/{project_id}")
