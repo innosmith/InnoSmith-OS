@@ -469,6 +469,14 @@ _PROVENANCE_COLUMNS = (
     "metadata->>'from' AS \"from\", "
 )
 
+# Ein E-Mail-Treffer ohne Absender ist ein Entwurf: nie gesendet, oft vom Agenten
+# selbst geschrieben. Als Suchtreffer wirkt er wie belegte Korrespondenz. Am
+# 04.08.2026 uebernahm ein Antwort-Entwurf so die Angaben eines geloeschten
+# Entwurfs und erfand eine IP-Adresse fuer dessen Platzhalter. Der Indexer
+# erfasst Entwuerfe inzwischen nicht mehr; dieser Filter wirkt zusaetzlich sofort
+# und unabhaengig davon, was historisch im Index liegt.
+_EXCLUDE_DRAFTS = " AND NOT (source_type = 'email' AND metadata->>'from' IS NULL)"
+
 
 async def _embed_query(query: str) -> list[float] | None:
     """Erzeugt ein Query-Embedding via lokalem Ollama (Such-Modell). Best-effort."""
@@ -528,6 +536,7 @@ async def _semantic_search_documents(p: asyncpg.Pool, arguments: dict) -> list[T
             if principal:
                 params.append(principal)
                 filt += f" AND user_id = ${len(params)}::uuid"
+            filt += _EXCLUDE_DRAFTS
             rows = await p.fetch(
                 "SELECT source_type, source_id, title, url, mime, "
                 + _PROVENANCE_COLUMNS +
@@ -554,6 +563,7 @@ async def _semantic_search_documents(p: asyncpg.Pool, arguments: dict) -> list[T
         if principal:
             params.append(principal)
             filt += f" AND user_id = ${len(params)}::uuid"
+        filt += _EXCLUDE_DRAFTS
         rows = await p.fetch(
             "SELECT source_type, source_id, title, url, mime, "
             + _PROVENANCE_COLUMNS +

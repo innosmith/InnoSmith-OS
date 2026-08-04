@@ -8,6 +8,7 @@ import { CrmBadge } from '../CrmBadge';
 import { AgentRationale } from './AgentRationale';
 import { ConfidenceBadge } from './ConfidenceBadge';
 import { ContextSources, type ContextSource } from './ContextSources';
+import { DraftWarning } from './DraftWarning';
 import { IntentPreview } from './IntentPreview';
 
 /**
@@ -69,6 +70,9 @@ export function ApprovalCard({
   const sourceSubject = (meta.subject as string) || '';
   const metaConvId = (meta.conversation_id as string) || '';
   const contextSources = (meta.context_sources as ContextSource[] | undefined) || null;
+  const draftWarning = (meta.context_warning as string | undefined) || null;
+  const ungroundedValues = (meta.ungrounded_values as string[] | undefined) || null;
+  const draftPlaceholders = (meta.draft_placeholders as string[] | undefined) || null;
 
   const loadPreview = useCallback(() => {
     setLoadingPreview(true);
@@ -128,6 +132,14 @@ export function ApprovalCard({
           <ConfidenceBadge confidence={confidence} glassBg={glassBg} className="mt-0.5 shrink-0" />
         </div>
       )}
+
+      {/* Unbelegte Angaben zuerst — sie entscheiden, ob die Mail so rausgehen darf */}
+      <DraftWarning
+        warning={draftWarning}
+        ungroundedValues={ungroundedValues}
+        placeholders={draftPlaceholders}
+        glassBg={glassBg}
+      />
 
       {/* Antwort auf (Quell-Mail) */}
       {sourceSubject && (

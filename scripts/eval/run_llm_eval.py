@@ -15,6 +15,9 @@ pro Modell:
 5. **Platzhalter-Quote** -- Anteil der Entwuerfe ohne Inhalt zwischen Anrede und
    Schlussformel. Genau dieser Fall ging am 03.08.2026 als fertiger Vorschlag in
    die Freigabe, ohne dass irgendeine Messung ihn sichtbar gemacht haette.
+6. **Unbelegt-Quote** -- Anteil der Entwuerfe, die eine Adresse, einen Hostnamen
+   oder eine Menge nennen, die im Prompt nicht vorkommt. Am 04.08.2026 erfand ein
+   Entwurf so eine IP-Adresse fuer einen DNS-Eintrag beim Kunden.
 
 Der Schreib-Auftrag stammt aus ``app.services.draft_prompt`` -- derselben Quelle,
 die das Backend im Produktiv-Schreib-Pass verwendet. Fruehere Fassungen pflegten
@@ -51,6 +54,9 @@ if str(_BACKEND) not in sys.path:
 from app.services.draft_prompt import render_draft_task  # noqa: E402
 from app.services.text_style import (  # noqa: E402
     has_content_between_greeting_and_closing,
+    html_to_text,
+    placeholder_markers,
+    ungrounded_values,
 )
 
 VALID_CLASSES = {"auto_reply", "task", "fyi"}
@@ -150,16 +156,6 @@ def swiss_violations(text: str) -> int:
 def strip_thinking(text: str) -> str:
     """Entfernt <think>...</think>-Bloecke (Reasoning-Modelle)."""
     return re.sub(r"<think>.*?</think>", "", text or "", flags=re.DOTALL).strip()
-
-
-def html_to_text(html: str | None) -> str:
-    if not html:
-        return ""
-    txt = re.sub(r"(?i)<br\s*/?>", "\n", html)
-    txt = re.sub(r"(?i)</p>", "\n", txt)
-    txt = re.sub(r"<[^>]+>", "", txt)
-    txt = txt.replace("&nbsp;", " ").replace("&amp;", "&").replace("&#39;", "'")
-    return re.sub(r"[ \t]+", " ", txt).strip()
 
 
 # ── Prompts ──────────────────────────────────────────────────────────────────
@@ -295,6 +291,7 @@ def eval_model(base_url: str, model: str, examples: list[dict], do_drafts: bool,
     draft_sims: list[float] = []
     draft_swiss_viol = 0
     draft_placeholders = 0
+    draft_ungrounded = 0
     draft_n = 0
     errors = 0
     gold_total: dict[str, int] = defaultdict(int)
@@ -328,9 +325,10 @@ def eval_model(base_url: str, model: str, examples: list[dict], do_drafts: bool,
 
         # 2) Draft (nur wenn Referenz-Antwort vorhanden)
         if do_drafts and ex.get("gold_reply_html"):
+            draft_prompt = build_draft_user_prompt(ex)
             try:
                 draft_raw, _ = ollama_chat(base_url, model, DRAFT_SYSTEM,
-                                           build_draft_user_prompt(ex), timeout,
+                                           draft_prompt, timeout,
                                            think=think_flag, options=draft_opts)
             except Exception:  # noqa: BLE001
                 continue
@@ -342,6 +340,11 @@ def eval_model(base_url: str, model: str, examples: list[dict], do_drafts: bool,
             draft_swiss_viol += swiss_violations(draft)
             if not has_content_between_greeting_and_closing(draft):
                 draft_placeholders += 1
+            # Faktenbindung: der Prompt ist im Eval das gesamte Beweismaterial.
+            # Nennt der Entwurf eine Adresse oder Menge, die dort nicht steht, hat
+            # das Modell sie erfunden -- genau der Vorfall vom 04.08.2026.
+            if ungrounded_values(draft, [draft_prompt]) or placeholder_markers(draft):
+                draft_ungrounded += 1
             draft_n += 1
 
     # Balanced Accuracy: Mittel der Per-Klasse-Trefferquoten -- robust gegen die
@@ -370,6 +373,10 @@ def eval_model(base_url: str, model: str, examples: list[dict], do_drafts: bool,
         # sein -- jeder Wert darueber bedeutet, dass ein Modell leere Huellen
         # produziert, die im Cockpit wie fertige Vorschlaege aussehen.
         "draft_placeholder_rate": round(draft_placeholders / draft_n, 3) if draft_n else None,
+        # Anteil Entwuerfe mit mindestens einer Angabe ohne Beleg im Prompt (oder
+        # einem unausgefuellten Platzhalter). Sollwert 0 -- eine erfundene Adresse
+        # richtet beim Empfaenger echten Schaden an.
+        "draft_ungrounded_rate": round(draft_ungrounded / draft_n, 3) if draft_n else None,
     }
 
 
@@ -382,7 +389,8 @@ def write_scoreboard(results: list[dict], out_dir: Path) -> None:
     fields = ["model", "n", "errors", "contract_rate", "class_accuracy",
               "balanced_accuracy", "per_class_accuracy", "swiss_viol_per_mail",
               "avg_latency_s", "draft_n", "avg_draft_similarity",
-              "draft_swiss_viol_per_mail", "draft_placeholder_rate"]
+              "draft_swiss_viol_per_mail", "draft_placeholder_rate",
+              "draft_ungrounded_rate"]
     with csv_path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fields)
         writer.writeheader()
@@ -397,18 +405,20 @@ def write_scoreboard(results: list[dict], out_dir: Path) -> None:
         "Sortiert nach Contract-Compliance, dann Balanced Accuracy.",
         "`balanced_accuracy` = Mittel der Per-Klasse-Trefferquoten (robust gegen die fyi-Schieflage).",
         "`draft_placeholder` = Anteil Entwuerfe ohne Inhalt zwischen Anrede und Schlussformel; Sollwert 0.",
+        "`unbelegt` = Anteil Entwuerfe mit einer Angabe (Adresse/Menge), die im Prompt nicht vorkommt; Sollwert 0.",
         "",
-        "| Modell | n | Contract | Acc | Balanced-Acc | Per-Klasse (fyi/task/auto_reply) | Swiss/Mail | Draft-Sim | Draft-Swiss/Mail | Platzhalter | Latenz (s) |",
-        "|--------|---|----------|-----|--------------|----------------------------------|-----------|-----------|------------------|-------------|------------|",
+        "| Modell | n | Contract | Acc | Balanced-Acc | Per-Klasse (fyi/task/auto_reply) | Swiss/Mail | Draft-Sim | Draft-Swiss/Mail | Platzhalter | unbelegt | Latenz (s) |",
+        "|--------|---|----------|-----|--------------|----------------------------------|-----------|-----------|------------------|-------------|----------|------------|",
     ]
     for r in ranked:
         sim = "-" if r["avg_draft_similarity"] is None else f"{r['avg_draft_similarity']:.3f}"
         dsv = "-" if r["draft_swiss_viol_per_mail"] is None else f"{r['draft_swiss_viol_per_mail']:.2f}"
         ph = "-" if r.get("draft_placeholder_rate") is None else f"{r['draft_placeholder_rate']:.3f}"
+        ug = "-" if r.get("draft_ungrounded_rate") is None else f"{r['draft_ungrounded_rate']:.3f}"
         lines.append(
             f"| {r['model']} | {r['n']} | {r['contract_rate']:.3f} | {r['class_accuracy']:.3f} "
             f"| {r['balanced_accuracy']:.3f} | {r['per_class_accuracy']} | {r['swiss_viol_per_mail']:.2f} "
-            f"| {sim} | {dsv} | {ph} | {r['avg_latency_s']:.1f} |"
+            f"| {sim} | {dsv} | {ph} | {ug} | {r['avg_latency_s']:.1f} |"
         )
     md_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     print(f"\nScoreboard: {md_path}\n           {csv_path}")

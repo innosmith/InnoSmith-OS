@@ -185,6 +185,72 @@ async def purge_excluded_documents(db: AsyncSession, excluded: list[str], user_i
     return total
 
 
+async def purge_draft_emails(
+    db: AsyncSession, client, user_id=None, limit: int = 200
+) -> int:
+    """Entfernt indexierte Entwuerfe -- auch solche, die es im Postfach nicht mehr gibt.
+
+    Der Indexer erfasste den Ordner ``Entwuerfe`` frueher mit und loescht nie, wenn
+    eine Nachricht verschwindet. Zurueck blieben Zeilen zu Entwuerfen, die der
+    Berater langst geloescht hatte; die Recherche lieferte sie weiter als belegte
+    Quelle. Kandidaten sind E-Mail-Zeilen ohne Absender -- ein Entwurf traegt kein
+    ``from``. Geloescht wird, wenn Graph die Nachricht nicht mehr kennt (404) oder
+    sie als Entwurf ausweist. Alles andere bleibt unangetastet: ein transienter
+    Graph-Fehler darf keinen gueltigen Index zerstoeren (fail-closed).
+
+    Gibt die Anzahl geloeschter Chunk-Zeilen zurueck.
+    """
+    scope = "AND user_id = :uid" if user_id is not None else ""
+    rows = await db.execute(
+        text(
+            f"""
+            SELECT DISTINCT source_id FROM semantic_documents
+            WHERE source_type = 'email' {scope}
+              AND metadata->>'from' IS NULL
+            LIMIT :lim
+            """
+        ),
+        {"uid": user_id, "lim": limit},
+    )
+    candidates = [r[0] for r in rows.all()]
+    if not candidates:
+        return 0
+
+    doomed: list[str] = []
+    for source_id in candidates:
+        try:
+            msg = await client.get_email(source_id)
+        except Exception as exc:  # noqa: BLE001 - nur echtes 404 zaehlt
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+            if status == 404:
+                doomed.append(source_id)
+            else:
+                logger.info(
+                    "Entwurfs-Purge: %s nicht pruefbar (%s) -- bleibt im Index",
+                    source_id[:32], status or type(exc).__name__,
+                )
+            continue
+        if msg.get("isDraft"):
+            doomed.append(source_id)
+
+    total = 0
+    for source_id in doomed:
+        res = await db.execute(
+            text(
+                f"DELETE FROM semantic_documents "
+                f"WHERE source_type = 'email' AND source_id = :sid {scope}"
+            ),
+            {"sid": source_id, "uid": user_id},
+        )
+        total += res.rowcount or 0
+    if total:
+        logger.info(
+            "Entwurfs-Purge: %d Zeilen zu %d Nachrichten entfernt",
+            total, len(doomed),
+        )
+    return total
+
+
 def chunk_text(body: str, size: int, overlap: int) -> list[str]:
     """Zerlegt Text in überlappende Chunks (~``size`` Zeichen, ``overlap`` Überlappung).
 
@@ -323,11 +389,20 @@ async def _existing_modified(
 
 
 async def _index_email(db: AsyncSession, client, message_id: str, user_id) -> int:
-    """Indexiert eine einzelne E-Mail (voller Body). Skip, wenn bereits vorhanden."""
+    """Indexiert eine einzelne E-Mail (voller Body). Skip, wenn bereits vorhanden.
+
+    Entwuerfe werden nie indexiert. Der Ordner ``Entwuerfe`` ist schon in
+    ``iter_all_mail_folders`` ausgeschlossen; dieser Guard greift zusaetzlich, falls
+    eine Entwurfs-ID auf einem anderen Weg hereinkommt. Grund: ein indexierter
+    Entwurf wird von der Recherche als belegte Quelle geliefert, obwohl er nie
+    gesendet wurde -- der Agent liest damit seine eigenen Formulierungen als Fakten.
+    """
     existing = await _existing_modified(db, "email", message_id, user_id)
     if existing is not None:
         return 0  # E-Mails sind unveränderlich -> bereits indexiert
     msg = await client.get_email(message_id)
+    if msg.get("isDraft"):
+        return 0
     subject = msg.get("subject") or "(kein Betreff)"
     raw = (msg.get("body") or {}).get("content") or msg.get("bodyPreview") or ""
     body = html_to_text(raw) if raw else ""
@@ -553,6 +628,12 @@ async def sync_semantic_index(
             except Exception as exc:  # noqa: BLE001
                 await db.rollback()
                 logger.warning("Ausschluss-Purge fehlgeschlagen: %s", exc)
+        try:
+            await purge_draft_emails(db, client, principal)
+            await db.commit()
+        except Exception as exc:  # noqa: BLE001
+            await db.rollback()
+            logger.warning("Entwurfs-Purge fehlgeschlagen: %s", exc)
 
     # Seitengroesse/Cap fuer die E-Mail-Pagination. ``mail_top`` (One-Off) begrenzt je
     # Ordner; im Daemon-Betrieb ist der Cap 0 (unbegrenzt = Voll-Archiv).
@@ -567,7 +648,9 @@ async def sync_semantic_index(
             except Exception as exc:  # noqa: BLE001
                 logger.info("Ordner-Enumeration fehlgeschlagen: %s", exc)
                 folders = []
-            logger.info("Backfill E-Mails: %d Ordner (ohne Junk/Geloescht)", len(folders))
+            logger.info(
+                "Backfill E-Mails: %d Ordner (ohne Junk/Geloescht/Entwuerfe)", len(folders)
+            )
             await _status_phase("mails", folders_total=len(folders))
             folders_done = 0
             for folder in folders:

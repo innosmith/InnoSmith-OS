@@ -201,7 +201,9 @@ class Settings(BaseSettings):
     # Mail ein Fachsystem braucht, das dort fehlt.
     draft_context_wide_tools: bool = False
 
-    # Schreib-Modell fuer Pass 2b. Leer = lokales Standardmodell. Ein Cloud-Modell
+    # Startwert fuer das Schreib-Modell in Pass 2b; im Betrieb entscheiden die
+    # Owner-Settings (``draft_cloud_enabled`` + ``draft_model``, siehe
+    # ``llm_defaults.get_draft_model``). Leer = lokales Standardmodell. Ein Cloud-Modell
     # schreibt ausschliesslich auf Basis des ANONYMISIERTEN Dossiers und OHNE
     # Werkzeuge; den Entwurf legt danach das Backend deterministisch an. Grund fuer
     # die Werkzeuglosigkeit: ein maskiertes Modell wuerde mit Platzhaltern suchen

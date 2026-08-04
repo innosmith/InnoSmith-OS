@@ -2424,7 +2424,16 @@ function LlmSettingsTab() {
     llm_default_model: string | null;
     llm_default_local_model: string | null;
     llm_default_temperature: number | null;
-  }>({ llm_providers: null, llm_default_model: null, llm_default_local_model: null, llm_default_temperature: null });
+    draft_cloud_enabled: boolean;
+    draft_model: string | null;
+  }>({
+    llm_providers: null,
+    llm_default_model: null,
+    llm_default_local_model: null,
+    llm_default_temperature: null,
+    draft_cloud_enabled: false,
+    draft_model: null,
+  });
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
 
@@ -2631,6 +2640,74 @@ function LlmSettingsTab() {
             <span>Kreativ (1.5)</span>
           </div>
         </div>
+      </div>
+
+      {/* Schreib-Pass für E-Mail-Entwürfe. Bewusst als eigener Block: hier geht
+          Text an einen fremden Anbieter, das ist eine andere Entscheidung als die
+          Modellwahl für interne Aufgaben. */}
+      <div className="mt-8 rounded-xl border border-gray-200 p-4 dark:border-gray-700">
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h3 className="font-medium text-gray-900 dark:text-white">
+              E-Mail-Entwürfe von einem öffentlichen Modell schreiben lassen
+            </h3>
+            <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+              Der Kontext wird vorher anonymisiert (Personen, Firmen, Adressen, IBAN)
+              und das Modell arbeitet ohne Werkzeuge — recherchiert wird weiterhin
+              lokal. Schlägt die Anonymisierung fehl, schreibt automatisch das lokale
+              Modell. Versendet wird nie automatisch: jeder Entwurf braucht deine
+              Freigabe.
+            </p>
+          </div>
+          <button
+            data-testid="settings-draft-cloud-toggle"
+            onClick={() =>
+              setLlmSettings({ ...llmSettings, draft_cloud_enabled: !llmSettings.draft_cloud_enabled })
+            }
+            className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors ${
+              llmSettings.draft_cloud_enabled ? 'bg-indigo-600' : 'bg-gray-200 dark:bg-gray-700'
+            }`}
+          >
+            <span
+              className={`pointer-events-none inline-block h-5 w-5 rounded-full bg-white shadow ring-0 transition-transform ${
+                llmSettings.draft_cloud_enabled ? 'translate-x-5' : 'translate-x-0'
+              }`}
+            />
+          </button>
+        </div>
+
+        {llmSettings.draft_cloud_enabled && (
+          <div className="mt-4">
+            <label className="block text-sm font-medium text-gray-700 dark:text-gray-300">
+              Schreib-Modell
+            </label>
+            <select
+              data-testid="settings-draft-model-select"
+              value={llmSettings.draft_model || ''}
+              onChange={(e) =>
+                setLlmSettings({ ...llmSettings, draft_model: e.target.value || null })
+              }
+              className="mt-1 block w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm shadow-sm dark:border-gray-600 dark:bg-gray-800 dark:text-white"
+            >
+              <option value="">Lokales Standardmodell</option>
+              {models
+                .filter((m) => {
+                  if (m.provider === 'ollama') return false;
+                  const p = llmSettings.llm_providers?.[m.provider];
+                  return p?.enabled && p.models.includes(m.id);
+                })
+                .map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {m.name}
+                  </option>
+                ))}
+            </select>
+            <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+              Nur Modelle aus aktivierten Cloud-Providern. Ohne Auswahl bleibt der
+              Schreib-Pass lokal.
+            </p>
+          </div>
+        )}
       </div>
 
       <div className="mt-6 flex items-center gap-3">

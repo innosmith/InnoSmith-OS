@@ -215,24 +215,29 @@ class GraphClient:
         data = await self._get(f"{self._user_path}/mailFolders", {"$top": "100"})
         return data.get("value", [])
 
-    # Well-known-Ordner, die vom Such-Index ausgenommen bleiben (kein Nutzwert,
-    # potenziell riesig/rauschig): Junk-E-Mail und Geloeschte Elemente.
-    _INDEX_SKIP_WELLKNOWN = {"junkemail", "deleteditems"}
+    # Well-known-Ordner, die vom Such-Index ausgenommen bleiben: Junk-E-Mail und
+    # Geloeschte Elemente (kein Nutzwert, potenziell riesig/rauschig) sowie
+    # Entwuerfe. Letztere sind keine Korrespondenz, sondern unfertige Absicht --
+    # oft vom Agenten selbst erzeugt. Indexiert wirken sie wie belegte Fakten und
+    # der Agent liest seine eigenen, nie freigegebenen Formulierungen zurueck.
+    _INDEX_SKIP_WELLKNOWN = {"junkemail", "deleteditems", "drafts"}
 
     async def iter_all_mail_folders(self) -> list[dict]:
-        """Enumeriert ALLE Mail-Ordner inkl. verschachtelter, ohne Junk/Geloeschte.
+        """Enumeriert ALLE Mail-Ordner inkl. verschachtelter, ohne Junk/Geloescht/Entwuerfe.
 
         Steigt rekursiv in ``childFolders`` ab und paginiert ueber ``@odata.nextLink``.
-        Junk und Geloeschte Elemente werden ueber ihre Well-Known-IDs ausgeschlossen
-        (inkl. Unterordner, da nicht abgestiegen wird). ``$select`` wird bewusst NICHT
-        gesetzt: v1.0 lehnt ``$select=wellKnownName`` auf ``mailFolders`` mit 400 ab;
-        die Default-Antwort enthaelt ``displayName``/``childFolderCount`` ohnehin. Gibt
+        Junk, Geloeschte Elemente und Entwuerfe werden ueber ihre Well-Known-IDs
+        ausgeschlossen (inkl. Unterordner, da nicht abgestiegen wird). ``$select``
+        wird bewusst NICHT gesetzt: v1.0 lehnt ``$select=wellKnownName`` auf
+        ``mailFolders`` mit 400 ab; die Default-Antwort enthaelt
+        ``displayName``/``childFolderCount`` ohnehin. Gibt
         ``{id, displayName, wellKnownName}`` zurueck. Nur Lesezugriff.
         """
-        # Well-Known-Ordner (Junk/Geloescht) per Namen aufloesen -> deren echte IDs
-        # ausschliessen. So ist der Ausschluss unabhaengig von Anzeige-Sprache/Namen.
+        # Well-Known-Ordner (Junk/Geloescht/Entwuerfe) per Namen aufloesen -> deren
+        # echte IDs ausschliessen. So ist der Ausschluss unabhaengig von
+        # Anzeige-Sprache/Namen.
         skip_ids: set[str] = set()
-        for wk in ("junkemail", "deleteditems"):
+        for wk in self._INDEX_SKIP_WELLKNOWN:
             try:
                 f = await self._get(f"{self._user_path}/mailFolders/{wk}", {"$select": "id"})
                 fid = f.get("id")
@@ -327,7 +332,7 @@ class GraphClient:
             f"{self._user_path}/messages/{message_id}",
             {"$select": "id,subject,from,toRecipients,ccRecipients,receivedDateTime,"
                         "body,bodyPreview,categories,inferenceClassification,"
-                        "hasAttachments,importance,isRead,conversationId"},
+                        "hasAttachments,importance,isRead,isDraft,conversationId"},
         )
 
     async def get_message_headers(self, message_id: str) -> list[dict]:
@@ -594,18 +599,38 @@ class GraphClient:
             {"destinationId": "archive"},
         )
 
+    @staticmethod
+    def _drop_drafts(msgs: list[dict]) -> list[dict]:
+        """Entfernt unfertige Entwuerfe aus einer Nachrichtenliste.
+
+        Abfragen auf ``/messages`` laufen ueber ALLE Ordner, also auch ueber
+        Entwuerfe. Ein Entwurf ist aber keine Tatsache der Korrespondenz: er wurde
+        nie gesendet, und er stammt im Betrieb regelmaessig vom Agenten selbst. Am
+        04.08.2026 uebernahm ein Antwort-Entwurf die Angaben aus einem frueheren,
+        nie gesendeten Entwurf -- samt dessen Platzhalter, den das Modell mit einer
+        erfundenen IP-Adresse fuellte. Nur Sammelabfragen filtern; ein direkter
+        ``get_email`` auf eine Entwurfs-ID bleibt erlaubt (Draft-Cleanup braucht ihn).
+        """
+        return [m for m in msgs if not m.get("isDraft")]
+
     async def get_conversation_messages(
         self, conversation_id: str, top: int = 10
     ) -> list[dict]:
-        """Alle Nachrichten einer Konversation (Thread) chronologisch."""
+        """Alle GESENDETEN/EMPFANGENEN Nachrichten einer Konversation, chronologisch.
+
+        Entwuerfe derselben Konversation werden verworfen (siehe ``_drop_drafts``).
+        """
+        select = (
+            "id,subject,from,toRecipients,receivedDateTime,"
+            "bodyPreview,body,conversationId,isDraft"
+        )
         try:
             data = await self._get(
                 f"{self._user_path}/messages",
                 {
                     "$filter": f"conversationId eq '{conversation_id}'",
                     "$top": str(top),
-                    "$select": "id,subject,from,toRecipients,receivedDateTime,"
-                               "bodyPreview,body,conversationId",
+                    "$select": select,
                 },
             )
             msgs = data.get("value", [])
@@ -619,27 +644,30 @@ class GraphClient:
                     {
                         "$search": f'"conversationId:{conversation_id}"',
                         "$top": str(top),
-                        "$select": "id,subject,from,toRecipients,receivedDateTime,"
-                                   "bodyPreview,body,conversationId",
+                        "$select": select,
                     },
                 )
                 msgs = data.get("value", [])
             else:
                 raise
+        msgs = self._drop_drafts(msgs)
         msgs.sort(key=lambda m: m.get("receivedDateTime", ""))
         return msgs
 
     async def search_sender_emails(
         self, sender_email: str, top: int = 5
     ) -> list[dict]:
-        """Letzte E-Mails eines bestimmten Absenders (neueste zuerst)."""
+        """Letzte E-Mails eines bestimmten Absenders (neueste zuerst), ohne Entwuerfe."""
+        select = (
+            "id,subject,from,receivedDateTime,bodyPreview,body,conversationId,isDraft"
+        )
         try:
             data = await self._get(
                 f"{self._user_path}/messages",
                 {
                     "$filter": f"from/emailAddress/address eq '{sender_email}'",
                     "$top": str(top),
-                    "$select": "id,subject,from,receivedDateTime,bodyPreview,body,conversationId",
+                    "$select": select,
                 },
             )
             msgs = data.get("value", [])
@@ -653,12 +681,13 @@ class GraphClient:
                     {
                         "$search": f'"from:{sender_email}"',
                         "$top": str(top),
-                        "$select": "id,subject,from,receivedDateTime,bodyPreview,body,conversationId",
+                        "$select": select,
                     },
                 )
                 msgs = data.get("value", [])
             else:
                 raise
+        msgs = self._drop_drafts(msgs)
         msgs.sort(key=lambda m: m.get("receivedDateTime", ""), reverse=True)
         return msgs
 
@@ -711,16 +740,17 @@ class GraphClient:
         return data.get("value", [])
 
     async def search_emails(self, query: str, top: int = 5) -> list[dict]:
-        """Volltextsuche über alle E-Mails (Graph $search)."""
+        """Volltextsuche über alle E-Mails (Graph $search), ohne Entwuerfe."""
         data = await self._get(
             f"{self._user_path}/messages",
             {
                 "$search": f'"{query}"',
                 "$top": str(top),
-                "$select": "id,subject,from,receivedDateTime,bodyPreview,conversationId,webLink",
+                "$select": "id,subject,from,receivedDateTime,bodyPreview,"
+                           "conversationId,webLink,isDraft",
             },
         )
-        return data.get("value", [])
+        return self._drop_drafts(data.get("value", []))
 
     async def list_flagged_emails(self, top: int = 20, since_days: int = 180) -> list[dict]:
         """Markierte E-Mails (Outlook-Fahne gesetzt) laden, nur aus den letzten since_days Tagen."""

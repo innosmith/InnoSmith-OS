@@ -540,9 +540,56 @@ async def test_cloud_writer_creates_draft_server_side():
     assert create.await_args.args[1] == "Hallo Franziska"
 
 
-def test_cloud_writer_suffix_states_no_tools_and_placeholder_handling():
+def test_cloud_writer_suffix_states_no_tools_and_name_handling():
+    """Der Auftrag muss die Maskierung korrekt beschreiben.
+
+    Die fruehere Fassung sprach von Platzhaltern «etwa <PERSON_1>». Ein Test am
+    04.08.2026 gegen das echte contentConverter-Modell zeigte: maskiert wird mit
+    ERSATZNAMEN («Senad Weibel»), nicht mit Platzhaltern. Eine falsche Beschreibung
+    ist hier nicht bloss unsauber -- sie laedt das Modell dazu ein, den Namen frei
+    zu behandeln, und genau dann scheitert die Ruecksetzung.
+    """
     assert "KEINE Werkzeuge" in hw._CLOUD_WRITER_SUFFIX
-    assert "Platzhalter" in hw._CLOUD_WRITER_SUFFIX
+    assert "ANDERE Namen" in hw._CLOUD_WRITER_SUFFIX
+    assert "nie verkürzt" in hw._CLOUD_WRITER_SUFFIX
+    assert "<PERSON_1>" not in hw._CLOUD_WRITER_SUFFIX
+
+
+@pytest.mark.asyncio
+async def test_cloud_writer_falls_back_locally_when_pseudonym_survives():
+    """Ein Tarnname im Entwurf ist gefaehrlicher als kein Cloud-Entwurf.
+
+    Schreibt das Modell «Hoi Senad» statt «Hoi Senad Weibel», setzt die
+    Ruecksetzung nichts zurueck -- der Entwurf traegt dann einen fremden, plausiblen
+    Namen. Dann schreibt das lokale Modell.
+    """
+    meta = {"email_message_id": "M1"}
+    create = AsyncMock(return_value="D9")
+    local_run = _writing_agent("LOKAL2")
+    calls: list = []
+
+    async def _tracking(*args, **kwargs):
+        calls.append(args)
+        # Aufruf 1 baut den Cloud-Agenten, Aufruf 2 ist dessen Schreib-Lauf,
+        # Aufruf 3 der lokale Rueckfall.
+        if len(calls) == 2:
+            return "Hoi Senad, danke"
+        return await local_run.to_thread(*args, **kwargs)
+
+    with (
+        patch.object(hw, "get_settings", lambda: _settings()),
+        patch.object(hw, "_agent", object()),
+        patch.object(hw, "_anonymize_for_cloud", AsyncMock(return_value=("MASKIERT", "S1"))),
+        patch.object(hw, "_build_cloud_job_agent", lambda m: object()),
+        patch.object(hw, "asyncio", SimpleNamespace(to_thread=_tracking)),
+        patch.object(hw, "_deanonymize_from_cloud", AsyncMock(return_value="Hoi Senad, danke")),
+        patch.object(hw, "_residual_pseudonyms", lambda text, sid: ["Senad"]),
+        patch.object(hw, "_create_reply_draft_from_text", create),
+    ):
+        result = await hw._write_draft_with_cloud_model(meta, "PROMPT", "anthropic/opus")
+
+    assert result == "LOKAL2"
+    create.assert_not_awaited()
 
 
 def test_plain_text_to_html_builds_paragraphs_and_escapes():

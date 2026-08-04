@@ -197,6 +197,24 @@ _CONTEXT_SEARCH_TOOLS: frozenset[str] = frozenset({
 # Im aktuellen Job recherchierte Quellen (Titel/Typ/Absender/Datum), dedupliziert.
 _job_context_sources: list[dict] = []
 
+# Volltext dessen, was der Job tatsaechlich gesehen hat: Schreib-Prompt (inkl.
+# Mailtext, Thread-Block und Dossier) plus die Roh-Ergebnisse der Lese-Tools.
+# Grundlage der Faktenbindungs-Pruefung: was hier nicht vorkommt, hat das Modell
+# erfunden. Pro Eintrag und in der Summe gedeckelt, damit ein tool-intensiver Job
+# den Speicher nicht flutet.
+_job_evidence: list[str] = []
+_MAX_EVIDENCE_ENTRY_CHARS = 60_000
+_MAX_EVIDENCE_TOTAL_CHARS = 600_000
+
+
+def _record_evidence(text_body: str | None) -> None:
+    """Nimmt einen gesehenen Text ins Beweismaterial auf (best-effort, gedeckelt)."""
+    if not text_body:
+        return
+    if sum(len(e) for e in _job_evidence) >= _MAX_EVIDENCE_TOTAL_CHARS:
+        return
+    _job_evidence.append(str(text_body)[:_MAX_EVIDENCE_ENTRY_CHARS])
+
 
 def _draft_tool_name() -> str:
     """Tool-Name fuer ``create_draft`` im aktuell konfigurierten Betrieb.
@@ -537,6 +555,10 @@ def _on_tool_complete(tc_id, name, args, result) -> None:
             _collect_context_sources(result, get_settings().draft_context_max_sources)
         except Exception:  # noqa: BLE001 - Provenance darf den Job nie stoppen
             logger.warning("Quellen-Erfassung fehlgeschlagen (tool=%s)", str(name)[:60])
+    # Jedes Tool-Ergebnis ist potenzieller Beleg fuer eine Angabe im Entwurf --
+    # ungekappt (anders als im Trace), sonst schlaegt die Faktenbindung bei langen
+    # Treffern falschen Alarm.
+    _record_evidence(result if isinstance(result, str) else str(result))
     # Echte Draft-ID deterministisch aus dem Tool-Ergebnis erfassen (statt aus dem
     # vom LLM abgetippten JSON). Unabhaengig vom 200-Event-Trace-Limit -- so geht
     # die ID auch bei langlaufenden, tool-intensiven Jobs nicht verloren.
@@ -687,6 +709,10 @@ def _compute_self_grade(
     -- bei einem Entwurf -- den Stil-Anker (`search_my_replies`) genutzt hat. Rein
     und damit unabhaengig testbar. Tool-Namen werden per Substring gematcht, um
     MCP-Praefixe abzufangen.
+
+    Tool-Nutzung allein sagt nichts ueber Wahrheit: am 04.08.2026 meldete diese
+    Funktion 1.0 fuer einen Entwurf mit erfundener IP-Adresse. Darum zaehlt bei
+    einem Entwurf zusaetzlich das Ergebnis der Faktenbindung (``draft_quality``).
     """
 
     def used(key: str) -> bool:
@@ -703,6 +729,7 @@ def _compute_self_grade(
         checks["thread_loaded"] = used("get_thread")
     if has_draft:
         checks["style_anchor_used"] = used("search_my_replies")
+        checks["values_grounded"] = result_meta.get("draft_quality") != "ungrounded"
 
     passed = sum(1 for v in checks.values() if v)
     total = len(checks) or 1
@@ -712,6 +739,57 @@ def _compute_self_grade(
         "checks": checks,
         "missing": missing,
     }
+
+
+def _apply_grounding_check(meta: dict, draft_html: str, job_id) -> None:
+    """Markiert einen Entwurf, dessen Angaben in keiner gesehenen Quelle stehen.
+
+    Der Entwurf wird NICHT verworfen -- der Mensch entscheidet, wie beim
+    Platzhalter-Test. Aber er kommt mit gedeckelter Confidence und benannter
+    Fundstelle in die Freigabe, damit eine erfundene Adresse nicht als Detailwissen
+    durchgeht. Belege sind der Schreib-Prompt und alle Tool-Ergebnisse des Jobs
+    (``_job_evidence``); fehlt beides, wird nicht geprueft, statt alles zu
+    beanstanden.
+    """
+    from app.services.text_style import placeholder_markers, ungrounded_values
+
+    if not _job_evidence:
+        return
+    try:
+        missing = ungrounded_values(draft_html, _job_evidence)
+        placeholders = placeholder_markers(draft_html)
+    except Exception:  # noqa: BLE001 - Pruefung darf den Job nie stoppen
+        logger.warning("Job %s: Faktenbindungs-Pruefung fehlgeschlagen", job_id)
+        return
+    if not missing and not placeholders:
+        return
+
+    warnings: list[str] = []
+    if missing:
+        meta["ungrounded_values"] = missing[:12]
+        warnings.append(
+            "Diese Angaben stehen in keiner recherchierten Quelle: "
+            + ", ".join(missing[:6])
+        )
+        logger.warning(
+            "Job %s: unbelegte Angaben im Entwurf: %s", job_id, missing[:12]
+        )
+    if placeholders:
+        meta["draft_placeholders"] = placeholders[:12]
+        warnings.append("Unausgefüllte Platzhalter: " + ", ".join(placeholders[:6]))
+        logger.warning(
+            "Job %s: Platzhalter im Entwurf: %s", job_id, placeholders[:12]
+        )
+
+    meta["draft_quality"] = "ungrounded"
+    existing_warning = meta.get("context_warning")
+    warning_text = " ".join(warnings) + " Bitte vor dem Senden prüfen."
+    meta["context_warning"] = (
+        f"{existing_warning} {warning_text}".strip() if existing_warning else warning_text
+    )
+    current = meta.get("confidence")
+    if current is None or current > 0.4:
+        meta["confidence"] = 0.4
 
 
 # Skill/Kontext, in dem eine Leitregel wirkt. 'general' wirkt immer mit.
@@ -3403,6 +3481,10 @@ async def _post_process_triage(
                         )
                         if confidence is None or confidence > 0.3:
                             existing_meta["confidence"] = 0.3
+                    else:
+                        _apply_grounding_check(
+                            existing_meta, snapshot.get("body_html") or "", job_id
+                        )
                 job.metadata_json = existing_meta
             final_status = "awaiting_approval"
             await notify_agent_awaiting_approval(
@@ -4189,7 +4271,12 @@ async def _generate_reply_draft(meta: dict, parsed: dict | None = None) -> str |
         logger.exception("Zwei-Pass-Draft: Prompt-Bau fehlgeschlagen")
         return None
 
-    draft_model = (cfg.draft_model or "").strip()
+    # Der Schreib-Prompt ist der wichtigste Beleg: Mailtext, Thread-Block, Stil-Anker
+    # und Dossier stehen darin. Was der Entwurf behauptet, muss hier oder in einem
+    # Tool-Ergebnis stehen.
+    _record_evidence(prompt)
+
+    draft_model = await _resolve_draft_model()
     if draft_model and not _is_local_model(draft_model):
         return await _write_draft_with_cloud_model(meta, prompt, draft_model)
 
@@ -4203,6 +4290,23 @@ async def _generate_reply_draft(meta: dict, parsed: dict | None = None) -> str |
         logger.exception("Zwei-Pass-Draft: Schreib-Pass fehlgeschlagen")
         return None
     return _job_created_draft_id
+
+
+async def _resolve_draft_model() -> str:
+    """Schreib-Modell fuer Pass 2b aus den Owner-Settings (leer = lokal).
+
+    Best-effort: ist die DB nicht erreichbar, bleibt der Schreib-Pass lokal. Das ist
+    die sichere Richtung -- ein Ausfall darf nie dazu fuehren, dass Text ungeplant an
+    ein oeffentliches Modell geht.
+    """
+    from app.services.llm_defaults import get_draft_model
+
+    try:
+        async with async_session() as db:
+            return await get_draft_model(db)
+    except Exception:  # noqa: BLE001
+        logger.warning("Schreib-Modell nicht aus Settings lesbar -- lokaler Pass")
+        return ""
 
 
 async def _anonymize_for_cloud(text: str) -> tuple[str, str]:
@@ -4232,15 +4336,74 @@ async def _anonymize_for_cloud(text: str) -> tuple[str, str]:
 
 
 async def _deanonymize_from_cloud(text: str, session_id: str) -> str:
-    """Setzt die Originalwerte in der Cloud-Antwort wieder ein."""
+    """Setzt die Originalwerte in der Cloud-Antwort wieder ein.
+
+    Fehlt das Mapping (TTL abgelaufen, Backend-Neustart), wird geworfen statt den
+    maskierten Text zurueckzugeben. Sonst entstuende ein Entwurf, in dem die
+    Tarnnamen stehen -- und die sind echte, plausible Namen, kein sichtbarer Fehler.
+    """
     from ai9 import content_converter as cc
     from ai9 import mapping_store
 
     keys = mapping_store.get_mapping_keys(session_id)
     if not keys:
-        return text
+        raise RuntimeError("Anonymisierungs-Mapping nicht mehr verfuegbar")
     result = await cc.call_tool("deanonymize_content", text=text, mapping_keys=keys)
     return result if isinstance(result, str) else str(result)
+
+
+def _residual_pseudonyms(text: str, session_id: str) -> list[str]:
+    """Deckt Tarnnamen auf, die die Ruecksetzung nicht erwischt hat.
+
+    Die Maskierung arbeitet nicht mit Platzhaltern, sondern mit ERSATZNAMEN: aus
+    «Gabriel» wird «Senad Weibel», aus «InnoSmith GmbH» wird «Hess & Partner»
+    (geprueft am 04.08.2026 gegen das echte contentConverter-Modell). Das schuetzt
+    die Fluessigkeit des Textes, birgt aber ein Risiko, das Platzhalter nicht
+    haetten: schreibt das Modell den Ersatznamen verkuerzt oder gebeugt («Hoi
+    Senad»), findet die Ruecksetzung ihn nicht -- und im Entwurf an einen echten
+    Kunden steht ein fremder, voellig plausibler Name.
+
+    Geprueft wird deshalb der ganze Ersatzname und -- nur bei Personen -- jeder
+    Namensteil. Bei Firmen bleibt es beim ganzen String, weil Bestandteile wie
+    «Partner» oder «Gruppe» sonst Fehlalarme ausloesen.
+    """
+    from ai9 import mapping_store
+
+    keys = mapping_store.get_mapping_keys(session_id) or {}
+    mappings = keys.get("mappings") or {}
+    entity_types = keys.get("entity_types") or {}
+    lowered = (text or "").lower()
+
+    hits: list[str] = []
+    for fake in mappings:
+        fake_str = str(fake).strip()
+        if not fake_str:
+            continue
+        if fake_str.lower() in lowered:
+            hits.append(fake_str)
+            continue
+        if str(entity_types.get(fake) or "").upper() != "PERSON":
+            continue
+        for part in re.findall(r"[^\W\d_]{4,}", fake_str, re.UNICODE):
+            if part.lower() in lowered:
+                hits.append(part)
+                break
+    return hits
+
+
+async def _write_draft_locally(prompt: str) -> str | None:
+    """Schreib-Pass mit dem lokalen Modell (Rueckfall des Cloud-Pfads)."""
+    global _job_created_draft_id
+
+    _job_created_draft_id = None
+    try:
+        await asyncio.to_thread(
+            _run_agent_sync, _agent, prompt, True, _draft_sampling_overrides(True)
+        )
+    except Exception:  # noqa: BLE001 - best-effort
+        logger.exception("Lokaler Schreib-Pass fehlgeschlagen")
+        return None
+    return _job_created_draft_id
 
 
 # Entitaeten analog zur Finanzanalyse-Pipeline (contentConverter-Konvention).
@@ -4272,15 +4435,7 @@ async def _write_draft_with_cloud_model(
             "Cloud-Entwurf: Anonymisierung fehlgeschlagen (%s) -- lokaler Schreib-Pass",
             exc,
         )
-        _job_created_draft_id = None
-        try:
-            await asyncio.to_thread(
-                _run_agent_sync, _agent, prompt, True, _draft_sampling_overrides(True)
-            )
-        except Exception:  # noqa: BLE001
-            logger.exception("Cloud-Entwurf: lokaler Rückfall ebenfalls fehlgeschlagen")
-            return None
-        return _job_created_draft_id
+        return await _write_draft_locally(prompt)
 
     try:
         cloud_agent = await asyncio.to_thread(_build_cloud_job_agent, model)
@@ -4305,6 +4460,15 @@ async def _write_draft_with_cloud_model(
         logger.exception("Cloud-Entwurf: De-Anonymisierung fehlgeschlagen -- verworfen")
         return None
 
+    residual = _residual_pseudonyms(text, session_id)
+    if residual:
+        logger.warning(
+            "Cloud-Entwurf: Tarnnamen nach Ruecksetzung noch im Text (%s) -- "
+            "lokaler Schreib-Pass statt Entwurf mit fremdem Namen",
+            residual[:5],
+        )
+        return await _write_draft_locally(prompt)
+
     draft_id = await _create_reply_draft_from_text(meta.get("email_message_id", ""), text)
     if draft_id:
         _job_created_draft_id = draft_id
@@ -4317,9 +4481,14 @@ _CLOUD_WRITER_SUFFIX = (
     "WICHTIG: Du hast in diesem Lauf KEINE Werkzeuge. Der gesamte Kontext steht oben. "
     "Gib ausschliesslich den fertigen E-Mail-Text aus -- Anrede, Inhalt, Schlussformel. "
     "Keine Betreffzeile, keine Erklärungen, keine Meta-Kommentare, kein Markdown-"
-    "Codeblock. Personen- und Firmennamen erscheinen als Platzhalter (etwa "
-    "<PERSON_1>); übernimm sie unverändert -- sie werden nach dem Schreiben "
-    "automatisch durch die echten Namen ersetzt."
+    "Codeblock.\n"
+    "Alle Personen- und Firmennamen im Kontext sind zum Schutz der Daten durch "
+    "ANDERE Namen ersetzt. Übernimm jeden Namen exakt und vollständig so, wie er "
+    "oben steht -- nie verkürzt, nie nur den Vornamen, nie gebeugt. Nach dem "
+    "Schreiben werden diese Namen automatisch durch die echten ersetzt; das "
+    "funktioniert nur bei wörtlicher Übernahme.\n"
+    "Nenne ausserdem keine Zahl, Adresse oder Bezeichnung, die nicht oben steht. "
+    "Fehlt eine Angabe, frage im Text danach, statt einen Wert einzusetzen."
 )
 
 
@@ -4440,6 +4609,7 @@ async def _process_job(agent, job_id, job_type: str, prompt: str, meta: dict) ->
     _job_moved_message_id = None
     _job_tool_names.clear()
     _job_context_sources.clear()
+    _job_evidence.clear()
     disable_thinking = _thinking_disabled(job_type, meta.get("skill"))
 
     # Briefings sind reine Prosa-Synthese (alle Daten stehen im Prompt): sie laufen

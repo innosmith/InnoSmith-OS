@@ -481,9 +481,17 @@ class LlmSettingsPayload(BaseModel):
     llm_default_model: str | None = None
     llm_default_local_model: str | None = None
     llm_default_temperature: float | None = None
+    # Schreib-Pass fuer E-Mail-Entwuerfe: Wer formuliert? Default ist lokal. Ist
+    # ``draft_cloud_enabled`` aus, bleibt ein hinterlegtes Cloud-Modell wirkungslos
+    # -- so kann es konfiguriert und geprueft werden, bevor es Mails schreibt.
+    draft_cloud_enabled: bool | None = None
+    draft_model: str | None = None
 
 
-LLM_FIELDS = ["llm_providers", "llm_default_model", "llm_default_local_model", "llm_default_temperature"]
+LLM_FIELDS = [
+    "llm_providers", "llm_default_model", "llm_default_local_model",
+    "llm_default_temperature", "draft_cloud_enabled", "draft_model",
+]
 
 
 @router.get("/llm", response_model=LlmSettingsPayload)
@@ -503,6 +511,8 @@ async def get_llm_settings(
         llm_default_model=s.get("llm_default_model"),
         llm_default_local_model=s.get("llm_default_local_model"),
         llm_default_temperature=s.get("llm_default_temperature"),
+        draft_cloud_enabled=bool(s.get("draft_cloud_enabled")),
+        draft_model=s.get("draft_model") or get_app_settings().draft_model or "",
     )
 
 
@@ -538,6 +548,8 @@ async def update_llm_settings(
         llm_default_model=current.get("llm_default_model"),
         llm_default_local_model=current.get("llm_default_local_model"),
         llm_default_temperature=current.get("llm_default_temperature"),
+        draft_cloud_enabled=bool(current.get("draft_cloud_enabled")),
+        draft_model=current.get("draft_model") or get_app_settings().draft_model or "",
     )
 
 
