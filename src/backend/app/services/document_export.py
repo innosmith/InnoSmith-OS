@@ -4,6 +4,7 @@ Wird von routers/export.py (Chat-Nachrichten-Export) und
 routers/content.py (Direkt-Konvertierung) gemeinsam genutzt.
 """
 
+import json
 import logging
 import tempfile
 import uuid
@@ -34,6 +35,75 @@ class ConvertOptions:
     template: str | None = None
     pptx_template: str | None = None
     filename: str | None = None
+
+
+def _as_template_entry(entry) -> dict | None:
+    """Normalisiert einen Listeneintrag der Template-Liste auf ein Dict."""
+    if isinstance(entry, dict):
+        return entry
+    if isinstance(entry, str):
+        try:
+            parsed = json.loads(entry)
+        except (json.JSONDecodeError, ValueError):
+            return None
+        if isinstance(parsed, dict):
+            return parsed
+    return None
+
+
+async def fetch_templates() -> list[dict]:
+    """Liest die Template-Liste vom contentConverter.
+
+    Der MCP-Server serialisiert Listen als einen Textblock pro Element. Der
+    geteilte MCP-Client parst nur Einzelblöcke als JSON und reicht bei mehreren
+    Blöcken rohe Strings durch -- ab dem zweiten Template kämen also Strings statt
+    Dicts an. Diese Funktion normalisiert beide Formen.
+    """
+    try:
+        result = await cc.call_tool("list_templates")
+    except RuntimeError:
+        logger.exception("Template-Liste konnte nicht geladen werden")
+        raise HTTPException(
+            status_code=503,
+            detail="Content-Service nicht erreichbar",
+        )
+
+    if isinstance(result, dict):
+        # Einzelnes Template (ein Textblock) bzw. strukturierte Antwort
+        inner = result.get("result")
+        result = inner if isinstance(inner, list) else [result]
+
+    if not isinstance(result, list):
+        return []
+
+    entries = (_as_template_entry(e) for e in result)
+    return [e for e in entries if e and e.get("path")]
+
+
+async def resolve_template(name: str | None) -> str | None:
+    """Löst den Anzeigenamen eines Word-Templates auf sein Profil-Verzeichnis auf.
+
+    ``list_templates`` liefert den Namen aus der ``template.yaml`` (z. B.
+    "Kanton Bern MBA"), ``load_template_profile`` sucht aber ausschliesslich nach
+    Verzeichnisnamen (z. B. "Kt. Bern MBA") -- ohne Mapping fällt die Konvertierung
+    still aufs Standard-Layout zurück. Die Liste dient zugleich als Allowlist, damit
+    kein beliebiger Dateisystempfad als Template durchgereicht werden kann.
+
+    Returns:
+        Absoluter Pfad zum Profil-Verzeichnis oder ``None`` für das Standard-Layout.
+    """
+    if not name:
+        return None
+
+    for entry in await fetch_templates():
+        path = Path(str(entry.get("path", "")))
+        aliases = {str(entry.get("name", "")).lower(), path.name.lower()}
+        if name.lower() in aliases:
+            # Reference-Dokumente (reference_*.docx) sind keine Profile --
+            # sie entsprechen dem Standard-Layout.
+            return str(path) if path.is_dir() else None
+
+    raise HTTPException(status_code=400, detail=f"Unbekanntes Template: {name}")
 
 
 async def convert_markdown(
@@ -118,6 +188,8 @@ async def _convert_docx_pdf(
     opts: ConvertOptions,
 ) -> FileResponse:
     """Konvertiert als Word oder PDF via contentConverter MCP-Server."""
+    template_dir = await resolve_template(opts.template)
+
     try:
         prepared = await cc.call_tool(
             "prepare_for_word",
@@ -148,7 +220,7 @@ async def _convert_docx_pdf(
             lang="de-CH",
             author=opts.author,
             title=opts.title,
-            template=opts.template,
+            template=template_dir,
             title_page=opts.title_page,
             toc=opts.toc,
         )

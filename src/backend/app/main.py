@@ -1,4 +1,5 @@
 import logging
+import os
 import pathlib
 from contextlib import asynccontextmanager
 
@@ -126,6 +127,19 @@ def _check_bexio_token_expiry() -> None:
         log.info("Bexio-Token gueltig fuer noch %.0f Tage (%s).", days, info["expires_at"])
 
 
+def _export_template_dir() -> None:
+    """Macht das contentConverter-Template-Verzeichnis für den cconv-Subprozess sichtbar.
+
+    contentConverter löst Templates über ``CONTENTCONVERTER_TEMPLATE_DIR`` auf, sonst
+    nur relativ zum Arbeitsverzeichnis -- im Dev-Betrieb findet es dort nichts und
+    ``list_templates()`` bricht mit FileNotFoundError ab. Im Docker-Image ist die
+    Variable bereits gesetzt; ``setdefault`` lässt sie unangetastet.
+    """
+    template_dir = pathlib.Path(app_settings.contentconverter_path) / "templates"
+    if template_dir.is_dir():
+        os.environ.setdefault("CONTENTCONVERTER_TEMPLATE_DIR", str(template_dir))
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     async with async_session() as db:
@@ -154,6 +168,7 @@ async def lifespan(app: FastAPI):
 
     _check_bexio_token_expiry()
 
+    _export_template_dir()
     await start_content_converter()
     await start_hermes_worker()
     await start_recurring_scheduler()

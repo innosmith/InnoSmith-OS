@@ -19,7 +19,11 @@ from app.auth.deps import get_current_user, require_role
 from app.models import User
 from ai9 import content_converter as cc
 from ai9 import mapping_store
-from app.services.document_export import ConvertOptions, convert_markdown
+from app.services.document_export import (
+    ConvertOptions,
+    convert_markdown,
+    fetch_templates,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/content", tags=["content"])
@@ -261,14 +265,17 @@ async def extract_content(
 async def list_templates(
     user: User = Depends(require_role("owner")),
 ):
-    """Listet alle verfügbaren Word- und PowerPoint-Templates auf."""
-    try:
-        result = await cc.call_tool("list_templates")
-    except RuntimeError as e:
-        logger.exception("Template-Liste konnte nicht geladen werden")
-        raise HTTPException(status_code=503, detail="Content-Service nicht erreichbar")
+    """Listet die verfügbaren Template-Profile auf.
 
-    return result if isinstance(result, list) else []
+    Reference-Dokumente (``reference_*.docx``) werden ausgeblendet: Sie sind keine
+    Profile, sondern genau das Standard-Layout, das die Auswahl ohnehin schon als
+    ersten Eintrag anbietet.
+    """
+    return [
+        entry
+        for entry in await fetch_templates()
+        if Path(str(entry.get("path", ""))).is_dir()
+    ]
 
 
 # --- Direkt-Konvertierung ---
