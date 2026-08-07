@@ -147,7 +147,9 @@ async def get_board(
                 Task.is_completed == False,  # noqa: E712
                 Task.template_id.is_(None),
             )
-            .order_by(Task.board_position)
+            # created_at als Tiebreaker: bei gleichen Positionen wäre die
+            # Reihenfolge sonst undefiniert und würde pro Reload springen.
+            .order_by(Task.board_position, Task.created_at)
         )
         tasks = task_result.scalars().all()
 

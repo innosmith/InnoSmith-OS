@@ -15,12 +15,19 @@ import {
 } from '@dnd-kit/core';
 import { arrayMove, SortableContext, horizontalListSortingStrategy } from '@dnd-kit/sortable';
 import { api } from '../api/client';
+import {
+  findColumnOfTask,
+  moveTaskToColumn,
+  persistTaskOrder,
+  reorderWithinColumn,
+} from '../lib/taskReorder';
 import { KanbanColumn } from '../components/KanbanColumn';
 import { ColumnPager } from '../components/ColumnPager';
 import { TaskCard } from '../components/TaskCard';
 import { TaskDetailDialog } from '../components/TaskDetailDialog';
 import { BackgroundPicker } from '../components/BackgroundPicker';
 import type {
+  PipelineColumn,
   PipelineData,
   TaskCard as TaskCardType,
   TaskCreatePayload,
@@ -29,9 +36,11 @@ import type {
 
 export function PipelinePage() {
   const navigate = useNavigate();
-  const [columns, setColumns] = useState<
-    Array<{ id: string; name: string; color: string | null; icon_emoji: string | null; tasks: TaskCardType[] }>
-  >([]);
+  const [columns, setColumns] = useState<PipelineColumn[]>([]);
+  // Spiegelt `columns` synchron: Drag-Events feuern schneller als React
+  // rendert, der State im Closure kann darum veraltet sein. Alle Schreibzugriffe
+  // laufen über commitColumns, damit Ref und State nie auseinanderlaufen.
+  const columnsRef = useRef<PipelineColumn[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
   const [activeTask, setActiveTask] = useState<TaskCardType | null>(null);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
@@ -43,6 +52,13 @@ export function PipelinePage() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
   const settingsRef = useRef<HTMLDivElement>(null);
+  /** Spalte, aus der der laufende Drag gestartet ist (für den Reorder-Request). */
+  const dragSourceColumnRef = useRef<string | null>(null);
+
+  const commitColumns = useCallback((next: PipelineColumn[]) => {
+    columnsRef.current = next;
+    setColumns(next);
+  }, []);
 
   useEffect(() => {
     if (!settingsOpen) return;
@@ -89,7 +105,7 @@ export function PipelinePage() {
         api.get<PipelineData>('/api/pipeline'),
         api.get<Project[]>('/api/projects'),
       ]);
-      setColumns(pipelineData.columns);
+      commitColumns(pipelineData.columns);
       setProjects(projectData);
     } catch {
       /* Pipeline + Projekte sind kritisch -- Fehler wird vom api-Client geloggt */
@@ -103,7 +119,7 @@ export function PipelinePage() {
       .catch(() => {});
 
     setLoading(false);
-  }, []);
+  }, [commitColumns]);
 
   useEffect(() => {
     fetchData();
@@ -137,22 +153,16 @@ export function PipelinePage() {
     [projects, fetchData],
   );
 
-  const findColumnByTaskId = (taskId: string) =>
-    columns.find((col) => col.tasks.some((t) => t.id === taskId));
-
   const isColumnId = (itemId: string) =>
     columns.some((col) => col.id === itemId);
 
   const handleDragStart = (event: DragStartEvent) => {
     const itemId = event.active.id as string;
     if (isColumnId(itemId)) return;
-    for (const col of columns) {
-      const task = col.tasks.find((t) => t.id === itemId);
-      if (task) {
-        setActiveTask(task);
-        break;
-      }
-    }
+    const sourceCol = findColumnOfTask(columnsRef.current, itemId);
+    if (!sourceCol) return;
+    dragSourceColumnRef.current = sourceCol.id;
+    setActiveTask(sourceCol.tasks.find((t) => t.id === itemId) ?? null);
   };
 
   const handleDragOver = (event: DragOverEvent) => {
@@ -160,45 +170,19 @@ export function PipelinePage() {
     if (!over) return;
 
     const activeId = active.id as string;
-    const overId = over.id as string;
-
     if (isColumnId(activeId)) return;
 
-    const sourceCol = findColumnByTaskId(activeId);
-    const overCol =
-      columns.find((col) => col.id === overId) ||
-      findColumnByTaskId(overId);
-
-    if (!sourceCol || !overCol || sourceCol.id === overCol.id) return;
-
-    setColumns((prev) =>
-      prev.map((col) => {
-        if (col.id === sourceCol.id) {
-          return {
-            ...col,
-            tasks: col.tasks.filter((t) => t.id !== activeId),
-          };
-        }
-        if (col.id === overCol.id) {
-          const task = sourceCol.tasks.find((t) => t.id === activeId);
-          if (!task) return col;
-          const overIndex = col.tasks.findIndex((t) => t.id === overId);
-          const newTasks = [...col.tasks];
-          if (overIndex >= 0) {
-            newTasks.splice(overIndex, 0, task);
-          } else {
-            newTasks.push(task);
-          }
-          return { ...col, tasks: newTasks };
-        }
-        return col;
-      }),
-    );
+    // Spaltenwechsel schon während des Ziehens anwenden, damit die Karte am
+    // Zielort einrastet. Umsortieren innerhalb der Spalte macht erst dragEnd.
+    const next = moveTaskToColumn(columnsRef.current, activeId, over.id as string);
+    if (next) commitColumns(next);
   };
 
   const handleDragEnd = async (event: DragEndEvent) => {
     const { active, over } = event;
     setActiveTask(null);
+    const sourceColumnId = dragSourceColumnRef.current;
+    dragSourceColumnRef.current = null;
 
     if (!over) return;
 
@@ -206,11 +190,11 @@ export function PipelinePage() {
     const overId = over.id as string;
 
     if (isColumnId(activeId) && isColumnId(overId) && activeId !== overId) {
-      const oldIndex = columns.findIndex((c) => c.id === activeId);
-      const newIndex = columns.findIndex((c) => c.id === overId);
+      const oldIndex = columnsRef.current.findIndex((c) => c.id === activeId);
+      const newIndex = columnsRef.current.findIndex((c) => c.id === overId);
       if (oldIndex !== -1 && newIndex !== -1) {
-        const reordered = arrayMove(columns, oldIndex, newIndex);
-        setColumns(reordered);
+        const reordered = arrayMove(columnsRef.current, oldIndex, newIndex);
+        commitColumns(reordered);
         for (let i = 0; i < reordered.length; i++) {
           api.patch(`/api/pipeline/columns/${reordered[i].id}`, { position: i + 1 }).catch(() => {});
         }
@@ -218,35 +202,17 @@ export function PipelinePage() {
       return;
     }
 
-    const sourceCol = findColumnByTaskId(activeId);
-    if (!sourceCol) return;
+    // Zielzustand synchron berechnen und genau diesen persistieren -- ein
+    // Rückgriff auf den State nach commitColumns würde noch die alte
+    // Reihenfolge liefern und die manuelle Priorisierung verwerfen.
+    const next = reorderWithinColumn(columnsRef.current, activeId, overId) ?? columnsRef.current;
+    commitColumns(next);
 
-    if (activeId !== overId) {
-      const col = findColumnByTaskId(activeId);
-      if (col) {
-        const oldIndex = col.tasks.findIndex((t) => t.id === activeId);
-        const newIndex = col.tasks.findIndex((t) => t.id === overId);
-        if (oldIndex !== -1 && newIndex !== -1) {
-          setColumns((prev) =>
-            prev.map((c) =>
-              c.id === col.id
-                ? { ...c, tasks: arrayMove(c.tasks, oldIndex, newIndex) }
-                : c,
-            ),
-          );
-        }
-      }
-    }
-
-    const targetCol = findColumnByTaskId(activeId);
+    const targetCol = findColumnOfTask(next, activeId);
     if (!targetCol) return;
-    const newPosition = targetCol.tasks.findIndex((t) => t.id === activeId);
 
     try {
-      await api.patch(`/api/tasks/${activeId}`, {
-        pipeline_column_id: targetCol.id,
-        pipeline_position: newPosition,
-      });
+      await persistTaskOrder('pipeline', next, [targetCol.id, sourceColumnId]);
     } catch {
       fetchData();
     }

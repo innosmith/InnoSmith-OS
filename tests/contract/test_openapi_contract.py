@@ -28,6 +28,7 @@ FRONTEND_EXPECTED_ENDPOINTS: list[tuple[str, str]] = [
     ("POST", "/api/auth/mfa/disable"),
     # Tasks
     ("POST", "/api/tasks"),
+    ("POST", "/api/tasks/reorder"),
     ("GET", "/api/tasks/due-today"),
     ("PATCH", "/api/tasks/{task_id}"),
     ("DELETE", "/api/tasks/{task_id}"),

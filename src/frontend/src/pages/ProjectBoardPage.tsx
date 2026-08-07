@@ -15,6 +15,12 @@ import {
 } from '@dnd-kit/core';
 import { arrayMove, SortableContext, horizontalListSortingStrategy } from '@dnd-kit/sortable';
 import { api } from '../api/client';
+import {
+  findColumnOfTask,
+  moveTaskToColumn,
+  persistTaskOrder,
+  reorderWithinColumn,
+} from '../lib/taskReorder';
 import { useAuth } from '../contexts/AuthContext';
 import { KanbanColumn } from '../components/KanbanColumn';
 import { ColumnPager } from '../components/ColumnPager';
@@ -39,6 +45,10 @@ export function ProjectBoardPage() {
   const { isOwner } = useAuth();
   const { refreshSidebar } = useOutletContext<{ refreshSidebar: () => void }>();
   const [board, setBoard] = useState<BoardData | null>(null);
+  // Spiegelt board.columns synchron: Drag-Events feuern schneller als React
+  // rendert, der State im Closure kann darum veraltet sein. Drag-Schreibzugriffe
+  // laufen über commitColumns, damit Ref und State nie auseinanderlaufen.
+  const columnsRef = useRef<BoardData['columns']>([]);
   const [activeTask, setActiveTask] = useState<TaskCardType | null>(null);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -61,6 +71,13 @@ export function ProjectBoardPage() {
   const iconUploadRef = useRef<HTMLInputElement>(null);
   const renameRef = useRef<HTMLInputElement>(null);
   const renameActiveRef = useRef(false);
+  /** Spalte, aus der der laufende Drag gestartet ist (für den Reorder-Request). */
+  const dragSourceColumnRef = useRef<string | null>(null);
+
+  const commitColumns = useCallback((next: BoardData['columns']) => {
+    columnsRef.current = next;
+    setBoard((prev) => (prev ? { ...prev, columns: next } : prev));
+  }, []);
 
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
@@ -90,6 +107,7 @@ export function ProjectBoardPage() {
         api.get<{ avatar_url: string | null }>('/api/auth/me'),
       ]);
       setBoard(data);
+      columnsRef.current = data.columns;
       setUserAvatarUrl(userData.avatar_url);
       api.get<{ show_column_count: boolean | null }>('/api/settings')
         .then((s) => setShowColCount(s.show_column_count ?? false))
@@ -145,85 +163,48 @@ export function ProjectBoardPage() {
     [id, fetchBoard],
   );
 
-  const findColumnByTaskId = (taskId: string) =>
-    board?.columns.find((col) => col.tasks.some((t) => t.id === taskId));
-
   const isColumnId = (itemId: string) =>
     board?.columns.some((col) => col.id === itemId) ?? false;
 
   const handleDragStart = (event: DragStartEvent) => {
     const itemId = event.active.id as string;
     if (isColumnId(itemId)) return;
-    if (!board) return;
-    for (const col of board.columns) {
-      const task = col.tasks.find((t) => t.id === itemId);
-      if (task) {
-        setActiveTask(task);
-        break;
-      }
-    }
+    const sourceCol = findColumnOfTask(columnsRef.current, itemId);
+    if (!sourceCol) return;
+    dragSourceColumnRef.current = sourceCol.id;
+    setActiveTask(sourceCol.tasks.find((t) => t.id === itemId) ?? null);
   };
 
   const handleDragOver = (event: DragOverEvent) => {
     const { active, over } = event;
-    if (!over || !board) return;
+    if (!over) return;
 
     const activeId = active.id as string;
-    const overId = over.id as string;
-
     if (isColumnId(activeId)) return;
 
-    const sourceCol = findColumnByTaskId(activeId);
-    const overCol =
-      board.columns.find((col) => col.id === overId) ||
-      findColumnByTaskId(overId);
-
-    if (!sourceCol || !overCol || sourceCol.id === overCol.id) return;
-
-    setBoard((prev) => {
-      if (!prev) return prev;
-      return {
-        ...prev,
-        columns: prev.columns.map((col) => {
-          if (col.id === sourceCol.id) {
-            return {
-              ...col,
-              tasks: col.tasks.filter((t) => t.id !== activeId),
-            };
-          }
-          if (col.id === overCol.id) {
-            const task = sourceCol.tasks.find((t) => t.id === activeId);
-            if (!task) return col;
-            const overIndex = col.tasks.findIndex((t) => t.id === overId);
-            const newTasks = [...col.tasks];
-            if (overIndex >= 0) {
-              newTasks.splice(overIndex, 0, task);
-            } else {
-              newTasks.push(task);
-            }
-            return { ...col, tasks: newTasks };
-          }
-          return col;
-        }),
-      };
-    });
+    // Spaltenwechsel schon während des Ziehens anwenden, damit die Karte am
+    // Zielort einrastet. Umsortieren innerhalb der Spalte macht erst dragEnd.
+    const next = moveTaskToColumn(columnsRef.current, activeId, over.id as string);
+    if (next) commitColumns(next);
   };
 
   const handleDragEnd = async (event: DragEndEvent) => {
     const { active, over } = event;
     setActiveTask(null);
+    const sourceColumnId = dragSourceColumnRef.current;
+    dragSourceColumnRef.current = null;
 
-    if (!over || !board) return;
+    if (!over) return;
 
     const activeId = active.id as string;
     const overId = over.id as string;
 
     if (isColumnId(activeId) && isColumnId(overId) && activeId !== overId) {
-      const oldIndex = board.columns.findIndex((c) => c.id === activeId);
-      const newIndex = board.columns.findIndex((c) => c.id === overId);
+      const oldIndex = columnsRef.current.findIndex((c) => c.id === activeId);
+      const newIndex = columnsRef.current.findIndex((c) => c.id === overId);
       if (oldIndex !== -1 && newIndex !== -1) {
-        const reordered = arrayMove(board.columns, oldIndex, newIndex);
-        setBoard((prev) => prev ? { ...prev, columns: reordered } : prev);
+        const reordered = arrayMove(columnsRef.current, oldIndex, newIndex);
+        commitColumns(reordered);
         for (let i = 0; i < reordered.length; i++) {
           api.patch(`/api/projects/${id}/columns/${reordered[i].id}`, { position: i + 1 }).catch(() => {});
         }
@@ -231,36 +212,17 @@ export function ProjectBoardPage() {
       return;
     }
 
-    if (activeId !== overId) {
-      const col = findColumnByTaskId(activeId);
-      if (col) {
-        const oldIndex = col.tasks.findIndex((t) => t.id === activeId);
-        const newIndex = col.tasks.findIndex((t) => t.id === overId);
-        if (oldIndex !== -1 && newIndex !== -1) {
-          setBoard((prev) => {
-            if (!prev) return prev;
-            return {
-              ...prev,
-              columns: prev.columns.map((c) =>
-                c.id === col.id
-                  ? { ...c, tasks: arrayMove(c.tasks, oldIndex, newIndex) }
-                  : c,
-              ),
-            };
-          });
-        }
-      }
-    }
+    // Zielzustand synchron berechnen und genau diesen persistieren -- ein
+    // Rückgriff auf den State nach commitColumns würde noch die alte
+    // Reihenfolge liefern und die manuelle Priorisierung verwerfen.
+    const next = reorderWithinColumn(columnsRef.current, activeId, overId) ?? columnsRef.current;
+    commitColumns(next);
 
-    const targetCol = findColumnByTaskId(activeId);
+    const targetCol = findColumnOfTask(next, activeId);
     if (!targetCol) return;
-    const newPosition = targetCol.tasks.findIndex((t) => t.id === activeId);
 
     try {
-      await api.patch(`/api/tasks/${activeId}`, {
-        board_column_id: targetCol.id,
-        board_position: newPosition,
-      });
+      await persistTaskOrder('board', next, [targetCol.id, sourceColumnId]);
     } catch {
       fetchBoard();
     }

@@ -17,7 +17,7 @@ from sqlalchemy.orm import selectinload
 from app.auth.deps import MEMBER_RESTRICTED_TASK_FIELDS, check_project_access, get_current_user, require_role
 from app.routers.uploads import _scan_with_clamav
 from app.database import get_db
-from app.models import ActivityLog, AgentJob, Attachment, BoardColumn, BoardMember, ChecklistItem, EmailTriage, FollowupSuggestion, MeetingTranscript, Project, Task, User
+from app.models import ActivityLog, AgentJob, Attachment, BoardColumn, BoardMember, ChecklistItem, EmailTriage, FollowupSuggestion, MeetingTranscript, PipelineColumn, Project, Task, User
 from app.services.email_links import outlook_deeplink
 from app.services.notification import notify_mentions, notify_task_assigned
 
@@ -33,6 +33,7 @@ from app.schemas import (
     ChecklistItemUpdate,
     TaskCreate,
     TaskOut,
+    TaskReorderBody,
     TaskUpdate,
 )
 
@@ -240,6 +241,96 @@ async def create_task(
     task_out = TaskOut.model_validate(task_obj)
     task_out.assignee_user = await _resolve_assignee_user(task_obj.assignee, db)
     return task_out
+
+
+@router.post("/reorder", status_code=status.HTTP_204_NO_CONTENT)
+async def reorder_tasks(
+    body: TaskReorderBody,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_role("member")),
+) -> None:
+    """Schreibt die Reihenfolge ganzer Spalten in einem Zug.
+
+    Nach einem Drag & Drop sendet das Frontend die vollständige Reihenfolge der
+    Zielspalte (bei einem Spaltenwechsel zusätzlich die Herkunftsspalte). Die
+    Positionen werden mit 1..N neu durchnummeriert, statt nur den gezogenen Task
+    zu aktualisieren. So können keine doppelten Positionswerte entstehen, und
+    Altbestände mit kollidierenden Werten heilen sich beim ersten Drop selbst.
+    """
+    is_pipeline = body.scope == "pipeline"
+
+    # pipeline_column_id/-position stehen in MEMBER_RESTRICTED_TASK_FIELDS --
+    # die Agenda ist persönliches Owner-Territorium.
+    if is_pipeline and user.role != "owner":
+        raise HTTPException(
+            status_code=403,
+            detail="Nur der Owner darf die Agenda-Reihenfolge ändern",
+        )
+
+    for group in body.columns:
+        if not group.task_ids:
+            continue
+        if len(set(group.task_ids)) != len(group.task_ids):
+            raise HTTPException(
+                status_code=422, detail="Doppelte Task-IDs in der Reihenfolge"
+            )
+
+        project_id: uuid.UUID | None = None
+        if is_pipeline:
+            column_exists = await db.scalar(
+                select(PipelineColumn.id).where(PipelineColumn.id == group.column_id)
+            )
+            if column_exists is None:
+                raise HTTPException(status_code=404, detail="Agenda-Spalte nicht gefunden")
+        else:
+            project_id = await db.scalar(
+                select(BoardColumn.project_id).where(BoardColumn.id == group.column_id)
+            )
+            if project_id is None:
+                raise HTTPException(status_code=404, detail="Board-Spalte nicht gefunden")
+            if not await check_project_access(project_id, user, db):
+                raise HTTPException(status_code=403, detail="Kein Zugriff auf dieses Projekt")
+
+        result = await db.execute(select(Task).where(Task.id.in_(group.task_ids)))
+        tasks_by_id = {t.id: t for t in result.scalars().all()}
+        if len(tasks_by_id) != len(group.task_ids):
+            raise HTTPException(status_code=404, detail="Mindestens ein Task existiert nicht")
+
+        # Board-Reorder verschiebt nie über Projektgrenzen -- sonst könnte ein
+        # Member fremde Tasks in sein eigenes Board ziehen.
+        if not is_pipeline:
+            for task in tasks_by_id.values():
+                if task.project_id != project_id:
+                    raise HTTPException(
+                        status_code=403, detail="Task gehört nicht zu diesem Projekt"
+                    )
+
+        # Auch die Tasks laden, die das Frontend nicht kennt (erledigte,
+        # wiederkehrende Vorlagen). Sie werden hinter der übergebenen
+        # Reihenfolge einsortiert, damit die ganze Spalte kollisionsfrei
+        # durchnummeriert ist und nicht nur ihr sichtbarer Teil.
+        if is_pipeline:
+            column_filter = Task.pipeline_column_id == group.column_id
+            position_col = Task.pipeline_position
+        else:
+            column_filter = Task.board_column_id == group.column_id
+            position_col = Task.board_position
+        hidden_result = await db.execute(
+            select(Task)
+            .where(column_filter, Task.id.notin_(group.task_ids))
+            .order_by(position_col.nulls_last(), Task.created_at)
+        )
+
+        ordered = [tasks_by_id[tid] for tid in group.task_ids]
+        ordered.extend(hidden_result.scalars().all())
+
+        for index, task in enumerate(ordered, start=1):
+            if is_pipeline:
+                task.pipeline_column_id = group.column_id
+                task.pipeline_position = float(index)
+            else:
+                task.board_column_id = group.column_id
+                task.board_position = float(index)
 
 
 # --- Pending Review (auto-erstellte Tasks aus E-Mail-Triage) ---

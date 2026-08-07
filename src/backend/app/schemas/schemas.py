@@ -1,7 +1,8 @@
 import uuid
 from datetime import date, datetime
+from typing import Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 # --- Project ---
@@ -148,6 +149,22 @@ class TaskUpdate(BaseModel):
     calendar_preferred_time: str | None = None
     pipedrive_deal_id: int | None = None
     pipedrive_person_id: int | None = None
+
+
+class TaskReorderColumn(BaseModel):
+    """Eine Spalte samt der vollständigen, gewünschten Task-Reihenfolge."""
+    column_id: uuid.UUID
+    task_ids: list[uuid.UUID] = Field(max_length=1000)
+
+
+class TaskReorderBody(BaseModel):
+    """Bulk-Reorder: nummeriert die betroffenen Spalten komplett neu durch.
+
+    ``scope`` entscheidet, ob die Board-Reihenfolge (Projektansicht) oder die
+    Pipeline-Reihenfolge (Agenda) geschrieben wird.
+    """
+    scope: Literal["board", "pipeline"]
+    columns: list[TaskReorderColumn] = Field(min_length=1, max_length=50)
 
 
 class AssigneeUser(BaseModel):

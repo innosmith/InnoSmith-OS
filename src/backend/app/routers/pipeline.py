@@ -38,7 +38,9 @@ async def get_pipeline(
                 Task.is_completed == False,  # noqa: E712
                 ~and_(Task.recurrence_rule.isnot(None), Task.template_id.is_(None)),
             )
-            .order_by(Task.pipeline_position)
+            # created_at als Tiebreaker: bei gleichen Positionen wäre die
+            # Reihenfolge sonst undefiniert und würde pro Reload springen.
+            .order_by(Task.pipeline_position.nulls_last(), Task.created_at)
         )
         tasks = task_result.scalars().all()
 
