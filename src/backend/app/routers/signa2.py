@@ -32,16 +32,34 @@ logger = logging.getLogger("taskpilot.signa2")
 # `v1/sources` schliesst die Unterpfade ein (`/discover`, `/probe`, `/import-opml`) und ist
 # schreibend: Die Quellenpflege gehoert zum Produkt, nicht zu einer Nebenoberflaeche.
 # Schreibrechte hat nur, wer in TaskPilot die Rolle `owner` traegt -- siehe unten.
-ERLAUBT = ("v1/reading-list", "v1/radars", "v1/signals", "v1/feedback", "v1/state", "v1/sources")
+#
+# `v1/takt` und `v1/jetzt-holen` steuern, wie oft Signa von selbst holt. Aus demselben
+# Grund wie die Quellen: Wer liest, muss einstellen koennen, wie oft nachgeschaut wird.
+ERLAUBT = (
+    "v1/reading-list",
+    "v1/radars",
+    "v1/signals",
+    "v1/feedback",
+    "v1/state",
+    "v1/sources",
+    "v1/takt",
+    "v1/jetzt-holen",
+    "v1/profile",
+)
 
+# Der Vorschlagslauf befragt ein Sprachmodell und prueft anschliessend jede genannte
+# Adresse einzeln. Das dauert laenger als jeder andere Aufruf; mit dreissig Sekunden
+# braeche der Proxy ab, waehrend Signa noch arbeitet.
 ZEITGRENZE = httpx.Timeout(30.0, connect=5.0)
+ZEITGRENZE_LANG = httpx.Timeout(180.0, connect=5.0)
+LANGSAM = ("v1/sources/suggest", "v1/sources/discover", "v1/sources/probe")
 
 
 def _ist_erlaubt(pfad: str) -> bool:
     return any(pfad == e or pfad.startswith(f"{e}/") for e in ERLAUBT)
 
 
-@router.api_route("/{pfad:path}", methods=["GET", "POST", "PATCH", "DELETE"])
+@router.api_route("/{pfad:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
 async def durchreichen(
     pfad: str,
     request: Request,
@@ -55,7 +73,8 @@ async def durchreichen(
     ziel = f"{einstellungen.signa_base_url.rstrip('/')}/api/{pfad}"
 
     try:
-        async with httpx.AsyncClient(timeout=ZEITGRENZE) as klient:
+        grenze = ZEITGRENZE_LANG if pfad in LANGSAM else ZEITGRENZE
+        async with httpx.AsyncClient(timeout=grenze) as klient:
             antwort = await klient.request(
                 request.method,
                 ziel,
