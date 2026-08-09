@@ -73,6 +73,7 @@ docker-compose.override.yml
 
 # Vendor (private Packages, werden via docker/build.sh kopiert)
 src/backend/vendor/
+src/frontend/vendor/
 
 # OS
 .Spotlight-V100

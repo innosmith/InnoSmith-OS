@@ -288,6 +288,11 @@ class Settings(BaseSettings):
     isi_write_user: str = ""
     isi_write_secret: str = ""
 
+    # Signa 2.0 (eigenständiger Dienst, wird über /api/signa2/* durchgereicht).
+    # Aus einem Container heraus ist «localhost» das eigene Netz, nicht der Rechner --
+    # dort gehört host.docker.internal oder die Adresse des Hosts hin.
+    signa_base_url: str = "http://localhost:8091"
+
     # InvoiceInsight (Kreditoren-Analyse)
     invoiceinsight_api_key: str = ""
     invoiceinsight_url: str = "http://127.0.0.1:8055/mcp"

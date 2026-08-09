@@ -43,6 +43,7 @@ from app.routers import (
     projects,
     search,
     signa,
+    signa2,
     sse,
     tags,
     tasks,
@@ -259,6 +260,7 @@ app.include_router(creditors.router)
 app.include_router(analysis.router)
 app.include_router(intelligence.router)
 app.include_router(signa.router)
+app.include_router(signa2.router)
 app.include_router(chat.router)
 app.include_router(code_execute.router)
 app.include_router(export.router)

@@ -49,6 +49,13 @@ rm -rf "$VENDOR_DIR/ai9/.git" \
 
 echo "==> Vendor-Verzeichnis bereit."
 
+# Signa-Lesepaket ins Frontend vendoren. Gleicher Grund wie oben: Der Build-Kontext des
+# Frontend-Images ist src/frontend, ein Verweis nach aussen laesst sich dort nicht
+# aufloesen.
+echo ""
+echo "==> Signa-Lesepaket vendoren..."
+"$SCRIPT_DIR/sync-signa-reader.sh"
+
 # Sandbox-Image bauen (falls Dockerfile vorhanden)
 if [ -f "$SCRIPT_DIR/sandbox/Dockerfile" ]; then
     echo ""

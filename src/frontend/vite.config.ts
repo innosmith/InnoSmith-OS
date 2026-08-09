@@ -1,3 +1,4 @@
+import { fileURLToPath, URL } from 'node:url'
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
@@ -52,6 +53,25 @@ export default defineConfig({
       },
     }),
   ],
+  resolve: {
+    // Das Lesepaket von Signa liegt als Quelltext unter vendor/ (kopiert von
+    // docker/sync-signa-reader.sh). Es wird mitkompiliert wie eigener Code und teilt
+    // sich React mit TaskPilot -- zwei React-Instanzen in einem Bundle waeren ein
+    // Fehler, den man erst zur Laufzeit sieht.
+    //
+    // Die Reihenfolge ist wesentlich: Vite vergleicht Zeichenketten von vorne, sodass
+    // ein blosses '@signa/reader' auch '@signa/reader/styles.css' fangen wuerde.
+    alias: [
+      {
+        find: '@signa/reader/styles.css',
+        replacement: fileURLToPath(new URL('./vendor/signa-reader/src/styles.css', import.meta.url)),
+      },
+      {
+        find: '@signa/reader',
+        replacement: fileURLToPath(new URL('./vendor/signa-reader/src/index.ts', import.meta.url)),
+      },
+    ],
+  },
   build: {
     // mermaid/cytoscape/wardley werden bereits lazy geladen, sind als Drittlibs
     // aber unvermeidbar gross (~440-560 KB). Limit knapp darueber, damit nur
@@ -107,6 +127,9 @@ export default defineConfig({
           });
         },
       },
+      // Signa laeuft als eigenstaendiger Dienst, wird aber ueber das TaskPilot-Backend
+      // durchgereicht (/api/signa2/*). Damit gilt hier kein Sonderweg: derselbe Pfad
+      // in Entwicklung, Integration und Produktion.
       '/api': 'http://localhost:8000',
       '/uploads': 'http://localhost:8000',
     },

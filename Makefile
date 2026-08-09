@@ -5,7 +5,7 @@ COMPOSE_SHARED = docker compose -f docker/docker-compose.yml
 COMPOSE_INT    = $(COMPOSE_SHARED) -f docker/docker-compose.integration.yml --profile clamav
 COMPOSE_PROD   = docker compose -p taskpilot-prod --env-file .env.prod -f docker/docker-compose.prod.yml
 
-.PHONY: help dev int prod build down logs-int logs-prod logs-indexer status health vendor sandbox sandbox-executor test test-smoke test-contract test-e2e test-explore test-all reset-dev schema-int seed-int backup-prod backup-schedule backup-unschedule backup-status
+.PHONY: help dev int prod build down logs-int logs-prod logs-indexer status health vendor signa-reader sandbox sandbox-executor test test-smoke test-contract test-e2e test-explore test-all reset-dev schema-int seed-int backup-prod backup-schedule backup-unschedule backup-status
 
 help: ## Zeigt diese Hilfe
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | \
@@ -22,7 +22,7 @@ infra-down: ## Shared Infra stoppen
 
 # ── Development ───────────────────────────────────────────
 
-dev: infra ## Dev-Infra starten (Backend+Frontend laufen bare-metal)
+dev: infra signa-reader ## Dev-Infra starten (Backend+Frontend laufen bare-metal)
 	$(COMPOSE_SHARED) --profile clamav up -d clamav
 	@echo ""
 	@echo "Shared Infra laeuft (Postgres :5435, LiteLLM :4000, ClamAV :3310)."
@@ -33,10 +33,16 @@ dev: infra ## Dev-Infra starten (Backend+Frontend laufen bare-metal)
 	@echo ""
 	@echo "Frontend starten:"
 	@echo "  cd src/frontend && npm run dev"
+	@echo ""
+	@echo "Fuer die Seite /leseliste muss Signa laufen (API auf :8091):"
+	@echo "  cd ~/dev/github/InnoSmithSigna && make start"
+
+signa-reader: ## Signa-Lesepaket in den Build-Kontext des Frontends kopieren
+	@./docker/sync-signa-reader.sh
 
 # ── Integration ──────────────────────────────────────────
 
-int: infra ## Integration starten (Full Docker + ClamAV)
+int: infra signa-reader ## Integration starten (Full Docker + ClamAV)
 	CACHEBUST=$$(date +%s) $(COMPOSE_INT) up -d --build
 
 int-down: ## Integration stoppen (Shared Infra bleibt)
@@ -44,7 +50,7 @@ int-down: ## Integration stoppen (Shared Infra bleibt)
 
 # ── Produktion ───────────────────────────────────────────
 
-prod: ## Produktion starten (Standalone, eigene DB + ClamAV)
+prod: signa-reader ## Produktion starten (Standalone, eigene DB + ClamAV)
 	@docker network inspect taskpilot-shared >/dev/null 2>&1 || docker network create taskpilot-shared
 	CACHEBUST=$$(date +%s) $(COMPOSE_PROD) up -d --build
 
