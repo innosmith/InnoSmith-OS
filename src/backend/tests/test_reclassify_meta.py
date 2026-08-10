@@ -80,3 +80,23 @@ def test_does_not_mutate_original_meta():
     # Die übergebenen Original-Metadaten dürfen nicht verändert werden.
     assert orig["draft_id"] == "keep-me"
     assert "forced_class" not in orig
+
+
+def test_forced_label_is_carried_into_the_job():
+    """Eine gleichzeitige Label-Korrektur muss den Job erreichen.
+
+    Sonst setzt ``_apply_label_correction`` die Kategorie, und der unmittelbar
+    folgende Korrektur-Job überschreibt sie mit dem geratenen LLM-Label.
+    """
+    item = _make_item()
+    meta = _build_corrective_meta(
+        None, item, forced_class="task", reason=None, forced_label="Wichtig"
+    )
+    assert meta["forced_label"] == "Wichtig"
+
+
+def test_without_label_correction_no_forced_label_key():
+    """Reine Klassen-Korrektur lässt dem Modell die Label-Entscheidung."""
+    item = _make_item()
+    meta = _build_corrective_meta(None, item, forced_class="task", reason=None)
+    assert "forced_label" not in meta

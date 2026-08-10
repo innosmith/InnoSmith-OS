@@ -169,12 +169,18 @@ def _build_corrective_meta(
     item: EmailTriage,
     forced_class: str,
     reason: str | None,
+    forced_label: str | None = None,
 ) -> dict:
     """Baut die metadata_json fuer einen Korrektur-Job (rein, ohne DB/IO).
 
     Klont -- falls vorhanden -- die Metadaten des Original-Jobs, stellt die
     Pflichtfelder fuer den Worker sicher (Fallback aus dem EmailTriage-Eintrag),
     entfernt irrefuehrende Reste des letzten Laufs und setzt ``forced_class``.
+
+    ``forced_label`` haelt eine gleichzeitige Label-Korrektur fest. Ohne das setzte
+    ``_apply_label_correction`` die Kategorie in Outlook, und der unmittelbar danach
+    laufende Korrektur-Job schrieb sie mit dem frisch geratenen LLM-Label wieder
+    zurueck -- die Menschenkorrektur hielt nur Sekunden.
     """
     meta: dict = dict(orig_meta or {})
     meta["email_message_id"] = meta.get("email_message_id") or item.message_id
@@ -186,6 +192,8 @@ def _build_corrective_meta(
                   "self_grade", "feedback_captured"):
         meta.pop(stale, None)
     meta["forced_class"] = forced_class
+    if forced_label:
+        meta["forced_label"] = forced_label
     meta["correction_reason"] = reason or ""
     meta["is_correction"] = True
     return meta
@@ -196,6 +204,7 @@ async def _enqueue_corrective_triage_job(
     item: EmailTriage,
     forced_class: str,
     reason: str | None,
+    forced_label: str | None = None,
 ) -> uuid.UUID | None:
     """Reiht einen email_triage-Job ein, der die korrigierte Klasse erzwingt.
 
@@ -212,7 +221,7 @@ async def _enqueue_corrective_triage_job(
             )
             orig_meta = orig.scalar_one_or_none()
 
-        meta = _build_corrective_meta(orig_meta, item, forced_class, reason)
+        meta = _build_corrective_meta(orig_meta, item, forced_class, reason, forced_label)
 
         job = AgentJob(
             user_id=item.user_id,
@@ -227,8 +236,8 @@ async def _enqueue_corrective_triage_job(
         item.agent_job_id = job.id
         item.status = "processing"
         logger.info(
-            "Korrektur-Job %s eingereiht (forced_class=%s, triage=%s)",
-            job.id, forced_class, item.id,
+            "Korrektur-Job %s eingereiht (forced_class=%s, forced_label=%s, triage=%s)",
+            job.id, forced_class, forced_label or "-", item.id,
         )
         return job.id
     except Exception:  # noqa: BLE001 - best-effort, Korrektur darf nie scheitern
@@ -339,7 +348,10 @@ async def reclassify_triage_item(
         # 2) Ausfuehren: korrigierten Artefakt erzeugen (Task bzw. Entwurf).
         if body.triage_class in ("task", "auto_reply"):
             await _enqueue_corrective_triage_job(
-                db, item, forced_class=body.triage_class, reason=body.reason,
+                db, item,
+                forced_class=body.triage_class,
+                reason=body.reason,
+                forced_label=normalize_label(body.label) if body.label else None,
             )
         else:  # fyi -> nur lernen, Item verwerfen
             item.status = "dismissed"

@@ -1182,6 +1182,12 @@ async def _build_thread_task_hint(meta: dict) -> str:
     weiterhin in der Dedup-Logik des Post-Processings (``_find_duplicate_open_task``);
     dieser Hinweis reduziert das Rauschen bereits im Prompt und haelt die
     Klassifikation ueber einen Thread hinweg konsistent. Best-effort.
+
+    Der Hinweis sagt ausdruecklich, dass er nur die KLASSE betrifft. Ohne diesen
+    Zusatz nahm das Modell das ``fyi`` als Anlass, auch das Label passend zu machen:
+    eine Kundenrueckfrage von Justin Springer wurde als ``System`` einsortiert, weil
+    der Skill ``fyi`` mit System/Newsletter/Junk aufzaehlte -- und waere damit aus
+    der Inbox verschwunden.
     """
     try:
         async with async_session() as db:
@@ -1196,6 +1202,10 @@ async def _build_thread_task_hint(meta: dict) -> str:
             "Erstelle KEINEN doppelten Task. Handelt es sich um dieselbe Sache, "
             "genuegt fyi -- das Backend dockt die neue Meldung automatisch als "
             "Checklisten-Eintrag an den bestehenden Task an.\n"
+            "→ Dieser Hinweis betrifft AUSSCHLIESSLICH die triage_class. Das label "
+            "bestimmst du unabhaengig davon nach den Stufen 1-4. Ein fyi macht aus "
+            "einer Mail keine System-, Newsletter- oder Junk-Mail: schrieb ein "
+            "Mensch, bleibt das Label in der Inbox (z. B. Wichtig).\n"
         )
     except Exception:  # noqa: BLE001 - best-effort
         logger.warning("Thread-Task-Hinweis konnte nicht erzeugt werden")
@@ -2376,9 +2386,9 @@ async def _finalize_email_state(
 
     Drei Schritte, in dieser Reihenfolge zwingend:
 
-    1. **Move** nach ``move_target`` (Label + ``fyi`` + ``inferenceClassification
-       == other``). Zuerst, weil ein Move die Graph-ID aendert -- danach zaehlt nur
-       noch die neue ID.
+    1. **Move** nach ``move_target`` (Label + ``fyi``, gebremst durch
+       ``needs_review``). Zuerst, weil ein Move die Graph-ID aendert -- danach
+       zaehlt nur noch die neue ID.
     2. **Kategorie** aus dem validierten Label, IMMER gesetzt (nicht mehr nur als
        Luecken-Fueller). Genau hier entstand der Hauptmangel: 64 % der Mails
        blieben ohne ``label``, und ``Finanzen`` wurde faktisch nie vergeben.
@@ -2399,12 +2409,7 @@ async def _finalize_email_state(
         return
     try:
         # Schritt 1: Move -- deterministisch aus der Klassifikation, nicht vom LLM.
-        target = move_target(
-            label,
-            triage_class,
-            meta.get("inference_classification"),
-            needs_review=needs_review,
-        )
+        target = move_target(label, triage_class, needs_review=needs_review)
         if target and not moved_id:
             try:
                 result = await client.move_to_folder(final_mid, target)
@@ -2412,7 +2417,7 @@ async def _finalize_email_state(
                 if new_mid:
                     final_mid = new_mid
                 logger.info(
-                    "Finalize: Mail nach '%s' verschoben (label=%s, fyi + other)",
+                    "Finalize: Mail nach '%s' verschoben (label=%s, fyi)",
                     target, label,
                 )
             except ValueError:
@@ -3252,6 +3257,21 @@ async def _post_process_triage(
         parsed["needs_review"] = True
     else:
         parsed["label"] = label
+
+    # Berater-Korrektur beim Label erzwingen -- analog zu ``forced_class`` unten.
+    # Eine Label-Korrektur aus dem Cockpit setzt die Outlook-Kategorie sofort und
+    # reiht danach diesen Job ein. Ohne diesen Vorrang schrieb der Job die Kategorie
+    # mit dem neu geratenen LLM-Label zurueck und die Menschenkorrektur hielt nur
+    # Sekunden.
+    forced_label = normalize_label(meta.get("forced_label"))
+    if forced_label and forced_label != label:
+        logger.info(
+            "Job %s: forced_label=%s erzwingt Korrektur (Agent wollte %s)",
+            job_id, forced_label, label,
+        )
+        label = forced_label
+        parsed["label"] = forced_label
+        label_invalid = False
     # Echte Draft-ID aus dem Tool-Ergebnis ist die einzige verlaessliche Quelle.
     # Die vom Modell im JSON gemeldete ID wird NICHT als ID-Quelle genutzt.
     draft_id = captured_draft_id
@@ -3269,17 +3289,27 @@ async def _post_process_triage(
     rationale = parsed.get("rationale")
     reply_expected = bool(parsed.get("reply_expected", False))
 
-    # Sicherheitsgrad der Einschaetzung (0..1). Optional vom LLM geliefert; auf
+    # Sicherheitsgrad der Einschaetzung (0..1). Laut Skill Pflichtfeld; auf
     # gueltigen Bereich begrenzen, damit das Frontend ein verlaessliches Signal
     # (ConfidenceBadge) anzeigen kann.
-    confidence = parsed.get("confidence")
+    #
+    # Eine unbrauchbare Angabe wird NICHT stillschweigend zu "keine Angabe":
+    # ``float("high")`` wirft ValueError, und genau dieser Fall lief bisher als
+    # sicher durch (Kundenmail von Justin Springer, als 'System' eingeordnet, mit
+    # ``confidence: "high"``). Beides -- fehlend und unbrauchbar -- zaehlt unten als
+    # Unsicherheit und bremst den Move.
+    raw_confidence = parsed.get("confidence")
     try:
-        confidence = float(confidence) if confidence is not None else None
+        confidence = float(raw_confidence) if raw_confidence is not None else None
         if confidence is not None:
             if confidence > 1:  # toleriere Prozentangaben (z. B. 85)
                 confidence = confidence / 100.0
             confidence = max(0.0, min(1.0, confidence))
     except (TypeError, ValueError):
+        logger.warning(
+            "Job %s: confidence %r ist keine Zahl -- gilt als fehlend (needs_review)",
+            job_id, str(raw_confidence)[:40],
+        )
         confidence = None
 
     if triage_class == "quick_response":
@@ -3376,16 +3406,33 @@ async def _post_process_triage(
         task_title = meta.get("subject", "E-Mail Triage (kein Titel)")
         logger.warning("Job %s: task ohne task_title, verwende Subject: %s", job_id, task_title)
 
-    # Low-Confidence-Gate (Best-Practice-Audit-Bucket): Eine Klassifikation mit
-    # geringer Sicherheit wird zur menschlichen Sichtung markiert, statt still
-    # durchzugehen. Nicht-destruktiv -- die Klasse bleibt, nur das needs_review-
-    # Signal wird gesetzt, damit das Cockpit solche Faelle hervorhebt.
+    # Unsicherheits-Gate: EIN Signal fuer alles, was das System an diesem Lauf nicht
+    # verstanden hat. Es markiert den Fall im Cockpit zur Sichtung UND bremst den
+    # Move in ``_finalize_email_state`` -- nicht-destruktiv, die Klasse bleibt.
+    #
+    # Frueher trug diese Variable nur die zu niedrige Confidence, und an
+    # ``_finalize_email_state`` ging separat nur ``label_invalid``. Beide Haelften
+    # kannten einander nicht: ein verworfenes Label landete mit
+    # ``needs_review: false`` in der DB (Mail von gabriel.brunner@umb.ch, Label
+    # 'Unklar'), und eine fehlende Confidence bremste den Move gar nicht.
+    #
+    # Fehlende Confidence zaehlt als Unsicherheit, nicht als Sicherheit: das Feld
+    # ist laut Skill Pflicht, sein Fehlen also ein Vertragsbruch des Modells. Preis
+    # dafuer sind gemessene 14 von 177 Mails (30 Tage), die nicht verschoben werden
+    # -- genau die Laeufe, in denen das Modell unsauber gearbeitet hat.
+    #
+    # Eine Berater-Korrektur (``forced_label``) hebt das Signal auf: der Fall ist
+    # dann per Definition gesichtet, und ein Sichtungsmarker auf einer gerade von
+    # Hand korrigierten Mail waere schlicht falsch.
     low_conf_threshold = get_settings().triage_low_confidence_threshold
-    needs_review = confidence is not None and confidence < low_conf_threshold
-    if needs_review:
+    low_confidence = confidence is None or confidence < low_conf_threshold
+    needs_review = (label_invalid or low_confidence) and not forced_label
+    if low_confidence:
         logger.info(
-            "Job %s: Confidence %.2f < %.2f -- als needs_review markiert",
-            job_id, confidence, low_conf_threshold,
+            "Job %s: Confidence %s -- als needs_review markiert (Schwelle %.2f)",
+            job_id,
+            "fehlt" if confidence is None else f"{confidence:.2f} zu niedrig",
+            low_conf_threshold,
         )
 
     logger.info(
@@ -3524,7 +3571,7 @@ async def _post_process_triage(
         label,
         moved_id,
         triage_class=triage_class,
-        needs_review=label_invalid,
+        needs_review=needs_review,
     )
 
     return final_status

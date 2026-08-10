@@ -52,7 +52,7 @@ class TestKalenderIsMovedOnlyHere:
     def test_llm_label_does_not_move(self):
         from app.services.triage_labels import move_target
 
-        assert move_target("Kalender", "fyi", "other") is None
+        assert move_target("Kalender", "fyi") is None
 
     def test_deterministic_path_still_targets_kalender(self):
         """Der Move haengt an einem woertlichen Ordnernamen, nicht an LABEL_FOLDERS.

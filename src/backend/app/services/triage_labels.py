@@ -100,27 +100,33 @@ def folder_for_label(label: str | None) -> str | None:
 def move_target(
     label: str | None,
     triage_class: str | None,
-    inference_class: str | None,
     *,
     needs_review: bool = False,
 ) -> str | None:
     """Entscheidet, ob eine LLM-klassifizierte Mail verschoben wird -- und wohin.
 
     Gibt den Zielordner zurueck oder ``None`` (Mail bleibt ungelesen in der Inbox).
-    Drei Bedingungen muessen zusammen erfuellt sein; jede einzelne ist an
-    Messdaten begruendet:
+    Zwei Bedingungen muessen zusammen erfuellt sein, plus eine Bremse:
 
     1. Das Label hat ueberhaupt einen Zielordner (``LABEL_FOLDERS``).
     2. ``triage_class == 'fyi'`` -- Handlungsbedarf ist damit bereits modelliert.
        Alles, wofuer eine Aufgabe oder ein Entwurf entstand, bleibt sichtbar.
-    3. ``inferenceClassification == 'other'`` -- Outlooks eigene Einordnung. In 30
-       Tagen waren das 102 Mails, davon 100 % ``fyi``, keine mit Task oder Entwurf.
-       Rueckwirkend auf die 251 tatsaechlich verschobenen Mails angewendet, haette
-       diese Bedingung jeden der beklagten Fehlmoves verhindert: die betroffenen
-       Mails echter Kontakte trugen ausnahmslos ``focused``.
 
-    ``needs_review`` (unbekanntes Label, fehlgeschlagener Parse) verhindert den
-    Move zusaetzlich -- was das System nicht verstanden hat, raeumt es nicht weg.
+    ``needs_review`` ist die Bremse und traegt die gesamte Unsicherheit des Laufs:
+    verworfenes Label, Confidence unter der Schwelle, fehlende oder nicht
+    numerische Confidence. Was das System nicht verstanden hat, raeumt es nicht weg.
+
+    Eine dritte Bedingung ``inferenceClassification == 'other'`` gab es hier bis
+    August 2026, eingefuehrt gegen Fehlmoves echter Korrespondenz. Sie wirkte, aber
+    aus dem falschen Grund und viel zu breit: Outlooks Fokus-Heuristik stuft in
+    diesem Postfach 1126 von 1426 Mails als ``focused`` ein, darunter
+    LinkedIn-Einladungen, Synology-Meldungen und Leadinfo-Reports. In 30 Tagen
+    blieben dadurch 99 ``System``- und 12 ``Newsletter``-Mails in der Inbox liegen,
+    waehrend nur 46 bzw. 17 verschoben wurden -- das Gate filterte die Mehrheit
+    statt der Ausnahmen. Die Fehlmoves, gegen die es gedacht war, waren in Wahrheit
+    Label-Fehler des Modells (eine Kundenmail als ``System``); die gehoeren in die
+    Klassifikation und in ``needs_review``, nicht in ein Herkunftssignal von
+    Exchange. NICHT wieder einfuehren.
 
     Wiederkehrendes Systemrauschen laeuft NICHT hierueber, sondern ueber
     deterministische Absender-Regeln (``learned_rules``), die vor dem LLM greifen
@@ -130,7 +136,5 @@ def move_target(
     if needs_review:
         return None
     if triage_class != "fyi":
-        return None
-    if (inference_class or "").strip().casefold() != "other":
         return None
     return folder_for_label(label)

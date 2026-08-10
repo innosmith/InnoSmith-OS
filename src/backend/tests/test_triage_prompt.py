@@ -783,24 +783,36 @@ class TestFinalizeEmailState:
         assert [c[0] for c in manager.mock_calls] == ["move", "set_cat", "unread"]
 
     @pytest.mark.asyncio
-    async def test_focused_mail_is_never_moved(self):
-        """Der konkret beklagte Fehlmove: echte Korrespondenz landete im System-Ordner.
+    async def test_focused_no_longer_blocks_the_move(self):
+        """``inferenceClassification`` steuert den Move nicht mehr -- Absicht, kein Regress.
 
-        Alle beanstandeten Faelle (Affolter, Springer, Streit, Haemmerli, Almonte,
-        von Lanthen) trugen ``inferenceClassification = focused``. Diese Bedingung
-        allein haette jeden davon verhindert.
+        Die Bedingung ``== 'other'`` stand hier von Juli bis August 2026 als Schutz
+        gegen Fehlmoves echter Korrespondenz (Affolter, Springer, Streit, Haemmerli,
+        Almonte, von Lanthen -- alle trugen ``focused``). Sie wirkte, aber viel zu
+        breit: Outlooks Fokus-Heuristik stufte in Anthonys Postfach 1126 von 1426
+        Mails als ``focused`` ein, darunter LinkedIn, Synology und Leadinfo. Gemessen
+        blieben dadurch in 30 Tagen 99 ``System``- und 12 ``Newsletter``-Mails in der
+        Inbox liegen, waehrend nur 46 bzw. 17 verschoben wurden -- das Gate filterte
+        die Mehrheit statt der Ausnahmen, und die Unterordner blieben faktisch
+        unbenutzt.
+
+        Die beklagten Fehlmoves waren in Wahrheit Label-Fehler des Modells (eine
+        Kundenmail als ``System``). Dagegen schuetzen jetzt der Skill (Label und
+        Klasse sind getrennte Fragen) und ``needs_review`` -- siehe
+        ``test_missing_confidence_blocks_move``.
         """
         from unittest.mock import AsyncMock, patch
         from app.services import hermes_worker as hw
 
         client = self._client()
+        client.move_to_folder.return_value = {"id": "NEU"}
         meta = {"email_message_id": "M1", "inference_classification": "focused"}
         with patch.object(hw, "_build_graph_client", AsyncMock(return_value=client)):
             await hw._finalize_email_state(meta, "System", None, triage_class="fyi")
 
-        client.move_to_folder.assert_not_awaited()
-        client.set_categories.assert_awaited_once_with("M1", ["System"])
-        client.mark_as_unread.assert_awaited_once_with("M1")
+        client.move_to_folder.assert_awaited_once_with("M1", "System")
+        client.set_categories.assert_awaited_once_with("NEU", ["System"])
+        client.mark_as_unread.assert_awaited_once_with("NEU")
 
     @pytest.mark.asyncio
     async def test_finanzen_sets_category_but_never_moves(self):
@@ -1103,7 +1115,7 @@ class TestTriageLabels:
         """
         from app.services.triage_labels import move_target
 
-        assert move_target("Kalender", "fyi", "other") is None
+        assert move_target("Kalender", "fyi") is None
 
     def test_junk_targets_the_review_subfolder(self):
         """``Junk`` zeigt auf Anthonys Sichtungsordner, nicht auf Outlooks Quarantaene."""
