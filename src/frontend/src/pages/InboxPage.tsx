@@ -82,6 +82,7 @@ interface TriageItem {
     label?: string;
     needs_review?: boolean;
     label_rejected?: string | null;
+    move_suppressed?: string | null;
     suggested_action?: { type?: string; detail?: string };
     type?: string;
     detail?: string;
@@ -152,6 +153,19 @@ const CATEGORY_COLORS: Record<string, string> = {
 
 function getCategoryClass(cat: string): string {
   return CATEGORY_COLORS[cat.toLowerCase()] || 'bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-400';
+}
+
+/**
+ * Erklärt die Sichtungsmarke. «Unklar» ist kein erfundenes Label, sondern der
+ * Agent, der sich nicht entschieden hat -- das liest sich anders und führt zu einer
+ * anderen Reaktion.
+ */
+function reviewHint(labelRejected?: string | null): string {
+  if (!labelRejected) return 'Zur manuellen Sichtung markiert.';
+  if (labelRejected.trim().toLowerCase() === 'unklar') {
+    return 'Der Agent hat sich auf keine Kategorie festgelegt – bitte selbst setzen.';
+  }
+  return `Agent schlug «${labelRejected}» vor – kein gültiges Label, bitte prüfen.`;
 }
 
 /* ---------- Haupt-Komponente ---------- */
@@ -946,9 +960,12 @@ export function InboxPage() {
                     </select>
                     {selectedTriage.suggested_action?.needs_review && (
                       <span className="text-xs text-amber-600 dark:text-amber-400">
-                        {selectedTriage.suggested_action.label_rejected
-                          ? `Agent schlug «${selectedTriage.suggested_action.label_rejected}» vor – kein gültiges Label, bitte prüfen.`
-                          : 'Zur manuellen Sichtung markiert.'}
+                        {reviewHint(selectedTriage.suggested_action.label_rejected)}
+                      </span>
+                    )}
+                    {selectedTriage.suggested_action?.move_suppressed && (
+                      <span className="text-xs text-gray-500 dark:text-gray-400">
+                        Nicht verschoben ({selectedTriage.suggested_action.move_suppressed}).
                       </span>
                     )}
                   </div>

@@ -13,7 +13,6 @@ Kein LLM — reiner ``conversationId``-Abgleich. Dedupe über die Tabelle
 import json as json_mod
 import logging
 import os
-import re
 import sys
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -38,8 +37,12 @@ MAX_AGE_DAYS = 30          # ältere Sent-Mails nicht mehr aufgreifen
 MAX_SENT_SCAN = 150        # Sicherheitsdeckel pro Lauf
 MAX_NEW_SUGGESTIONS = 10   # pro Lauf höchstens N neue Vorschläge
 
-# Adressmuster, bei denen Nachfassen sinnlos ist
-_NOREPLY_RE = re.compile(r"no[-_.]?reply|do[-_.]?not[-_.]?reply|newsletter|notification", re.IGNORECASE)
+# Hier stand ein Adressmuster (noreply/donotreply/newsletter/notification), das
+# Nachfass-Vorschlaege an Automaten verhindern sollte. Gemessen an 199 tatsaechlich
+# gesendeten Mails traf es KEINE einzige: Anthony schreibt nicht an Automaten, und
+# ein Nachfass-Vorschlag entsteht nur zu selbst gesendeter Post. Das Muster war also
+# wirkungslos, kostete aber Pflege pro Sprache und Anbieter. Alleiniger inhaltlicher
+# Entscheider bleibt das LLM-Gate weiter unten ("erwartet diese Mail eine Antwort?").
 
 
 def _get_graph_client() -> GraphClient | None:
@@ -235,7 +238,7 @@ async def check_followups_due() -> int:
             continue
 
         recipient = _first_recipient(msg)
-        if not recipient or recipient == own_email or _NOREPLY_RE.search(recipient):
+        if not recipient or recipient == own_email:
             continue
         subject = (msg.get("subject") or "").strip()
 

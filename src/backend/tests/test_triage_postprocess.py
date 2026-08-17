@@ -56,7 +56,7 @@ def _patches(job=None):
     return [
         patch.object(hw, "async_session", _session_factory(job)),
         patch.object(hw, "_create_email_task", new=AsyncMock(return_value=None)),
-        patch.object(hw, "_finalize_email_state", new=AsyncMock()),
+        patch.object(hw, "_finalize_email_state", new=AsyncMock(return_value=None)),
         patch.object(hw, "record_episode", new=AsyncMock()),
         patch.object(hw, "notify_agent_awaiting_approval", new=AsyncMock()),
         patch.object(hw, "_snapshot_agent_draft", new=AsyncMock(return_value=None)),
@@ -192,6 +192,20 @@ class TestUnsicherheitBremstDenMove:
     async def test_rejected_label_blocks_move(self):
         """Ein erfundenes Label bremst weiterhin -- auch bei hoher Confidence."""
         content = '{"triage_class": "fyi", "label": "System-Info", "confidence": 0.99}'
+        assert await _needs_review_for(content) is True
+
+    @pytest.mark.asyncio
+    async def test_model_chosen_unklar_is_treated_as_a_rejected_label(self):
+        """``Unklar`` vom Modell ist ein Ausweichen und muss zur Sichtung fuehren.
+
+        Vorfall 28.07.-17.08.2026: ``Unklar`` war waehlbar und der Skill empfahl es
+        bei Unsicherheit. Gemessen trugen danach 60 Mails dieses Label, davon 51 mit
+        ``needs_review = false`` und teils Confidence 0.9 -- der Fall war damit
+        weder Aufgabe noch Sichtungsposten und blieb unbearbeitet liegen. Seit der
+        Trennung von ``TRIAGE_LABELS`` und ``AGENT_LABELS`` laeuft dieser Fall in
+        denselben Pfad wie ein erfundenes Label.
+        """
+        content = '{"triage_class": "fyi", "label": "Unklar", "confidence": 0.9}'
         assert await _needs_review_for(content) is True
 
     @pytest.mark.asyncio

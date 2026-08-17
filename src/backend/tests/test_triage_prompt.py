@@ -657,10 +657,14 @@ class TestExtractNewIdFromMove:
 class TestFinalizeEmailState:
     """Deterministische Outlook-Finalisierung: Kategorie-Gating + immer ungelesen."""
 
-    def _client(self, categories=None):
+    def _client(self, categories=None, own_mails=None):
         from unittest.mock import AsyncMock
         client = AsyncMock()
         client.get_email_categories.return_value = {"categories": categories or []}
+        # Standard: an diese Adresse hat Anthony nie geschrieben -- ein Move ist also
+        # erlaubt. Ohne diese Vorgabe liefert der AsyncMock ein wahrheitswertiges
+        # Objekt zurueck und jeder Move waere stillschweigend blockiert.
+        client.search_my_replies_to.return_value = own_mails or []
         return client
 
     @pytest.mark.asyncio
@@ -773,7 +777,12 @@ class TestFinalizeEmailState:
         manager.attach_mock(client.set_categories, "set_cat")
         manager.attach_mock(client.mark_as_unread, "unread")
 
-        meta = {"email_message_id": "ALT", "inference_classification": "other"}
+        meta = {
+            "email_message_id": "ALT",
+            "inference_classification": "other",
+            "from_address": "daily@updates.miro.com",
+            "subject": "Neuigkeiten auf deinem Board",
+        }
         with patch.object(hw, "_build_graph_client", AsyncMock(return_value=client)):
             await hw._finalize_email_state(meta, "Newsletter", None, triage_class="fyi")
 
@@ -797,16 +806,26 @@ class TestFinalizeEmailState:
         unbenutzt.
 
         Die beklagten Fehlmoves waren in Wahrheit Label-Fehler des Modells (eine
-        Kundenmail als ``System``). Dagegen schuetzen jetzt der Skill (Label und
-        Klasse sind getrennte Fragen) und ``needs_review`` -- siehe
-        ``test_missing_confidence_blocks_move``.
+        Kundenmail als ``System``). Der Ersatz war zunaechst der Skill (Label und
+        Klasse sind getrennte Fragen) plus ``needs_review`` -- das genuegte nicht:
+        in den folgenden 25 Tagen wurden 49 Mails namentlicher Absender weiterhin
+        als ``System`` verschoben, mit Confidence bis 1.0. Seit August 2026 fragt
+        darum ``move_target`` den Korrespondenz-Nachweis -- siehe
+        ``test_own_correspondence_is_never_moved``. Das ist keine Rueckkehr zum
+        ``other``-Gate: geprueft wird eigene gesendete Post, nicht Outlooks
+        Fokus-Heuristik.
         """
         from unittest.mock import AsyncMock, patch
         from app.services import hermes_worker as hw
 
         client = self._client()
         client.move_to_folder.return_value = {"id": "NEU"}
-        meta = {"email_message_id": "M1", "inference_classification": "focused"}
+        meta = {
+            "email_message_id": "M1",
+            "inference_classification": "focused",
+            "from_address": "wordpress@innosmith.ch",
+            "subject": "Wordfence activity for 17.08.2026",
+        }
         with patch.object(hw, "_build_graph_client", AsyncMock(return_value=client)):
             await hw._finalize_email_state(meta, "System", None, triage_class="fyi")
 
@@ -860,6 +879,70 @@ class TestFinalizeEmailState:
             )
 
         client.move_to_folder.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_own_correspondence_blocks_move_and_is_reported(self):
+        """Eine Adresse, an die Anthony geschrieben hat, wird nicht weggeraeumt.
+
+        Die Kategorie wird trotzdem gesetzt und die Mail bleibt ungelesen sichtbar.
+        Der Grund geht als Klartext an den Aufrufer, damit im Cockpit nicht bloss
+        eine unverschobene Mail steht.
+        """
+        from unittest.mock import AsyncMock, patch
+        from app.services import hermes_worker as hw
+
+        client = self._client(own_mails=[{"id": "S1", "subject": "AW: SSH public keys"}])
+        meta = {
+            "email_message_id": "M1",
+            "from_address": "justin.springer@swissbankers.ch",
+        }
+        with patch.object(hw, "_build_graph_client", AsyncMock(return_value=client)):
+            grund = await hw._finalize_email_state(meta, "System", None, triage_class="fyi")
+
+        client.move_to_folder.assert_not_awaited()
+        client.set_categories.assert_awaited_once_with("M1", ["System"])
+        client.mark_as_unread.assert_awaited_once_with("M1")
+        assert grund == "eigene Korrespondenz mit dieser Adresse"
+
+    @pytest.mark.asyncio
+    async def test_correspondence_is_only_checked_when_a_move_is_possible(self):
+        """Der Nachweis kostet eine Graph-Suche -- sie laeuft nur bei moeglichem Move.
+
+        Bei ``Finanzen`` (kein Zielordner), bei ``task`` und bei ``needs_review`` ist
+        die Frage bereits entschieden; eine Suche waere reine Netzlast pro Mail.
+        """
+        from unittest.mock import AsyncMock, patch
+        from app.services import hermes_worker as hw
+
+        faelle = (
+            ("Finanzen", "fyi", False),
+            ("System", "task", False),
+            ("System", "fyi", True),
+        )
+        for label, klasse, review in faelle:
+            client = self._client()
+            with patch.object(hw, "_build_graph_client", AsyncMock(return_value=client)):
+                await hw._finalize_email_state(
+                    {"email_message_id": "M1", "from_address": "a@b.ch"},
+                    label, None, triage_class=klasse, needs_review=review,
+                )
+            client.search_my_replies_to.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_failing_correspondence_check_blocks_the_move(self):
+        """Faellt die Graph-Suche aus, bleibt die Mail liegen -- fail-closed."""
+        from unittest.mock import AsyncMock, patch
+        from app.services import hermes_worker as hw
+
+        client = self._client()
+        client.search_my_replies_to.side_effect = RuntimeError("Graph down")
+        meta = {"email_message_id": "M1", "from_address": "wordpress@innosmith.ch"}
+        with patch.object(hw, "_build_graph_client", AsyncMock(return_value=client)):
+            grund = await hw._finalize_email_state(meta, "System", None, triage_class="fyi")
+
+        client.move_to_folder.assert_not_awaited()
+        client.mark_as_unread.assert_awaited_once_with("M1")
+        assert grund == "Korrespondenz nicht pruefbar"
 
     @pytest.mark.asyncio
     async def test_missing_folder_does_not_stop_finalization(self):
@@ -1078,12 +1161,40 @@ class TestTriageLabels:
             "Finanzen", "Kalender", "Newsletter", "Junk", "Unklar",
         )
 
+    def test_agent_vocabulary_excludes_the_fallback(self):
+        """Der Agent darf ``Unklar`` nicht waehlen -- es ist die Sichtungsmarke.
+
+        Regression zum Vorfall vom 28.07.-17.08.2026: ``Unklar`` stand im
+        Agenten-Vokabular und der Skill empfahl es ausdruecklich bei Unsicherheit.
+        Gemessene Folge: 20 % aller kategorisierten Mails trugen ``Unklar``, davon
+        praktisch keine ``needs_review`` -- die Faelle lagen ohne Aufgabe und ohne
+        Sichtungsmarke da, darunter Kundenthreads wie "AW: Offerte
+        KI-Basisschulungen". Gleichzeitig wurden ``Offerten/Verträge``,
+        ``Networking/Leads`` und ``Signale`` drei Wochen lang nie vergeben.
+        """
+        from app.services.triage_labels import AGENT_LABELS, FALLBACK_LABEL, TRIAGE_LABELS
+
+        assert FALLBACK_LABEL not in AGENT_LABELS
+        assert set(AGENT_LABELS) == set(TRIAGE_LABELS) - {FALLBACK_LABEL}
+        assert len(AGENT_LABELS) == 9
+
+    def test_agent_unklar_counts_as_invalid(self):
+        """Ein vom Modell geliefertes ``Unklar`` laeuft in den fail-closed-Pfad."""
+        from app.services.triage_labels import normalize_agent_label
+
+        assert normalize_agent_label("Unklar") is None
+        assert normalize_agent_label("unklar") is None
+        assert normalize_agent_label("Wichtig") == "Wichtig"
+
     def test_only_case_and_whitespace_are_tolerated(self):
-        from app.services.triage_labels import normalize_label
+        from app.services.triage_labels import normalize_agent_label, normalize_label
 
         assert normalize_label("finanzen") == "Finanzen"
         assert normalize_label("  Newsletter  ") == "Newsletter"
         assert normalize_label("Offerten/Verträge") == "Offerten/Verträge"
+        # Die Menschen-Variante akzeptiert ``Unklar`` weiter (manuelle Korrektur).
+        assert normalize_label("Unklar") == "Unklar"
+        assert normalize_agent_label("  wichtig ") == "Wichtig"
 
     def test_invented_labels_are_rejected(self):
         """Keine Synonymtabelle: erfundene Labels werden abgewiesen, nicht geraten.
@@ -1115,7 +1226,87 @@ class TestTriageLabels:
         """
         from app.services.triage_labels import move_target
 
-        assert move_target("Kalender", "fyi") is None
+        assert move_target("Kalender", "fyi", known_correspondent=False) is None
+
+    def test_own_correspondence_is_never_moved(self):
+        """Ein falsches ``System`` auf einer Kundenmail raeumt sie nicht mehr weg.
+
+        Regression zu 49 Fehlmoves in 25 Tagen (Juli/August 2026). Der Skill sagte
+        bereits "Hat ein Mensch die Mail geschrieben, ist sie NIE System" -- eine
+        Prompt-Bitte, die das Modell mit Confidence 0.9 bis 1.0 ueberging. Betroffen
+        waren u. a. "Projekt NITL -- Bitte um Rueckmeldung" von rahel.frey@be.ch und
+        zweimal "AW: DRINGEND: PRDAI01 -- Archiv-Mount" von Swiss Bankers. An allen
+        gemessenen Schadensfaellen war der Absender eine Adresse, an die Anthony
+        selbst schon geschrieben hatte.
+        """
+        from app.services.triage_labels import move_target
+
+        for label in ("System", "Newsletter", "Junk"):
+            assert move_target(label, "fyi", known_correspondent=True) is None, label
+
+    def test_machines_still_move(self):
+        """Der Schutz darf das Rauschen nicht in der Inbox stauen.
+
+        ``support@track.toggl.com`` allein kam in 30 Tagen zwoelfmal, GitHub-Meldungen
+        sechzehnmal. An keine dieser Adressen hat Anthony je geschrieben.
+        """
+        from app.services.triage_labels import move_target
+
+        assert move_target("System", "fyi", known_correspondent=False) == "System"
+        assert move_target("Newsletter", "fyi", known_correspondent=False) == "Newsletter"
+
+    def test_cold_outreach_still_moves_to_junk(self):
+        """Unaufgeforderte Verkaufsanfragen brauchen keinen Label-Sonderfall.
+
+        Sie kommen von Adressen, an die Anthony nie geschrieben hat, und fallen damit
+        schon durch die allgemeine Regel. Phishing, das die Adresse eines echten
+        Kontakts faelscht, bleibt umgekehrt sichtbar.
+        """
+        from app.services.triage_labels import move_target
+
+        assert move_target("Junk", "fyi", known_correspondent=False) == "Junk"
+
+    def test_unverifiable_correspondence_blocks_the_move(self):
+        """Faellt die Graph-Suche aus, wird nichts verschoben -- fail-closed.
+
+        ``None`` heisst "nicht ermittelt", nicht "kein Kontakt". Ein Ausfall darf
+        keine Post wegraeumen, und ein Replay mit lueckenhaften Metadaten soll nicht
+        ausgerechnet den Schutz aushebeln.
+        """
+        from app.services.triage_labels import move_suppressed_reason, move_target
+
+        assert move_target("System", "fyi") is None
+        assert move_target("System", "fyi", known_correspondent=None) is None
+        assert move_suppressed_reason("System", "fyi") == "Korrespondenz nicht pruefbar"
+
+    def test_move_gate_carries_no_pattern_lists(self):
+        """Das Gate darf keine Adress- oder Betreffmuster mehr enthalten.
+
+        Zuvor entschieden vier Listen mit Local-Part-Fragmenten, Rollenpostfach-Namen,
+        Domain-Fragmenten und Antwort-Praefixen (``re:``, ``aw:``, ``wg:``) darueber,
+        ob Post weggeraeumt wird. Sie waren sprach-, client- und anbieterabhaengig und
+        haetten fuer jede weitere Sprache wachsen muessen. Ersetzt durch einen Fakt aus
+        dem Postfach. Nicht wieder einfuehren.
+        """
+        import inspect
+
+        from app.services import triage_labels
+        from app.services.triage_labels import move_target
+
+        # Kein Umschlag-Text mehr im Gate: nur noch der Nachweis und die Bremse.
+        params = set(inspect.signature(move_target).parameters)
+        assert params == {"label", "triage_class", "needs_review", "known_correspondent"}
+
+        # Und keine Muster-Konstanten, die still wieder einwandern koennten.
+        entfernt = {
+            "_MACHINE_LOCAL_SUBSTRINGS",
+            "_MACHINE_DOMAIN_SUBSTRINGS",
+            "_ROLE_MAILBOX_SEGMENTS",
+            "_REPLY_PREFIXES",
+            "is_named_person",
+            "is_reply_subject",
+        }
+        assert entfernt.isdisjoint(vars(triage_labels))
 
     def test_junk_targets_the_review_subfolder(self):
         """``Junk`` zeigt auf Anthonys Sichtungsordner, nicht auf Outlooks Quarantaene."""

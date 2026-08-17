@@ -36,7 +36,8 @@ import uuid
 import httpx
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from sqlalchemy import func, select, update
+from sqlalchemy import cast, func, select, update
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import selectinload
 
 from app.config import get_settings
@@ -72,10 +73,13 @@ from app.services.notification import (
     notify_task_suggested,
 )
 from app.services.triage_labels import (
+    AGENT_LABELS,
     FALLBACK_LABEL,
     NO_CATEGORY,
-    TRIAGE_LABELS,
+    folder_for_label,
+    move_suppressed_reason,
     move_target,
+    normalize_agent_label,
     normalize_label,
 )
 from app.core.principal import get_owner_settings, system_principal_id
@@ -2368,6 +2372,30 @@ async def _snapshot_agent_draft(draft_id: str) -> dict | None:
             pass
 
 
+async def _is_known_correspondent(client, address: str | None) -> bool | None:
+    """Hat Anthony dieser Adresse je selbst geschrieben?
+
+    Der Nachweis kommt aus "Gesendete Elemente" und ist damit ein Fakt aus dem
+    Postfach statt eines Musters: keine Adresslisten, keine Betreff-Praefixe, keine
+    Sprache, kein Anbieter. Er pflegt sich selbst -- ein neuer Kunde ist geschuetzt,
+    sobald Anthony ihm einmal geantwortet hat.
+
+    ``None`` heisst "nicht ermittelbar" (fehlende Adresse, Graph-Suche gescheitert).
+    ``move_target`` behandelt das wie einen bekannten Kontakt und verschiebt dann
+    nicht -- ein Ausfall der Suche darf keine Post wegraeumen.
+    """
+    if not address or "@" not in address:
+        return None
+    try:
+        sent = await client.search_my_replies_to(address, top=1)
+    except Exception:  # noqa: BLE001 - fail-closed, siehe Docstring
+        logger.warning(
+            "Korrespondenz-Nachweis fehlgeschlagen (%s) -- kein Move", address[:60]
+        )
+        return None
+    return bool(sent)
+
+
 async def _finalize_email_state(
     meta: dict,
     label: str | None,
@@ -2375,7 +2403,7 @@ async def _finalize_email_state(
     *,
     triage_class: str | None = None,
     needs_review: bool = False,
-) -> None:
+) -> str | None:
     """Der EINZIGE Schreibpfad auf den Outlook-Zustand nach der Triage.
 
     Das LLM klassifiziert, diese Funktion mutiert. Der Triage-Agent hat die
@@ -2387,8 +2415,8 @@ async def _finalize_email_state(
     Drei Schritte, in dieser Reihenfolge zwingend:
 
     1. **Move** nach ``move_target`` (Label + ``fyi``, gebremst durch
-       ``needs_review``). Zuerst, weil ein Move die Graph-ID aendert -- danach
-       zaehlt nur noch die neue ID.
+       ``needs_review`` und durch den Korrespondenz-Nachweis). Zuerst, weil ein Move
+       die Graph-ID aendert -- danach zaehlt nur noch die neue ID.
     2. **Kategorie** aus dem validierten Label, IMMER gesetzt (nicht mehr nur als
        Luecken-Fueller). Genau hier entstand der Hauptmangel: 64 % der Mails
        blieben ohne ``label``, und ``Finanzen`` wurde faktisch nie vergeben.
@@ -2399,17 +2427,39 @@ async def _finalize_email_state(
     ``moved_id`` deckt den Altfall ab, dass die ID bereits durch einen fremden
     Move gewandert ist. Best-effort und 404-tolerant (CC-only-Mails / veraltete
     IDs duerfen den Job nie stoppen).
+
+    Gibt den Grund zurueck, falls ein moeglicher Move unterdrueckt wurde -- der
+    Aufrufer schreibt ihn ins Triage-Protokoll, damit im Cockpit nicht bloss eine
+    unverschobene Mail steht, sondern auch warum.
     """
     final_mid = moved_id or meta.get("email_message_id")
     if not final_mid:
-        return
+        return None
 
     client = await _build_graph_client()
     if client is None:
-        return
+        return None
     try:
-        # Schritt 1: Move -- deterministisch aus der Klassifikation, nicht vom LLM.
-        target = move_target(label, triage_class, needs_review=needs_review)
+        # Schritt 1: Move -- deterministisch aus der Klassifikation und dem
+        # Korrespondenz-Nachweis, nicht vom LLM. Der Nachweis kostet eine
+        # Graph-Suche und wird deshalb nur eingeholt, wenn ein Move ueberhaupt zur
+        # Debatte steht (verschiebbares Label, fyi, keine Sichtungsmarke).
+        known: bool | None = None
+        if folder_for_label(label) and triage_class == "fyi" and not needs_review:
+            known = await _is_known_correspondent(client, meta.get("from_address"))
+        target = move_target(
+            label, triage_class, needs_review=needs_review, known_correspondent=known
+        )
+        suppressed = move_suppressed_reason(
+            label, triage_class, needs_review=needs_review, known_correspondent=known
+        )
+        if suppressed:
+            logger.info(
+                "Finalize: Move nach '%s' unterdrueckt (%s) -- Mail bleibt in der Inbox "
+                "(label=%s, von=%s)",
+                folder_for_label(label), suppressed, label,
+                str(meta.get("from_address") or "")[:60],
+            )
         if target and not moved_id:
             try:
                 result = await client.move_to_folder(final_mid, target)
@@ -2449,8 +2499,10 @@ async def _finalize_email_state(
                 logger.info("Finalize: ungelesen nicht setzbar (404, z. B. CC-only/veraltete ID)")
             else:
                 logger.warning("Finalize: ungelesen-Schritt fehlgeschlagen (HTTP %s)", status)
+        return suppressed
     except Exception:  # noqa: BLE001 - Finalisierung darf den Job nie stoppen
         logger.warning("Finalize: unerwarteter Fehler (mid=%s)", str(final_mid)[:40])
+        return None
     finally:
         try:
             await client.close()
@@ -2663,22 +2715,18 @@ def _strip_internal_notes(text: str | None) -> str | None:
     return cleaned or None
 
 
-_SUBJECT_PREFIX_RE = re.compile(r"^(?:\s*(?:re|aw|fw|wg|fwd|antw| w)\s*:\s*)+", re.IGNORECASE)
+def _subject_key(subject: str | None) -> str:
+    """Vergleichsschluessel eines Betreffs: Whitespace kollabiert, Gross/Klein egal.
 
-
-def _normalize_subject(subject: str | None) -> str:
-    """Normalisiert einen Betreff fuer den Duplikat-Vergleich.
-
-    Entfernt wiederholte Antwort-/Weiterleitungs-Praefixe (RE:/AW:/FW:/WG: ...)
-    und kollabiert Whitespace -- damit praktisch identische Betreffzeilen
-    (z. B. wiederkehrende Fehler-Mails) als gleich erkannt werden.
+    Bewusst OHNE Abschneiden von Antwort-Praefixen. Die frueheren Praefix-Listen
+    (``re|aw|fw|wg|fwd|antw``) deckten nur Deutsch, Englisch und einen Teil der
+    Client-Eigenheiten ab und muessten fuer jede weitere Sprache wachsen. Sie waren
+    dafuer auch nicht noetig: menschliche Antwortketten teilen die
+    ``conversationId`` und werden schon vom schnellen Pfad erfasst, waehrend
+    wiederkehrende Maschinenmeldungen -- der eigentliche Zweck dieses Vergleichs --
+    identische Betreffe ohne jedes Praefix tragen.
     """
-    s = subject or ""
-    prev = None
-    while prev != s:
-        prev = s
-        s = _SUBJECT_PREFIX_RE.sub("", s.strip())
-    return re.sub(r"\s+", " ", s).strip().lower()
+    return re.sub(r"\s+", " ", subject or "").strip().lower()
 
 
 async def _find_duplicate_open_task(db, meta: dict) -> Task | None:
@@ -2690,7 +2738,7 @@ async def _find_duplicate_open_task(db, meta: dict) -> Task | None:
     """
     conv = meta.get("conversation_id")
     from_addr = (meta.get("from_address") or "").strip().lower()
-    norm_subject = _normalize_subject(meta.get("subject"))
+    subject_key = _subject_key(meta.get("subject"))
 
     # Schneller Pfad: gleicher Thread hat bereits einen offenen Task.
     if conv:
@@ -2704,9 +2752,9 @@ async def _find_duplicate_open_task(db, meta: dict) -> Task | None:
         if dup is not None:
             return dup
 
-    # Absender + normalisierter Betreff: faengt wiederkehrende, praktisch
+    # Absender + gleicher Betreff: faengt wiederkehrende, praktisch
     # identische Mails, die je eine eigene Konversation haben (z. B. n8n-Alerts).
-    if from_addr and norm_subject:
+    if from_addr and subject_key:
         res = await db.execute(
             select(Task, EmailTriage.subject)
             .join(EmailTriage, EmailTriage.message_id == Task.email_message_id)
@@ -2719,7 +2767,7 @@ async def _find_duplicate_open_task(db, meta: dict) -> Task | None:
             .limit(100)
         )
         for task, subj in res.all():
-            if _normalize_subject(subj) == norm_subject:
+            if _subject_key(subj) == subject_key:
                 return task
     return None
 
@@ -2729,12 +2777,12 @@ async def _was_suggestion_dismissed(db, meta: dict, days: int = 14) -> bool:
 
     Beim Verwerfen (dismiss-review) wird der Task gelöscht -- der Dedupe über
     offene Tasks greift dann nicht mehr. Der Marker ``task_dismissed`` auf der
-    Quell-Triage (gleicher Absender + normalisierter Betreff) verhindert, dass
+    Quell-Triage (gleicher Absender + gleicher Betreff) verhindert, dass
     z. B. der nächste identische n8n-Alert denselben Vorschlag wieder hochspült.
     """
     from_addr = (meta.get("from_address") or "").strip().lower()
-    norm_subject = _normalize_subject(meta.get("subject"))
-    if not from_addr or not norm_subject:
+    subject_key = _subject_key(meta.get("subject"))
+    if not from_addr or not subject_key:
         return False
     cutoff = datetime.now(timezone.utc) - timedelta(days=days)
     res = await db.execute(
@@ -2747,7 +2795,7 @@ async def _was_suggestion_dismissed(db, meta: dict, days: int = 14) -> bool:
         .limit(100)
     )
     for (subj,) in res.all():
-        if _normalize_subject(subj) == norm_subject:
+        if _subject_key(subj) == subject_key:
             return True
     return False
 
@@ -3071,7 +3119,7 @@ async def _structured_triage_reask(meta: dict, content: str) -> dict | None:
     from_addr = meta.get("from_address", "")
     preview = (meta.get("body_preview") or "")[:500]
     analysis = (content or "")[-1500:]
-    labels_hint = "|".join(TRIAGE_LABELS)
+    labels_hint = "|".join(AGENT_LABELS)
     schema_hint = (
         f'{{"rationale": "kurz", "label": "{labels_hint}", '
         '"triage_class": "task|auto_reply|fyi", "reply_expected": true|false, '
@@ -3127,7 +3175,7 @@ async def _structured_triage_reask(meta: dict, content: str) -> dict | None:
                 "type": "object",
                 "properties": {
                     "rationale": {"type": "string"},
-                    "label": {"type": "string", "enum": list(TRIAGE_LABELS)},
+                    "label": {"type": "string", "enum": list(AGENT_LABELS)},
                     "triage_class": {
                         "type": "string",
                         "enum": ["task", "auto_reply", "fyi"],
@@ -3240,10 +3288,11 @@ async def _post_process_triage(
             return await _fallback_unparsed_triage(job_id, meta, moved_id)
 
     triage_class = parsed.get("triage_class")
-    # Label gegen das kanonische Vokabular pruefen. Fail-closed: ein erfundenes
-    # Label wird NICHT zurechtgebogen, sondern zu 'Unklar' mit needs_review --
-    # sichtbar in der Inbox und korrigierbar (statt still falsch kategorisiert).
-    label = normalize_label(parsed.get("label"))
+    # Label gegen das Agenten-Vokabular pruefen. Fail-closed: ein erfundenes ODER
+    # ausweichendes Label ('Unklar' ist nicht waehlbar, siehe AGENT_LABELS) wird
+    # nicht zurechtgebogen, sondern zu 'Unklar' mit needs_review -- sichtbar in
+    # der Inbox und korrigierbar, statt still als erledigt zu gelten.
+    label = normalize_agent_label(parsed.get("label"))
     label_invalid = label is None
     if label_invalid:
         raw_label = parsed.get("label")
@@ -3459,6 +3508,10 @@ async def _post_process_triage(
                     "rationale": rationale,
                     "confidence": confidence,
                     "needs_review": needs_review,
+                    # Verworfener Label-Vorschlag des Modells. Stand bisher nur in
+                    # ``parsed`` und erreichte die DB nie -- das Cockpit liest das
+                    # Feld (InboxPage), fand es aber immer leer.
+                    "label_rejected": parsed.get("label_rejected"),
                 },
                 status="acted" if triage_class != "auto_reply" else "processing",
             )
@@ -3566,13 +3619,31 @@ async def _post_process_triage(
     # Deterministische Outlook-Finalisierung NACH der DB-Transaktion (reine Netz-
     # I/O): Move gemaess Politik, Kategorie aus dem validierten Label, Mail immer
     # auf ungelesen. Laeuft fuer alle Klassen (task/auto_reply/fyi).
-    await _finalize_email_state(
+    move_suppressed = await _finalize_email_state(
         meta,
         label,
         moved_id,
         triage_class=triage_class,
         needs_review=needs_review,
     )
+
+    # Unterdrueckten Move als Klartext nachtragen. Ohne diese Notiz sieht das
+    # Cockpit nur eine Mail, die trotz 'System' liegen blieb -- und niemand kann
+    # unterscheiden, ob das Absicht war oder ein Ausfall der Graph-API. Der Grund
+    # steht erst nach der Finalisierung fest, weil der Korrespondenz-Nachweis dort
+    # eingeholt wird.
+    if move_suppressed:
+        async with async_session() as db:
+            await db.execute(
+                update(EmailTriage)
+                .where(EmailTriage.agent_job_id == job_id)
+                .values(
+                    suggested_action=EmailTriage.suggested_action.op("||")(
+                        cast({"move_suppressed": move_suppressed}, JSONB)
+                    )
+                )
+            )
+            await db.commit()
 
     return final_status
 

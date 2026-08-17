@@ -11,7 +11,6 @@ from zoneinfo import ZoneInfo
 
 from app.services.briefing import _parse_time, _scheduled_for
 from app.services.followup import (
-    _NOREPLY_RE,
     _first_recipient,
     _has_reply,
     _workdays_since,
@@ -370,10 +369,17 @@ class TestFirstRecipient:
         assert _first_recipient({"toRecipients": []}) == ""
 
 
-class TestNoreplyFilter:
-    def test_noreply_varianten(self):
-        for addr in ("no-reply@x.ch", "noreply@x.ch", "do_not_reply@x.ch", "newsletter@x.ch"):
-            assert _NOREPLY_RE.search(addr), addr
+class TestKeinAdressmusterFilter:
+    """Der Nachfass-Pfad filtert nicht mehr nach Adressmustern.
 
-    def test_normale_adresse_passiert(self):
-        assert _NOREPLY_RE.search("dominique.chuard@t-r.ch") is None
+    Zuvor sortierte ein Regex (``noreply``/``donotreply``/``newsletter``/
+    ``notification``) Empfaenger aus, an die Nachfassen sinnlos schien. Gemessen an
+    199 tatsaechlich gesendeten Mails traf er KEINE einzige -- Anthony schreibt nicht
+    an Automaten, und ein Nachfass-Vorschlag entsteht nur zu selbst gesendeter Post.
+    Alleiniger inhaltlicher Entscheider ist das LLM-Gate. Nicht wieder einfuehren.
+    """
+
+    def test_kein_regex_mehr_im_modul(self):
+        from app.services import followup
+
+        assert not hasattr(followup, "_NOREPLY_RE")
