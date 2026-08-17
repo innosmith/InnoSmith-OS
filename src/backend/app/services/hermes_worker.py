@@ -17,7 +17,7 @@ werden in einen Job-Trace geschrieben (``metadata_json['trace']``), damit man
 in der Agent-Queue nachvollziehen kann, was der Agent gedacht und getan hat.
 
 Thinking-Politik: Standardmaessig AN (Transparenz + Demo). Der Disable-Hebel
-fuer qwen3.5/3.6 ist ``extra_body.chat_template_kwargs.enable_thinking=False``
+fuer qwen3.5/3.6/3.8 ist ``extra_body.chat_template_kwargs.enable_thinking=False``
 (``/no_think`` funktioniert in dieser Modellgeneration NICHT). Er ist als
 opt-in-Policy vorbereitet (``_thinking_disabled``), aber bewusst nicht im
 Default-Pfad scharfgeschaltet, da das Verhalten ueber Ollama ``/v1``

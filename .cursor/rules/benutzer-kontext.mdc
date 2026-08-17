@@ -22,7 +22,7 @@ alwaysApply: true
 - **Maschine:** ASUS GX10 mit NVIDIA Blackwell GPU, 128 GB Unified Memory
 - **OS:** Linux (Ubuntu-basiert)
 - **Kein Windows** — keine .exe oder Windows-spezifischen Tools
-- **Lokale LLMs:** via Ollama (Qwen 3.5 35B als Default)
+- **Lokale LLMs:** via Ollama (Qwen 3.8 27B bf16 als Default; qwen3.6:latest als Rollback)
 - **Cloud LLMs:** Anthropic Claude, Google Gemini, OpenAI GPT
 
 ## Wichtige Treuhand-Kontakte

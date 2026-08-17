@@ -21,9 +21,9 @@ archiviert (Rollback-Referenz, kein Parallelbetrieb).
 - Assets-Migration aus Nanobot: `scripts/migrate-nanobot-to-hermes.py`
 
 ### Modell & Provider
-- Worker-Default: `triage_model` (z. B. `qwen3.6:latest`) via Ollama `/v1`, Provider `custom`, `api_mode=chat_completions`.
+- Worker-Default: `triage_model` (z. B. `qwen3.8:27b-bf16`) via Ollama `/v1`, Provider `custom`, `api_mode=chat_completions`. Übersteuerbar mit `TP_TRIAGE_MODEL`.
 - Cloud-Modelle (Chat/InnoPilot): über LiteLLM-Proxy (`custom`-Provider, voller Modellstring).
-- Context-Length: 131072 (qwen3.6 unterstützt nativ bis 262K).
+- Context-Length: 131072 (Qwen 3.8 unterstützt nativ bis 262K).
 - Konstruktion: `AIAgent(base_url=…, api_key=…, provider="custom", api_mode="chat_completions", model=…)`.
 
 ## Architektur-Eckpunkte (Spike-validiert)
@@ -52,7 +52,7 @@ in eine `asyncio.Queue` (SSE-Events `chunk`/`thinking`/`tool_start`/`tool_event`
 ## Thinking-Politik
 
 - **Default: AN** (Transparenz + Demo). Reasoning ist sichtbar.
-- Disable-Hebel für qwen3.5/3.6: `extra_body.chat_template_kwargs.enable_thinking=False`
+- Disable-Hebel für qwen3.5/3.6/3.8: `extra_body.chat_template_kwargs.enable_thinking=False`
   (gesetzt via `agent.request_overrides`). **`/no_think` funktioniert in dieser Modellgeneration NICHT.**
 - Selektives Abschalten (triviale Jobtypen) ist als opt-in-Policy `_thinking_disabled()` vorbereitet,
   aber bewusst leer — Verhalten über Ollama `/v1` ist versionsabhängig und vor Aktivierung live zu verifizieren.
@@ -61,7 +61,7 @@ in eine `asyncio.Queue` (SSE-Events `chunk`/`thinking`/`tool_start`/`tool_event`
 
 Datenexposition haengt am gewaehlten Modell (`build_chat_agent` in `hermes_worker.py`):
 
-- **Lokales Modell** (qwen3.6 via Ollama): voller Zugriff. `enabled_toolsets=None`
+- **Lokales Modell** (qwen3.8 via Ollama): voller Zugriff. `enabled_toolsets=None`
   (alle MCP-Tools), `skip_memory=False`, `skip_context_files=False`. Daten bleiben lokal.
 - **Cloud-Modell** (openai/anthropic/gemini via LiteLLM): **Default-Deny**. Nur explizit
   freigegebene MCP-Server (`enabled_toolsets=<Server-Aliase>`); `skip_memory=not include_memory`

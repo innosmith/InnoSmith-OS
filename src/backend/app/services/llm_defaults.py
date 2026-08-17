@@ -4,14 +4,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.principal import get_owner_settings
 
-FALLBACK_LOCAL_MODEL = "ollama/qwen3.6:latest"
+FALLBACK_LOCAL_MODEL = "ollama/qwen3.8:27b-bf16"
 
 
 async def get_default_local_model(db: AsyncSession) -> str:
     """Liest llm_default_local_model aus den Owner-Settings.
 
-    Wird systemweit genutzt für Triage, Agent-Jobs und Code-Execution,
-    überall wo ein lokales Modell als Default benötigt wird.
+    Wird systemweit genutzt für Triage-Job-Labels, Chat-Fallback und
+    Code-Execution. Fehlt die Owner-Einstellung, gilt ``FALLBACK_LOCAL_MODEL``
+    (Install-Default, aktuell Qwen 3.8). Der Hermes-Worker selbst folgt
+    ``TP_TRIAGE_MODEL`` / ``triage_model``.
     """
     settings = await get_owner_settings(db)
     return settings.get("llm_default_local_model") or FALLBACK_LOCAL_MODEL
