@@ -8,16 +8,19 @@ from datetime import date, datetime, timezone
 
 import bleach
 from croniter import croniter
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, status
 from pydantic import BaseModel
-from sqlalchemy import and_, select
+from sqlalchemy import and_, func, select
+from sqlalchemy import delete as sa_delete
+from sqlalchemy import update as sa_update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
+from typing import Literal
 
 from app.auth.deps import MEMBER_RESTRICTED_TASK_FIELDS, check_project_access, get_current_user, require_role
 from app.routers.uploads import _scan_with_clamav
 from app.database import get_db
-from app.models import ActivityLog, AgentJob, Attachment, BoardColumn, BoardMember, ChecklistItem, EmailTriage, FollowupSuggestion, MeetingTranscript, PipelineColumn, Project, Task, User
+from app.models import ActivityLog, AgentJob, Attachment, BoardColumn, BoardMember, ChatTriage, ChecklistItem, EmailTriage, FollowupSuggestion, MeetingTranscript, PipelineColumn, Project, Task, User
 from app.services.email_links import outlook_deeplink
 from app.services.notification import notify_mentions, notify_task_assigned
 
@@ -160,6 +163,19 @@ def _sanitize_text(text: str | None) -> str | None:
     return html.unescape(bleach.clean(text, tags=[], strip=True))
 
 
+def _validate_cron(rule: str | None) -> None:
+    """Wirft 422, wenn die Wiederholungsregel keine gültige Cron-Expression ist.
+
+    Ohne diese Prüfung landet eine kaputte Regel stillschweigend in der DB und
+    der Scheduler überspringt die Serie dauerhaft — sichtbar nur im Log.
+    """
+    if rule and not croniter.is_valid(rule):
+        raise HTTPException(
+            status_code=422,
+            detail=f"Ungültige Wiederholungsregel (Cron-Expression): '{rule}'",
+        )
+
+
 @router.post("", response_model=TaskOut, status_code=status.HTTP_201_CREATED)
 async def create_task(
     body: TaskCreate,
@@ -172,6 +188,13 @@ async def create_task(
         for field in MEMBER_RESTRICTED_TASK_FIELDS:
             if hasattr(body, field):
                 setattr(body, field, None)
+
+    _validate_cron(body.recurrence_rule)
+
+    # Vorlagen-Härtung: auf einer Vorlage steuert die Cron-Regel die Termine,
+    # ein eigenes Fälligkeitsdatum führt nur zu falschem «überfällig».
+    if body.recurrence_rule:
+        body.due_date = None
 
     col_result = await db.execute(
         select(BoardColumn.project_id).where(BoardColumn.id == body.board_column_id)
@@ -360,6 +383,28 @@ class TaskConfirmBody(BaseModel):
     board_column_id: uuid.UUID | None = None
 
 
+class RecurringSeriesOut(BaseModel):
+    """Eine wiederkehrende Vorlage samt Serien-Status für die Serien-Übersicht."""
+
+    id: uuid.UUID
+    title: str
+    project_id: uuid.UUID
+    project_name: str
+    project_color: str | None = None
+    board_column_id: uuid.UUID
+    assignee: str
+    recurrence_rule: str
+    recurrence_description: str
+    recurrence_end_date: str | None = None
+    recurrence_max_instances: int | None = None
+    last_spawn: str | None = None
+    next_occurrence: str | None = None
+    instance_count: int = 0
+    open_instance_id: uuid.UUID | None = None
+    open_instance_due_date: str | None = None
+    is_valid: bool = True
+
+
 @router.get("/due-today")
 async def list_due_today(
     db: AsyncSession = Depends(get_db),
@@ -466,6 +511,86 @@ async def list_pending_review(
     ]
 
 
+@router.get("/recurring", response_model=list[RecurringSeriesOut])
+async def list_recurring_series(
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_role("member")),
+) -> list[RecurringSeriesOut]:
+    """Alle wiederkehrenden Vorlagen mit nächstem Termin und Serien-Status.
+
+    Muss vor der ``/{task_id}``-Route stehen, sonst schluckt der UUID-Matcher
+    den Pfad und liefert 422.
+    """
+    result = await db.execute(
+        select(Task, Project.name, Project.color)
+        .join(Project, Task.project_id == Project.id)
+        .where(
+            Task.recurrence_rule.isnot(None),
+            Task.recurrence_rule != "",
+            Task.template_id.is_(None),
+        )
+        .order_by(Project.name, Task.title)
+    )
+    rows = result.all()
+
+    now = datetime.now(timezone.utc)
+    series: list[RecurringSeriesOut] = []
+
+    for task, project_name, project_color in rows:
+        if not await check_project_access(task.project_id, user, db):
+            continue
+
+        is_valid = croniter.is_valid(task.recurrence_rule)
+        next_occurrence: str | None = None
+        if is_valid:
+            next_occurrence = croniter(task.recurrence_rule, now).get_next(datetime).isoformat()
+
+        count_result = await db.execute(
+            select(func.count()).select_from(Task).where(Task.template_id == task.id)
+        )
+        instance_count = count_result.scalar_one() or 0
+
+        open_result = await db.execute(
+            select(Task.id, Task.due_date)
+            .where(Task.template_id == task.id, Task.is_completed == False)  # noqa: E712
+            .order_by(Task.due_date.desc())
+            .limit(1)
+        )
+        open_row = open_result.first()
+
+        series.append(RecurringSeriesOut(
+            id=task.id,
+            title=task.title,
+            project_id=task.project_id,
+            project_name=project_name,
+            project_color=project_color,
+            board_column_id=task.board_column_id,
+            assignee=task.assignee,
+            recurrence_rule=task.recurrence_rule,
+            recurrence_description=(
+                _cron_to_human(task.recurrence_rule)
+                if is_valid
+                else "Ungültige Wiederholungsregel"
+            ),
+            recurrence_end_date=(
+                task.recurrence_end_date.isoformat() if task.recurrence_end_date else None
+            ),
+            recurrence_max_instances=task.recurrence_max_instances,
+            last_spawn=(
+                task.recurrence_last_spawn.isoformat() if task.recurrence_last_spawn else None
+            ),
+            next_occurrence=next_occurrence,
+            instance_count=instance_count,
+            open_instance_id=open_row[0] if open_row else None,
+            open_instance_due_date=(
+                open_row[1].isoformat() if open_row and open_row[1] else None
+            ),
+            is_valid=is_valid,
+        ))
+
+    return series
+
+
 @router.get("/{task_id}", response_model=TaskOut)
 async def get_task(
     task_id: uuid.UUID,
@@ -552,6 +677,9 @@ async def update_task(
                 "werden — erledige stattdessen die aktuelle Instanz."
             ),
         )
+    if "recurrence_rule" in update_data:
+        _validate_cron(update_data["recurrence_rule"])
+
     becomes_template = (
         bool(update_data.get("recurrence_rule", task.recurrence_rule))
         and task.template_id is None
@@ -560,6 +688,10 @@ async def update_task(
         if update_data.get("recurrence_rule"):
             # Task wird (neu) zur Vorlage oder Regel ändert: Fälligkeit neutralisieren.
             update_data["due_date"] = None
+            # Bei geänderter Kadenz startet der Scheduler neu: der alte Merker
+            # gehört zur alten Regel und würde die nächste Okkurrenz verzögern.
+            if update_data["recurrence_rule"] != task.recurrence_rule:
+                update_data["recurrence_last_spawn"] = None
         else:
             # Bestehende Vorlage: due_date-Änderungen ignorieren.
             update_data.pop("due_date", None)
@@ -635,9 +767,39 @@ async def update_task(
     return task_out
 
 
+async def _detach_agent_job_references(db: AsyncSession, task_ids: list[uuid.UUID]) -> None:
+    """Löst FK-Verweise auf die Agent-Jobs der genannten Tasks.
+
+    ``agent_jobs.task_id`` kaskadiert beim Task-Löschen, aber ``email_triage``,
+    ``chat_triage`` und ``meeting_transcripts`` referenzieren ``agent_jobs`` ohne
+    ``ON DELETE`` — ohne dieses Aufräumen bricht das Löschen mit IntegrityError.
+    """
+    if not task_ids:
+        return
+    job_ids = (
+        await db.execute(select(AgentJob.id).where(AgentJob.task_id.in_(task_ids)))
+    ).scalars().all()
+    if not job_ids:
+        return
+    for model in (EmailTriage, ChatTriage, MeetingTranscript):
+        await db.execute(
+            sa_update(model)
+            .where(model.agent_job_id.in_(job_ids))
+            .values(agent_job_id=None)
+        )
+
+
 @router.delete("/{task_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_task(
     task_id: uuid.UUID,
+    series: Literal["template_only", "all"] = Query(
+        "template_only",
+        description=(
+            "Nur bei wiederkehrenden Vorlagen relevant: 'template_only' beendet "
+            "die Serie und behält die erzeugten Instanzen als normale Tasks, "
+            "'all' löscht Vorlage und Instanzen."
+        ),
+    ),
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_role("member")),
 ) -> None:
@@ -647,6 +809,26 @@ async def delete_task(
         raise HTTPException(status_code=404, detail="Task not found")
     if not await check_project_access(task.project_id, user, db):
         raise HTTPException(status_code=403, detail="Kein Zugriff auf dieses Projekt")
+
+    # Wiederkehrende Vorlage: die Instanzen hängen per FK an der Vorlage und
+    # müssen vor dem Löschen entweder entkoppelt oder mitgelöscht werden.
+    is_template = bool(task.recurrence_rule) and task.template_id is None
+    if is_template:
+        instance_ids = (
+            await db.execute(select(Task.id).where(Task.template_id == task.id))
+        ).scalars().all()
+        if series == "all":
+            await _detach_agent_job_references(db, list(instance_ids))
+            if instance_ids:
+                await db.execute(sa_delete(Task).where(Task.id.in_(instance_ids)))
+        else:
+            await db.execute(
+                sa_update(Task)
+                .where(Task.template_id == task.id)
+                .values(template_id=None)
+            )
+        await db.flush()
+    await _detach_agent_job_references(db, [task.id])
 
     # Implizites Lernsignal: Löschen eines agent-stammenden Tasks = stille Korrektur.
     try:
@@ -876,7 +1058,7 @@ async def get_recurrence_info(
         return {
             "recurrence_rule": task.recurrence_rule,
             "next_occurrence": None,
-            "description": "Ungueltige Cron-Expression",
+            "description": "Ungültige Cron-Expression",
             "last_spawn": (
                 task.recurrence_last_spawn.isoformat()
                 if task.recurrence_last_spawn
@@ -905,10 +1087,10 @@ async def get_recurrence_info(
 def _cron_to_human(cron_expr: str) -> str:
     """Konvertiert gängige Cron-Ausdrücke in lesbaren deutschen Text."""
     presets = {
-        "0 0 * * *": "Taeglich um Mitternacht",
-        "0 7 * * *": "Taeglich um 07:00",
-        "0 8 * * *": "Taeglich um 08:00",
-        "0 9 * * *": "Taeglich um 09:00",
+        "0 0 * * *": "Täglich um Mitternacht",
+        "0 7 * * *": "Täglich um 07:00",
+        "0 8 * * *": "Täglich um 08:00",
+        "0 9 * * *": "Täglich um 09:00",
         "0 7 * * MON": "Jeden Montag um 07:00",
         "0 7 * * 1": "Jeden Montag um 07:00",
         "0 8 * * MON": "Jeden Montag um 08:00",
@@ -935,7 +1117,7 @@ def _cron_to_human(cron_expr: str) -> str:
         time_str = f" um {hour.zfill(2)}:{minute.zfill(2)}"
 
     if dom == "*" and dow == "*":
-        return f"Taeglich{time_str}"
+        return f"Täglich{time_str}"
     if dom == "*" and dow != "*":
         day_names = {
             "0": "Sonntag", "SUN": "Sonntag",
@@ -949,6 +1131,9 @@ def _cron_to_human(cron_expr: str) -> str:
         day = day_names.get(dow.upper(), dow)
         return f"Jeden {day}{time_str}"
     if dow == "*" and dom != "*":
+        # 'L' = letzter Tag des Monats (vom Recurrence-Selector im Frontend erzeugt).
+        if dom.upper() == "L":
+            return f"Monatlich am letzten Tag{time_str}"
         return f"Monatlich am {dom}.{time_str}"
 
     return cron_expr

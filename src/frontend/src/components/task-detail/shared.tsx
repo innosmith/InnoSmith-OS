@@ -138,7 +138,13 @@ export function cronToHumanDE(cron: string): string {
 
 const RECURRENCE_SELECT = 'w-full cursor-pointer rounded-lg border border-gray-200 bg-white px-2 py-1 text-xs text-gray-700 outline-none transition-colors hover:border-gray-300 focus:border-indigo-300 focus:ring-1 focus:ring-indigo-300 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-300 dark:hover:border-gray-600';
 
-export function RecurrenceSelector({ value, isInstance, onChange }: { value: string | null; isInstance: boolean; onChange: (rule: string | null) => void }) {
+export function RecurrenceSelector({ value, isInstance, templateId, onOpenTask, onChange }: {
+  value: string | null;
+  isInstance: boolean;
+  templateId?: string | null;
+  onOpenTask?: (taskId: string) => void;
+  onChange: (rule: string | null) => void;
+}) {
   const parsed = parseCron(value || '');
   const [freq, setFreq] = useState<RecurrenceFrequency>(value ? parsed.freq : 'none');
   const [hour, setHour] = useState(parsed.hour);
@@ -150,8 +156,25 @@ export function RecurrenceSelector({ value, isInstance, onChange }: { value: str
     onChange(buildCron(f, h, m, wd, md));
   };
 
+  // Instanzen erben die Regel nicht — sie sind nur ein Ableger. Bearbeiten und
+  // Beenden der Serie geht ausschliesslich über die Vorlage, darum der Sprung.
   if (isInstance) {
-    return <div className="flex items-center gap-1.5 rounded-lg bg-indigo-50 px-2 py-1 text-xs font-medium text-indigo-700 dark:bg-indigo-950 dark:text-indigo-300"><RepeatIcon className="h-3.5 w-3.5" />Instanz einer Vorlage</div>;
+    return (
+      <div className="space-y-1.5">
+        <div className="flex items-center gap-1.5 rounded-lg bg-indigo-50 px-2 py-1 text-xs font-medium text-indigo-700 dark:bg-indigo-950 dark:text-indigo-300">
+          <RepeatIcon className="h-3.5 w-3.5" />Instanz einer Vorlage
+        </div>
+        {templateId && onOpenTask && (
+          <button
+            type="button"
+            onClick={() => onOpenTask(templateId)}
+            className="text-[11px] font-medium text-indigo-600 underline-offset-2 hover:underline dark:text-indigo-400"
+          >
+            Serie öffnen und bearbeiten →
+          </button>
+        )}
+      </div>
+    );
   }
 
   return (

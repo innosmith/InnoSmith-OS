@@ -178,11 +178,11 @@ export function TaskDetailDialog({ taskId, onClose, onUpdated, onOpenTask, revie
     navigator.clipboard.writeText(url).catch(() => {});
   }, [taskId]);
 
-  const handleDelete = useCallback(async () => {
+  const handleDelete = useCallback(async (series: 'template_only' | 'all' = 'template_only') => {
     if (!taskId) return;
     setDeleting(true);
     try {
-      await api.delete(`/api/tasks/${taskId}`);
+      await api.delete(`/api/tasks/${taskId}?series=${series}`);
       onUpdated();
       onClose();
     } finally {
@@ -246,6 +246,7 @@ export function TaskDetailDialog({ taskId, onClose, onUpdated, onOpenTask, revie
         : 'flex h-full w-full max-w-4xl flex-col overflow-hidden bg-white shadow-2xl ring-1 ring-gray-200 dark:bg-gray-950 dark:ring-gray-700/60';
 
   const boardColumns: BoardColumn[] = currentProject?.board_columns?.sort((a, b) => a.position - b.position) || [];
+  const isTemplate = !!task?.recurrence_rule && !task?.template_id;
 
   return (
     <div ref={backdropRef} className={backdropClass} onClick={(e) => { if (e.target === backdropRef.current) onClose(); }}>
@@ -253,7 +254,7 @@ export function TaskDetailDialog({ taskId, onClose, onUpdated, onOpenTask, revie
         {/* ─── Header ─── */}
         <div className="flex items-center justify-between gap-2 border-b border-gray-100 bg-gray-50/60 px-3 py-2.5 sm:px-5 dark:border-gray-800 dark:bg-gray-900/40">
           <div className="flex min-w-0 flex-1 items-center gap-2 sm:gap-3">
-            {task?.recurrence_rule && !task?.template_id ? (
+            {isTemplate ? (
               <span
                 className="inline-flex max-w-full items-center gap-1.5 truncate rounded-md bg-indigo-50/80 px-2 py-0.5 text-[11px] font-semibold text-indigo-600 ring-1 ring-indigo-200/60 dark:bg-indigo-950/40 dark:text-indigo-300 dark:ring-indigo-800/40"
                 title="Wiederkehrende Vorlage — Instanzen werden automatisch erzeugt und einzeln erledigt"
@@ -343,15 +344,50 @@ export function TaskDetailDialog({ taskId, onClose, onUpdated, onOpenTask, revie
         {/* ─── Delete Confirmation ─── */}
         {showDeleteConfirm && (
           <div className="border-b border-red-100 bg-red-50/80 px-5 py-3 dark:border-red-900/40 dark:bg-red-950/20">
-            <div className="flex items-center justify-between">
-              <p className="text-sm text-red-700 dark:text-red-300">Task unwiderruflich löschen?</p>
-              <div className="flex gap-2">
-                <button onClick={() => setShowDeleteConfirm(false)} className="rounded-lg px-3 py-1.5 text-xs font-medium text-gray-600 hover:bg-white dark:text-gray-400 dark:hover:bg-gray-800">Abbrechen</button>
-                <button onClick={handleDelete} disabled={deleting} className="rounded-lg bg-red-600 px-3 py-1.5 text-xs font-medium text-white shadow-sm hover:bg-red-700 disabled:opacity-50">
-                  {deleting ? 'Wird gelöscht…' : 'Löschen'}
-                </button>
+            {isTemplate ? (
+              /* Bei einer Serie hängen die erzeugten Instanzen am Task — meist
+                 will man die Historie behalten und nur die Wiederholung stoppen. */
+              <div className="space-y-2.5">
+                <p className="text-sm text-red-700 dark:text-red-300">
+                  Das ist eine wiederkehrende Vorlage. Was soll mit den bereits erzeugten Instanzen passieren?
+                </p>
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    onClick={() => handleDelete('template_only')}
+                    disabled={deleting}
+                    className="rounded-lg bg-red-600 px-3 py-1.5 text-xs font-medium text-white shadow-sm hover:bg-red-700 disabled:opacity-50"
+                  >
+                    Nur Serie beenden
+                  </button>
+                  <button
+                    onClick={() => handleDelete('all')}
+                    disabled={deleting}
+                    className="rounded-lg border border-red-300 px-3 py-1.5 text-xs font-medium text-red-700 hover:bg-red-100 disabled:opacity-50 dark:border-red-800 dark:text-red-300 dark:hover:bg-red-950/40"
+                  >
+                    Serie und alle Instanzen löschen
+                  </button>
+                  <button
+                    onClick={() => setShowDeleteConfirm(false)}
+                    className="rounded-lg px-3 py-1.5 text-xs font-medium text-gray-600 hover:bg-white dark:text-gray-400 dark:hover:bg-gray-800"
+                  >
+                    Abbrechen
+                  </button>
+                </div>
+                <p className="text-[11px] text-red-600/70 dark:text-red-400/60">
+                  «Nur Serie beenden» behält die Instanzen als normale Aufgaben; es entstehen keine neuen mehr.
+                </p>
               </div>
-            </div>
+            ) : (
+              <div className="flex items-center justify-between">
+                <p className="text-sm text-red-700 dark:text-red-300">Task unwiderruflich löschen?</p>
+                <div className="flex gap-2">
+                  <button onClick={() => setShowDeleteConfirm(false)} className="rounded-lg px-3 py-1.5 text-xs font-medium text-gray-600 hover:bg-white dark:text-gray-400 dark:hover:bg-gray-800">Abbrechen</button>
+                  <button onClick={() => handleDelete()} disabled={deleting} className="rounded-lg bg-red-600 px-3 py-1.5 text-xs font-medium text-white shadow-sm hover:bg-red-700 disabled:opacity-50">
+                    {deleting ? 'Wird gelöscht…' : 'Löschen'}
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         )}
 
@@ -504,6 +540,7 @@ export function TaskDetailDialog({ taskId, onClose, onUpdated, onOpenTask, revie
                 onTagsChanged={refreshTags}
                 agentJobs={agentJobs}
                 onAgentJobsChanged={refreshAgentJobs}
+                onOpenTask={onOpenTask}
               />
             </div>
           </div>

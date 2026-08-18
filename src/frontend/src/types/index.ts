@@ -81,6 +81,27 @@ export interface TaskDetail {
   updated_at: string;
 }
 
+/** Eine wiederkehrende Vorlage samt Serien-Status (GET /api/tasks/recurring). */
+export interface RecurringSeries {
+  id: string;
+  title: string;
+  project_id: string;
+  project_name: string;
+  project_color: string | null;
+  board_column_id: string;
+  assignee: string;
+  recurrence_rule: string;
+  recurrence_description: string;
+  recurrence_end_date: string | null;
+  recurrence_max_instances: number | null;
+  last_spawn: string | null;
+  next_occurrence: string | null;
+  instance_count: number;
+  open_instance_id: string | null;
+  open_instance_due_date: string | null;
+  is_valid: boolean;
+}
+
 export interface BoardColumn {
   id: string;
   name: string;

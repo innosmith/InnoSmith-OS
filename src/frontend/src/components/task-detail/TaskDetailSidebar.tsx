@@ -34,6 +34,7 @@ interface TaskDetailSidebarProps {
   onTagsChanged: () => Promise<void>;
   agentJobs: AgentJob[];
   onAgentJobsChanged: () => Promise<void>;
+  onOpenTask?: (taskId: string) => void;
 }
 
 const DATA_CLASS_OPTIONS = [
@@ -85,7 +86,7 @@ export default function TaskDetailSidebar({
   task, taskId, isOwner, authUser, allProjects, pipelineCols,
   boardColumns, boardMembers, allTags, models, defaultLocalModel,
   updateTask, handleProjectChange, toggleTag, onTagsChanged,
-  agentJobs, onAgentJobsChanged,
+  agentJobs, onAgentJobsChanged, onOpenTask,
 }: TaskDetailSidebarProps) {
   const [showTagPicker, setShowTagPicker] = useState(false);
   const [newTagName, setNewTagName] = useState('');
@@ -521,6 +522,8 @@ export default function TaskDetailSidebar({
         <RecurrenceSelector
           value={task.recurrence_rule}
           isInstance={!!task.template_id}
+          templateId={task.template_id}
+          onOpenTask={onOpenTask}
           onChange={(rule) => updateTask({ recurrence_rule: rule })}
         />
       </AttrRow>

@@ -3,7 +3,7 @@ from datetime import date, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
-from sqlalchemy import and_, func, select, update
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -144,8 +144,18 @@ async def get_board(
             .options(selectinload(Task.tags), selectinload(Task.checklist_items))
             .where(
                 Task.board_column_id == col.id,
-                Task.is_completed == False,  # noqa: E712
                 Task.template_id.is_(None),
+                # Vorlagen bleiben unabhängig von is_completed sichtbar: sie sind
+                # der einzige Ort, an dem sich eine Serie bearbeiten oder beenden
+                # lässt. Ein versehentliches Abhaken darf sie nicht verstecken,
+                # während der Scheduler weiter Instanzen erzeugt.
+                or_(
+                    Task.is_completed == False,  # noqa: E712
+                    and_(
+                        Task.recurrence_rule.isnot(None),
+                        Task.recurrence_rule != "",
+                    ),
+                ),
             )
             # created_at als Tiebreaker: bei gleichen Positionen wäre die
             # Reihenfolge sonst undefiniert und würde pro Reload springen.

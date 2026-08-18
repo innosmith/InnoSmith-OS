@@ -305,6 +305,31 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
     elif name == "update_task":
         task_id = arguments.pop("task_id")
+
+        # Wiederkehrende Vorlagen: is_completed und due_date sind hier
+        # bedeutungslos (der Cron-Ausdruck steuert die Termine) und machen die
+        # Vorlage im Board unsichtbar, während der Scheduler weiterläuft.
+        is_template = await p.fetchval(
+            "SELECT recurrence_rule IS NOT NULL AND template_id IS NULL "
+            "FROM tasks WHERE id = $1::uuid",
+            task_id,
+        )
+        if is_template is None:
+            return [TextContent(type="text", text="Task nicht gefunden")]
+        if is_template:
+            blocked = [k for k in ("is_completed", "due_date") if k in arguments]
+            for key in blocked:
+                arguments.pop(key)
+            if blocked and not arguments:
+                return [TextContent(
+                    type="text",
+                    text=(
+                        "Wiederkehrende Vorlagen können nicht abgehakt oder "
+                        "terminiert werden — erledige stattdessen die aktuelle "
+                        "Instanz (Task mit gesetztem template_id)."
+                    ),
+                )]
+
         sets = []
         params = []
         idx = 1

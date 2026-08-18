@@ -26,6 +26,7 @@ import { ColumnPager } from '../components/ColumnPager';
 import { TaskCard } from '../components/TaskCard';
 import { TaskDetailDialog } from '../components/TaskDetailDialog';
 import { BackgroundPicker } from '../components/BackgroundPicker';
+import { RecurringSeriesPanel } from '../components/RecurringSeriesPanel';
 import type {
   PipelineColumn,
   PipelineData,
@@ -47,6 +48,7 @@ export function PipelinePage() {
   const [loading, setLoading] = useState(true);
   const [agendaBg, setAgendaBg] = useState<string | null>(null);
   const [bgPickerOpen, setBgPickerOpen] = useState(false);
+  const [seriesPanelOpen, setSeriesPanelOpen] = useState(false);
   const [userAvatarUrl, setUserAvatarUrl] = useState<string | null>(null);
   const [showColCount, setShowColCount] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -269,6 +271,13 @@ export function PipelinePage() {
             {settingsOpen && (
               <div className="absolute right-0 top-10 z-20 w-56 rounded-xl border border-gray-200 bg-white py-1 shadow-xl dark:border-gray-700 dark:bg-gray-900">
                 <button
+                  onClick={() => { setSeriesPanelOpen(true); setSettingsOpen(false); }}
+                  className="flex w-full items-center gap-2 px-4 py-2.5 text-left text-sm text-gray-700 transition-colors hover:bg-gray-50 dark:text-gray-300 dark:hover:bg-gray-800"
+                >
+                  <RepeatIcon className="h-4 w-4" />
+                  Wiederkehrende Serien
+                </button>
+                <button
                   onClick={() => { setBgPickerOpen(true); setSettingsOpen(false); }}
                   className="flex w-full items-center gap-2 px-4 py-2.5 text-left text-sm text-gray-700 transition-colors hover:bg-gray-50 dark:text-gray-300 dark:hover:bg-gray-800"
                 >
@@ -412,7 +421,21 @@ export function PipelinePage() {
         currentUrl={agendaBg}
         onSelect={(url) => handleBgSelect(url)}
       />
+
+      <RecurringSeriesPanel
+        isOpen={seriesPanelOpen}
+        onClose={() => setSeriesPanelOpen(false)}
+        onOpenTask={setSelectedTaskId}
+      />
     </div>
+  );
+}
+
+function RepeatIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 12c0-1.232-.046-2.453-.138-3.662a4.006 4.006 0 0 0-3.7-3.7 48.678 48.678 0 0 0-7.324 0 4.006 4.006 0 0 0-3.7 3.7c-.017.22-.032.441-.046.662M19.5 12l3-3m-3 3-3-3m-12 3c0 1.232.046 2.453.138 3.662a4.006 4.006 0 0 0 3.7 3.7 48.656 48.656 0 0 0 7.324 0 4.006 4.006 0 0 0 3.7-3.7c.017-.22.032-.441.046-.662M4.5 12l3 3m-3-3-3 3" />
+    </svg>
   );
 }
 
