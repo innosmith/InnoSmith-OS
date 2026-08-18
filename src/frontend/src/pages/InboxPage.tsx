@@ -8,6 +8,7 @@ import { RichTextEditor } from '../components/RichTextEditor';
 import { ConfidenceBadge } from '../components/agent/ConfidenceBadge';
 import { TRIAGE_LABELS } from '../lib/triageLabels';
 import { useMediaQuery } from '../hooks/useMediaQuery';
+import { useSSE } from '../hooks/useSSE';
 
 /* ---------- Typen ---------- */
 
@@ -189,7 +190,6 @@ export function InboxPage() {
 
   const [triageMap, setTriageMap] = useState<Record<string, TriageItem>>({});
   const [triageStats, setTriageStats] = useState<TriageStats | null>(null);
-  const sseRef = useRef<EventSource | null>(null);
   const [senderAvatars, setSenderAvatars] = useState<Record<string, string | null>>({});
   const [bgUrl, setBgUrl] = useState<string | null>(null);
   const [bgPickerOpen, setBgPickerOpen] = useState(false);
@@ -283,20 +283,10 @@ export function InboxPage() {
       .catch(err => { console.warn('Triage-Einstellungen konnten nicht geladen werden:', err); });
   }, [fetchTriage]);
 
-  /* -- SSE für Live-Updates -- */
-  useEffect(() => {
-    const token = localStorage.getItem('taskpilot_token');
-    if (!token) return;
-    const es = new EventSource(`/api/sse/events?token=${token}`);
-    sseRef.current = es;
-    es.addEventListener('email_triage_changed', () => {
-      fetchTriage();
-    });
-    es.onerror = () => {
-      es.close();
-    };
-    return () => es.close();
-  }, [fetchTriage]);
+  /* -- SSE für Live-Updates (gebündelt, mit Reconnect) -- */
+  useSSE((event) => {
+    if (event === 'email_triage_changed') fetchTriage();
+  });
 
   /* -- E-Mail öffnen -- */
   const openEmail = async (email: EmailSummary) => {

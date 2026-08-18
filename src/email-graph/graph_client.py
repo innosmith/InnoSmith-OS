@@ -12,8 +12,10 @@ Konfig via Umgebungsvariablen: GRAPH_TENANT_ID, GRAPH_CLIENT_ID,
 GRAPH_CLIENT_SECRET, GRAPH_USER_EMAIL.
 """
 
+import asyncio
 import logging
 import os
+import random
 import re
 import time
 from dataclasses import dataclass, field
@@ -24,6 +26,34 @@ logger = logging.getLogger("taskpilot.graph")
 
 GRAPH_BASE = "https://graph.microsoft.com/v1.0"
 TOKEN_URL_TPL = "https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token"
+
+# Graph drosselt pro Postfach. Die Antwort ist dann 429, bei Überlast auch 503
+# oder 504, und trägt meist einen ``Retry-After``-Header. Ohne Behandlung
+# schlug das als HTTP 500 bis ins Frontend durch (Vorfall 18.08.2026).
+_RETRY_STATUS = (429, 503, 504)
+_MAX_ATTEMPTS = 3
+_MAX_WAIT_SECONDS = 30.0
+
+_FORBIDDEN_BASE = (
+    "Graph API 403 Forbidden -- die App-Registration braucht passende "
+    "Application Permissions mit Admin Consent."
+)
+
+
+class GraphThrottledError(RuntimeError):
+    """Graph drosselt und die Wiederholversuche sind erschöpft.
+
+    Eigener Typ, weil der Unterschied für den Aufrufer zählt: hier ist nichts
+    kaputt, es ist nur zu viel Last. Das Backend antwortet darauf mit HTTP 503
+    und ``Retry-After`` statt mit einem nackten 500.
+    """
+
+    def __init__(self, retry_after: int = 30, url: str = ""):
+        super().__init__(
+            f"Microsoft Graph drosselt die Anfrage -- erneut versuchen in {retry_after}s"
+        )
+        self.retry_after = retry_after
+        self.url = url
 
 
 @dataclass
@@ -57,12 +87,37 @@ class _TokenCache:
         return bool(self.access_token) and time.time() < self.expires_at - 60
 
 
+# Der Token gilt eine Stunde und hängt nur an (Tenant, Client-ID), nicht an der
+# Client-Instanz. Weil neun Services pro Aufruf einen frischen ``GraphClient``
+# bauen, holte mit einem Cache pro Instanz jeder seinen eigenen Token -- gemessen
+# 52 Erneuerungen in 24h. Prozessweit geteilt ist es einer pro Stunde.
+_TOKEN_CACHES: dict[tuple[str, str], _TokenCache] = {}
+
+
+def _token_cache_for(config: GraphConfig) -> _TokenCache:
+    key = (config.tenant_id, config.client_id)
+    cache = _TOKEN_CACHES.get(key)
+    if cache is None:
+        cache = _TokenCache()
+        _TOKEN_CACHES[key] = cache
+    return cache
+
+
+def _retry_after_seconds(resp: httpx.Response, default: float) -> float:
+    """Wartezeit aus dem ``Retry-After``-Header, sonst ``default``. Gedeckelt."""
+    try:
+        wert = float(resp.headers.get("Retry-After", ""))
+    except ValueError:
+        wert = default
+    return min(max(wert, 0.0), _MAX_WAIT_SECONDS)
+
+
 class GraphClient:
     """Async MS Graph API Client mit automatischem Token-Refresh."""
 
     def __init__(self, config: GraphConfig | None = None):
         self.config = config or GraphConfig.from_env()
-        self._token = _TokenCache()
+        self._token = _token_cache_for(self.config)
         self._http: httpx.AsyncClient | None = None
         # Objekt-ID (GUID) des konfigurierten Users; für Meeting-Endpunkte nötig,
         # die den UPN nicht akzeptieren. Wird einmalig aufgelöst und gecacht.
@@ -105,68 +160,100 @@ class GraphClient:
         headers["Prefer"] = 'outlook.timezone="Europe/Zurich"'
         return headers
 
-    async def _get(self, path: str, params: dict | None = None, extra_headers: dict | None = None) -> dict:
+    async def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict | None = None,
+        json_body: dict | None = None,
+        extra_headers: dict | None = None,
+        permission_hint: str = "",
+        **kwargs,
+    ) -> httpx.Response:
+        """Gemeinsamer Weg für alle Graph-Aufrufe -- hält Drosselung aus.
+
+        Bei 429/503/504 wird bis zu ``_MAX_ATTEMPTS`` mal wiederholt; die
+        Wartezeit gibt Graph im ``Retry-After``-Header vor, sonst greift
+        exponentieller Backoff mit Jitter. Bleibt es dabei, fliegt
+        ``GraphThrottledError``. 403 wird zu ``PermissionError`` (fehlende
+        Permission), alles andere bleibt ``httpx.HTTPStatusError`` wie bisher.
+
+        ``path`` darf auch eine absolute Graph-URL sein (``@odata.nextLink``).
+        """
         client = await self._ensure_client()
-        headers = await self._headers()
-        if extra_headers:
-            headers.update(extra_headers)
-        resp = await client.get(f"{GRAPH_BASE}{path}", headers=headers, params=params)
-        if resp.status_code == 403:
-            detail = ""
-            try:
-                detail = resp.json().get("error", {}).get("message", "")
-            except Exception:
-                pass
-            raise PermissionError(
-                f"Graph API 403 Forbidden -- die App-Registration braucht passende "
-                f"Application Permissions mit Admin Consent. "
-                f"Prüfe: Mail.Read, Mail.ReadWrite, Mail.Send, Calendars.Read, Calendars.ReadWrite. "
-                f"Detail: {detail}"
+        url = path if path.startswith("http") else f"{GRAPH_BASE}{path}"
+        versuch = 0
+        gewartet = 0.0
+
+        while True:
+            headers = await self._headers()
+            if extra_headers:
+                headers.update(extra_headers)
+            resp = await client.request(
+                method, url, headers=headers, params=params, json=json_body, **kwargs
             )
+            if resp.status_code not in _RETRY_STATUS:
+                break
+            pause = _retry_after_seconds(resp, 2.0**versuch + random.uniform(0, 0.5))
+            versuch += 1
+            if versuch >= _MAX_ATTEMPTS or gewartet + pause > _MAX_WAIT_SECONDS:
+                break
+            logger.warning(
+                "Graph drosselt (%d) -- Versuch %d/%d, warte %.1fs: %s",
+                resp.status_code, versuch, _MAX_ATTEMPTS, pause, path,
+            )
+            await asyncio.sleep(pause)
+            gewartet += pause
+
+        if resp.status_code == 403:
+            raise PermissionError(self._permission_message(resp, permission_hint))
+        if resp.status_code in _RETRY_STATUS:
+            raise GraphThrottledError(int(_retry_after_seconds(resp, 30.0)) or 30, url)
         resp.raise_for_status()
+        return resp
+
+    @staticmethod
+    def _permission_message(resp: httpx.Response, hint: str) -> str:
+        try:
+            detail = resp.json().get("error", {}).get("message", "")
+        except Exception:  # noqa: BLE001 - Fehlermeldung darf nie selbst scheitern
+            detail = ""
+        teile = [_FORBIDDEN_BASE]
+        if hint:
+            teile.append(hint)
+        if detail:
+            teile.append(f"Detail: {detail}")
+        return " ".join(teile)
+
+    async def _get(self, path: str, params: dict | None = None, extra_headers: dict | None = None) -> dict:
+        resp = await self._request(
+            "GET", path, params=params, extra_headers=extra_headers,
+            permission_hint=(
+                "Prüfe: Mail.Read, Mail.ReadWrite, Mail.Send, Calendars.Read, "
+                "Calendars.ReadWrite."
+            ),
+        )
         return resp.json()
 
     async def _post(self, path: str, json_body: dict | None = None) -> dict:
-        client = await self._ensure_client()
-        headers = await self._headers()
-        resp = await client.post(f"{GRAPH_BASE}{path}", headers=headers, json=json_body)
-        if resp.status_code == 403:
-            detail = ""
-            try:
-                detail = resp.json().get("error", {}).get("message", "")
-            except Exception:
-                pass
-            raise PermissionError(
-                f"Graph API 403 Forbidden -- fehlende Application Permissions. Detail: {detail}"
-            )
-        resp.raise_for_status()
+        resp = await self._request("POST", path, json_body=json_body)
         return resp.json() if resp.content else {}
 
-    async def _patch(self, path: str, json_body: dict) -> dict:
-        client = await self._ensure_client()
-        headers = await self._headers()
-        resp = await client.patch(f"{GRAPH_BASE}{path}", headers=headers, json=json_body)
-        if resp.status_code == 403:
-            raise PermissionError(
-                "Graph API 403 Forbidden -- fehlende Application Permissions mit Admin Consent."
-            )
-        resp.raise_for_status()
+    async def _patch(
+        self, path: str, json_body: dict, extra_headers: dict | None = None
+    ) -> dict:
+        resp = await self._request(
+            "PATCH", path, json_body=json_body, extra_headers=extra_headers
+        )
         return resp.json() if resp.content else {}
 
     async def _delete(self, path: str) -> None:
-        client = await self._ensure_client()
-        headers = await self._headers()
-        resp = await client.delete(f"{GRAPH_BASE}{path}", headers=headers)
-        if resp.status_code == 403:
-            raise PermissionError("Graph API 403 Forbidden -- fehlende Permissions.")
-        resp.raise_for_status()
+        await self._request("DELETE", path)
 
     async def _get_text(self, path: str, params: dict | None = None) -> str:
         """GET-Request der Text statt JSON zurückgibt (z.B. VTT-Transkripte)."""
-        client = await self._ensure_client()
-        headers = await self._headers()
-        resp = await client.get(f"{GRAPH_BASE}{path}", headers=headers, params=params)
-        resp.raise_for_status()
+        resp = await self._request("GET", path, params=params)
         return resp.text
 
     async def _get_bytes(self, path: str) -> bytes:
@@ -175,15 +262,9 @@ class GraphClient:
         Graph API antwortet auf /content-Endpunkte mit 302 Redirect zur
         Pre-Auth-Download-URL. Deshalb follow_redirects=True.
         """
-        client = await self._ensure_client()
-        headers = await self._headers()
-        resp = await client.get(
-            f"{GRAPH_BASE}{path}",
-            headers=headers,
-            follow_redirects=True,
-            timeout=120.0,
+        resp = await self._request(
+            "GET", path, follow_redirects=True, timeout=120.0
         )
-        resp.raise_for_status()
         return resp.content
 
     @property
@@ -485,13 +566,7 @@ class GraphClient:
 
     async def send_draft(self, message_id: str) -> None:
         """Existierenden Entwurf versenden."""
-        client = await self._ensure_client()
-        headers = await self._headers()
-        resp = await client.post(
-            f"{GRAPH_BASE}{self._user_path}/messages/{message_id}/send",
-            headers=headers,
-        )
-        resp.raise_for_status()
+        await self._post(f"{self._user_path}/messages/{message_id}/send")
 
     async def update_draft(
         self,
@@ -524,35 +599,15 @@ class GraphClient:
 
     async def delete_message(self, message_id: str) -> None:
         """E-Mail oder Entwurf löschen."""
-        client = await self._ensure_client()
-        headers = await self._headers()
-        resp = await client.delete(
-            f"{GRAPH_BASE}{self._user_path}/messages/{message_id}",
-            headers=headers,
-        )
-        resp.raise_for_status()
+        await self._delete(f"{self._user_path}/messages/{message_id}")
 
     async def mark_as_read(self, message_id: str) -> None:
         """E-Mail als gelesen markieren."""
-        client = await self._ensure_client()
-        headers = await self._headers()
-        resp = await client.patch(
-            f"{GRAPH_BASE}{self._user_path}/messages/{message_id}",
-            headers=headers,
-            json={"isRead": True},
-        )
-        resp.raise_for_status()
+        await self._patch(f"{self._user_path}/messages/{message_id}", {"isRead": True})
 
     async def mark_as_unread(self, message_id: str) -> None:
         """E-Mail als ungelesen markieren."""
-        client = await self._ensure_client()
-        headers = await self._headers()
-        resp = await client.patch(
-            f"{GRAPH_BASE}{self._user_path}/messages/{message_id}",
-            headers=headers,
-            json={"isRead": False},
-        )
-        resp.raise_for_status()
+        await self._patch(f"{self._user_path}/messages/{message_id}", {"isRead": False})
 
     async def set_categories(self, message_id: str, categories: list[str]) -> dict:
         """Outlook-Kategorien auf einer E-Mail setzen (ersetzt bestehende)."""
@@ -1098,10 +1153,7 @@ class GraphClient:
 
     async def _get_raw_url(self, url: str) -> dict:
         """GET auf eine absolute Graph-URL (z. B. ``@odata.nextLink``)."""
-        client = await self._ensure_client()
-        headers = await self._headers()
-        resp = await client.get(url, headers=headers)
-        resp.raise_for_status()
+        resp = await self._request("GET", url)
         return resp.json()
 
     async def walk_drive_files(self, *, max_files: int = 100000) -> list[dict]:
@@ -1284,9 +1336,6 @@ class GraphClient:
         self, task_id: str, etag: str, **fields
     ) -> dict:
         """Planner-Aufgabe aktualisieren (erfordert @odata.etag für Concurrency)."""
-        client = await self._ensure_client()
-        headers = await self._headers()
-        headers["If-Match"] = etag
         patch: dict = {}
         if "title" in fields:
             patch["title"] = fields["title"]
@@ -1296,13 +1345,9 @@ class GraphClient:
             patch["dueDateTime"] = fields["due_date"]
         if not patch:
             return {}
-        resp = await client.patch(
-            f"{GRAPH_BASE}/planner/tasks/{task_id}",
-            headers=headers,
-            json=patch,
+        return await self._patch(
+            f"/planner/tasks/{task_id}", patch, extra_headers={"If-Match": etag}
         )
-        resp.raise_for_status()
-        return resp.json() if resp.content else {}
 
     async def list_planner_plans(self) -> list[dict]:
         """Alle Planner-Pläne des Users."""

@@ -27,6 +27,11 @@ from datetime import datetime, timezone
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+import sys as _sys
+
+_sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "..", "email-graph"))
+from graph_client import GraphThrottledError  # noqa: E402
+
 from app.config import get_settings
 from app.database import async_session
 from ai9.embeddings import embed_text, to_pgvector
@@ -83,9 +88,6 @@ async def _build_graph_client():
     s = get_settings()
     if not all([s.graph_tenant_id, s.graph_client_id, s.graph_client_secret, s.graph_user_email]):
         return None
-    import sys as _sys
-
-    _sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "..", "email-graph"))
     from graph_client import GraphClient, GraphConfig  # noqa: E402
 
     return GraphClient(GraphConfig(
@@ -677,6 +679,13 @@ async def sync_semantic_index(
                             try:
                                 n = await _index_email(db, client, mid, principal)
                                 await db.commit()
+                            except GraphThrottledError:
+                                # Weitermachen würde die Drosselung nur verlängern und
+                                # tausende Warnungen ins Log schreiben (Vorfall
+                                # 18.08.2026). Der nächste Lauf setzt fort -- der Index
+                                # ist idempotent, bereits Indexiertes wird übersprungen.
+                                await db.rollback()
+                                raise
                             except Exception as exc:  # noqa: BLE001
                                 await db.rollback()
                                 logger.warning("E-Mail %s nicht indexierbar: %s: %s",
@@ -690,6 +699,8 @@ async def sync_semantic_index(
                                 "  … Ordner '%s': %d gesichtet (neu: %d, Chunks: %d)",
                                 fname, processed, stats["emails"], stats["chunks"],
                             )
+                except GraphThrottledError:
+                    raise
                 except Exception as exc:  # noqa: BLE001
                     logger.info("Ordner '%s' nicht (vollstaendig) lesbar: %s", fname, exc)
                 logger.info("  Ordner '%s' fertig: %d gesichtet", fname, processed)
@@ -738,6 +749,9 @@ async def sync_semantic_index(
                     try:
                         n = await _index_document(db, client, item, principal, excluded)
                         await db.commit()
+                    except GraphThrottledError:
+                        await db.rollback()
+                        raise
                     except Exception as exc:  # noqa: BLE001
                         await db.rollback()
                         logger.warning("Dokument %s nicht indexierbar: %s: %s",
@@ -758,6 +772,15 @@ async def sync_semantic_index(
             stats["emails"], stats["documents"], stats["chunks"],
         )
         await _status_finish(stats)
+        return stats
+    except GraphThrottledError as exc:
+        # Kein Defekt, nur zu viel Last -- ohne Traceback protokollieren.
+        logger.warning(
+            "Semantic-Index-Sync abgebrochen: Graph drosselt (%d E-Mails, %d Dokumente "
+            "bis hierhin). Nächster Lauf setzt fort.",
+            stats["emails"], stats["documents"],
+        )
+        await _status_error(f"Graph drosselt -- erneut versuchen in {exc.retry_after}s")
         return stats
     except Exception as exc:  # noqa: BLE001 - best-effort, darf Scheduler nie stoppen
         logger.exception("Semantic-Index-Sync fehlgeschlagen")

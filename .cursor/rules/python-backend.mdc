@@ -23,6 +23,33 @@ alwaysApply: false
 - Backend nutzt `TP_GRAPH_*` Env-Vars (via Pydantic Settings)
 - MCP-Server nutzt `GRAPH_*` Env-Vars (via `GraphConfig.from_env()`)
 - Immer `PermissionError` abfangen für 403-Responses
+- Alle Verben laufen über `_request()`: 429/503/504 werden dreimal versucht
+  (`Retry-After`, sonst Backoff), danach `GraphThrottledError`. Neue Aufrufe
+  **nie** direkt über `httpx` bauen, sonst fehlt die Drosselungs-Bremse
+- `GraphThrottledError` bedeutet «zu viel Last», nicht «kaputt»: `main.py`
+  antwortet damit 503 + `Retry-After`. In Schleifen (Backfill, Indexer) den Lauf
+  abbrechen statt weiterrennen — der nächste Lauf setzt fort
+- Token-Cache ist prozessweit pro (Tenant, Client-ID). Neue `GraphClient`-
+  Instanzen sind darum billig und teilen den Token
+
+## Graph-Lesezugriffe im Cockpit
+Endpunkte, die das Cockpit im Sekundentakt abfragt (Kalender, markierte Mails,
+Ordnerliste), laufen über `services/graph_cache.cached()` — TTL 45s plus
+Single-Flight. Nach schreibenden Zugriffen `invalidate(prefix)` aufrufen.
+
+Hintergrund (18.08.2026): Ein Deploy schrieb 216 Tasks, der Zeilen-Trigger
+`tasks_notify` schickte 216 SSE-Events, das Cockpit lud pro Event alles neu →
+2858 Anfragen in 36 Sekunden → Microsoft drosselte das Postfach. Gebremst wird
+seither an zwei Stellen: Debounce im Frontend (`useSSE.ts`) und dieser Cache.
+
+**Bulk-Updates in Migrationen** treffen die Oberfläche über denselben Trigger.
+Bei mehr als ein paar hundert Zeilen den Trigger in der Transaktion abschalten:
+
+```python
+op.execute("ALTER TABLE tasks DISABLE TRIGGER tasks_notify")
+# ... Bulk-Update ...
+op.execute("ALTER TABLE tasks ENABLE TRIGGER tasks_notify")
+```
 
 ## Pipedrive API Client
 - Shared Library in `src/pipedrive/pipedrive_client.py`

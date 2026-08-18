@@ -127,7 +127,9 @@ verschiebe nichts, erstelle keinen Task -- schreibe nur den Entwurf.
 
 ### Vorgehen
 1. Der vollständige E-Mail-Inhalt steht oben. Rufe get_email("{email_id}") nur auf,
-   wenn du wirklich zusätzliche Details brauchst.
+   wenn du wirklich zusätzliche Details brauchst -- dann mit **genau dieser ID**,
+   Zeichen für Zeichen kopiert. Die Thread-ID gehört ausschliesslich zu get_thread:
+   aus zwei IDs eine dritte zu mischen ergibt eine ID, die auf nichts zeigt.
 {thread_load}2. Nutze die Stil-Anker oben («SO SCHREIBT ANTHONY») und -- für diesen konkreten
    Kontakt -- **search_my_replies("{from_addr}")** als Ton-/Register-Kalibrierung
    (Anrede, Länge, Schlussformel). Orientiere dich daran, **kopiere aber nicht

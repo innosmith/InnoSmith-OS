@@ -24,6 +24,11 @@ const SIDEBAR_COLORS: Record<string, { light: string; dark: string }> = {
   emerald: { light: 'bg-emerald-50', dark: 'dark:bg-emerald-950' },
 };
 
+// Wie viel Höhe der Projektliste mindestens bleibt. Ohne Untergrenze drückt eine flache
+// Fensterhöhe sie auf null, und die Liste wäre da, aber unbenutzbar. Wird es enger als
+// das, scrollt stattdessen die ganze Navigation.
+const PROJEKTFENSTER = 'min-h-[8rem]';
+
 interface SidebarProps {
   isOpen: boolean;
   collapsed: boolean;
@@ -66,11 +71,25 @@ export function Sidebar({
     api.get<Project[]>('/api/projects').then(setProjects).catch(() => {});
     if (!orderLoaded.current) {
       orderLoaded.current = true;
-      api.get<{ project_sidebar_order?: string[] | null }>('/api/settings')
-        .then((s) => { if (s.project_sidebar_order) setSidebarOrder(s.project_sidebar_order); })
+      api.get<{ project_sidebar_order?: string[] | null; projects_expanded?: boolean | null }>('/api/settings')
+        .then((s) => {
+          if (s.project_sidebar_order) setSidebarOrder(s.project_sidebar_order);
+          if (typeof s.projects_expanded === 'boolean') setProjectsExpanded(s.projects_expanded);
+        })
         .catch(() => {});
     }
   }, [refreshKey]);
+
+  // Der Zustand wird gespeichert, aber lokal sofort gesetzt: Ein Klick, der auf die
+  // Antwort des Servers wartet, fühlt sich kaputt an. Scheitert das Speichern, gilt er
+  // trotzdem für diese Sitzung.
+  const toggleProjects = useCallback(() => {
+    setProjectsExpanded((offen) => {
+      const neu = !offen;
+      api.patch('/api/settings', { projects_expanded: neu }).catch(() => {});
+      return neu;
+    });
+  }, []);
 
   const sortedProjects = sidebarOrder
     ? [...projects].sort((a, b) => {
@@ -193,230 +212,250 @@ export function Sidebar({
           )
         )}
 
-        {/* Navigation */}
-        <nav className="flex-1 space-y-1 overflow-y-auto px-2 py-3">
+        {/* Navigation — drei Zonen.
+            Die festen Ansichten stehen oben und rühren sich nicht; die Projektliste ist
+            die einzige, die wachsen kann, und deshalb die einzige, die scrollt. Vorher lag
+            alles in einem Scroll-Container: Jedes neue Projekt schob Signale und Finanzen
+            weiter nach unten, bis man für sie scrollen musste.
+            Das äussere `overflow-y-auto` ist das Auffangnetz für sehr flache Fenster, in
+            denen selbst die festen Einträge nicht mehr Platz haben. */}
+        <nav className="flex min-h-0 flex-1 flex-col overflow-y-auto px-2 py-3">
           {collapsed ? (
             <>
               {isOwner && (
                 <>
-                  <NavLink to="/cockpit" className={collapsedLinkClasses} onClick={onClose} title="Cockpit">
-                    <span className="relative">
-                      <CockpitIcon className="h-5 w-5" />
-                      {pendingDecisions > 0 && (
-                        <span className="absolute -top-1 -right-1 flex h-3.5 w-3.5 items-center justify-center rounded-full bg-rose-500 text-[9px] font-bold text-white">
-                          {pendingDecisions}
-                        </span>
-                      )}
-                    </span>
-                  </NavLink>
-                  <NavLink to="/pipeline" className={collapsedLinkClasses} onClick={onClose} title="Agenda">
-                    <span className="relative">
-                      <AgendaIcon className="h-5 w-5" />
-                      {focusTaskCount > 0 && (
-                        <span className="absolute -top-1 -right-1 flex h-3.5 w-3.5 items-center justify-center rounded-full bg-amber-500 text-[9px] font-bold text-white">
-                          {focusTaskCount > 9 ? '9+' : focusTaskCount}
-                        </span>
-                      )}
-                    </span>
-                  </NavLink>
-                  <NavLink to="/agenten/chat" className={collapsedLinkClasses} onClick={onClose} title="Chat">
-                    <ChatIcon className="h-5 w-5" />
-                  </NavLink>
-                  <NavLink to="/agenten" className={collapsedLinkClasses} onClick={onClose} title="Agenten">
-                    <span className="relative">
-                      <AgentIcon className="h-5 w-5" />
-                      {activeJobCount > 0 && (
-                        <span className="absolute -top-1 -right-1 flex h-3.5 w-3.5 items-center justify-center rounded-full bg-indigo-500 text-[9px] font-bold text-white">
-                          {activeJobCount}
-                        </span>
-                      )}
-                    </span>
-                  </NavLink>
+                  {/* Arbeiten */}
+                  <div className="shrink-0 space-y-1">
+                    <NavLink to="/cockpit" className={collapsedLinkClasses} onClick={onClose} title="Cockpit">
+                      <span className="relative">
+                        <CockpitIcon className="h-5 w-5" />
+                        {pendingDecisions > 0 && (
+                          <span className="absolute -top-1 -right-1 flex h-3.5 w-3.5 items-center justify-center rounded-full bg-rose-500 text-[9px] font-bold text-white">
+                            {pendingDecisions}
+                          </span>
+                        )}
+                      </span>
+                    </NavLink>
+                    <NavLink to="/pipeline" className={collapsedLinkClasses} onClick={onClose} title="Agenda">
+                      <span className="relative">
+                        <AgendaIcon className="h-5 w-5" />
+                        {focusTaskCount > 0 && (
+                          <span className="absolute -top-1 -right-1 flex h-3.5 w-3.5 items-center justify-center rounded-full bg-amber-500 text-[9px] font-bold text-white">
+                            {focusTaskCount > 9 ? '9+' : focusTaskCount}
+                          </span>
+                        )}
+                      </span>
+                    </NavLink>
+                    <NavLink to="/agenten/chat" className={collapsedLinkClasses} onClick={onClose} title="Chat">
+                      <ChatIcon className="h-5 w-5" />
+                    </NavLink>
+                    <NavLink to="/agenten" className={collapsedLinkClasses} onClick={onClose} title="Agenten">
+                      <span className="relative">
+                        <AgentIcon className="h-5 w-5" />
+                        {activeJobCount > 0 && (
+                          <span className="absolute -top-1 -right-1 flex h-3.5 w-3.5 items-center justify-center rounded-full bg-indigo-500 text-[9px] font-bold text-white">
+                            {activeJobCount}
+                          </span>
+                        )}
+                      </span>
+                    </NavLink>
+                    <NavLink to="/mindmaps" className={collapsedLinkClasses} onClick={onClose} title="Mind-Maps">
+                      <BrainCircuit className="h-5 w-5" />
+                    </NavLink>
+                  </div>
 
-                  <div className="my-2 border-t border-gray-200 dark:border-gray-800" />
+                  <div className="my-2 shrink-0 border-t border-gray-200 dark:border-gray-800" />
+
+                  {/* Beobachten */}
+                  <div className="shrink-0 space-y-1">
+                    <NavLink to="/inbox" className={collapsedLinkClasses} onClick={onClose} title="Posteingang">
+                      <span className="relative">
+                        <MailIcon className="h-5 w-5" />
+                        {unreadMailCount > 0 && (
+                          <span className="absolute -top-1 -right-1 flex h-3.5 w-3.5 items-center justify-center rounded-full bg-blue-500 text-[9px] font-bold text-white">
+                            {unreadMailCount > 9 ? '9+' : unreadMailCount}
+                          </span>
+                        )}
+                      </span>
+                    </NavLink>
+                    <NavLink to="/signale" className={collapsedLinkClasses} onClick={onClose} title="Signale">
+                      <SignaleIcon className="h-5 w-5" />
+                    </NavLink>
+                    <NavLink to="/finanzen" className={collapsedLinkClasses} onClick={onClose} title="Finanzen">
+                      <FinanceIcon className="h-5 w-5" />
+                    </NavLink>
+                    <NavLink to="/kapazitaet" className={collapsedLinkClasses} onClick={onClose} title="Kapazität">
+                      <CalendarClock className="h-5 w-5" />
+                    </NavLink>
+                    <NavLink to="/debitoren" className={collapsedLinkClasses} onClick={onClose} title="Debitoren">
+                      <DebtorsIcon className="h-5 w-5" />
+                    </NavLink>
+                    <NavLink to="/kreditoren" className={collapsedLinkClasses} onClick={onClose} title="Kreditoren">
+                      <CreditorsIcon className="h-5 w-5" />
+                    </NavLink>
+                  </div>
+
+                  <div className="my-2 shrink-0 border-t border-gray-200 dark:border-gray-800" />
                 </>
               )}
 
-              <button
-                onClick={() => setProjectsExpanded((v) => !v)}
-                className="flex items-center justify-center rounded-lg p-2 text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200"
-                title={projectsExpanded ? 'Projekte einklappen' : 'Projekte ausklappen'}
-              >
-                {projectsExpanded ? <LayersOpenIcon className="h-5 w-5" /> : <LayersClosedIcon className="h-5 w-5" />}
-              </button>
-
-              {projectsExpanded && sortedProjects.map((project) => (
-                <NavLink
-                  key={project.id}
-                  to={`/projects/${project.id}`}
-                  className={collapsedLinkClasses}
-                  onClick={onClose}
-                  title={project.name}
+              {/* Projekte — die einzige Zone, die scrollt */}
+              <div className="flex min-h-0 flex-1 flex-col">
+                <button
+                  onClick={() => toggleProjects()}
+                  className="flex shrink-0 items-center justify-center rounded-lg p-2 text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200"
+                  title={projectsExpanded ? 'Projekte einklappen' : 'Projekte ausklappen'}
                 >
-                  <ProjectIcon
-                    iconUrl={project.icon_url}
-                    iconEmoji={project.icon_emoji}
-                    color={project.color}
-                    size={20}
-                  />
-                </NavLink>
-              ))}
+                  {projectsExpanded ? <LayersOpenIcon className="h-5 w-5" /> : <LayersClosedIcon className="h-5 w-5" />}
+                </button>
 
-              {isOwner && (
-                <NavLink to="/mindmaps" className={collapsedLinkClasses} onClick={onClose} title="Mind-Maps">
-                  <BrainCircuit className="h-5 w-5" />
-                </NavLink>
-              )}
-
-              {isOwner && (
-                <>
-                  <div className="my-2 border-t border-gray-200 dark:border-gray-800" />
-
-                  <NavLink to="/inbox" className={collapsedLinkClasses} onClick={onClose} title="Posteingang">
-                    <span className="relative">
-                      <MailIcon className="h-5 w-5" />
-                      {unreadMailCount > 0 && (
-                        <span className="absolute -top-1 -right-1 flex h-3.5 w-3.5 items-center justify-center rounded-full bg-blue-500 text-[9px] font-bold text-white">
-                          {unreadMailCount > 9 ? '9+' : unreadMailCount}
-                        </span>
-                      )}
-                    </span>
-                  </NavLink>
-                  <NavLink to="/signale" className={collapsedLinkClasses} onClick={onClose} title="Signale">
-                    <SignaleIcon className="h-5 w-5" />
-                  </NavLink>
-                  <NavLink to="/finanzen" className={collapsedLinkClasses} onClick={onClose} title="Finanzen">
-                    <FinanceIcon className="h-5 w-5" />
-                  </NavLink>
-                  <NavLink to="/kapazitaet" className={collapsedLinkClasses} onClick={onClose} title="Kapazität">
-                    <CalendarClock className="h-5 w-5" />
-                  </NavLink>
-                  <NavLink to="/debitoren" className={collapsedLinkClasses} onClick={onClose} title="Debitoren">
-                    <DebtorsIcon className="h-5 w-5" />
-                  </NavLink>
-                  <NavLink to="/kreditoren" className={collapsedLinkClasses} onClick={onClose} title="Kreditoren">
-                    <CreditorsIcon className="h-5 w-5" />
-                  </NavLink>
-                </>
-              )}
+                {projectsExpanded && (
+                  <div className={`mt-1 min-h-0 flex-1 space-y-1 overflow-y-auto ${PROJEKTFENSTER}`}>
+                    {sortedProjects.map((project) => (
+                      <NavLink
+                        key={project.id}
+                        to={`/projects/${project.id}`}
+                        className={collapsedLinkClasses}
+                        onClick={onClose}
+                        title={project.name}
+                      >
+                        <ProjectIcon
+                          iconUrl={project.icon_url}
+                          iconEmoji={project.icon_emoji}
+                          color={project.color}
+                          size={20}
+                        />
+                      </NavLink>
+                    ))}
+                  </div>
+                )}
+              </div>
             </>
           ) : (
             <>
               {isOwner && (
                 <>
-                  <NavLink to="/cockpit" className={linkClasses} onClick={onClose}>
-                    <CockpitIcon className="h-5 w-5" />
-                    <span className="flex-1">Cockpit</span>
-                    {pendingDecisions > 0 && (
-                      <span className="flex items-center gap-1 rounded-full bg-rose-100 px-2 py-0.5 text-xs font-medium text-rose-700 dark:bg-rose-900/40 dark:text-rose-300">
-                        {pendingDecisions}
-                      </span>
-                    )}
-                  </NavLink>
+                  {/* Arbeiten */}
+                  <div className="shrink-0 space-y-1">
+                    <NavLink to="/cockpit" className={linkClasses} onClick={onClose}>
+                      <CockpitIcon className="h-5 w-5" />
+                      <span className="flex-1">Cockpit</span>
+                      {pendingDecisions > 0 && (
+                        <span className="flex items-center gap-1 rounded-full bg-rose-100 px-2 py-0.5 text-xs font-medium text-rose-700 dark:bg-rose-900/40 dark:text-rose-300">
+                          {pendingDecisions}
+                        </span>
+                      )}
+                    </NavLink>
 
-                  <NavLink to="/pipeline" className={linkClasses} onClick={onClose}>
-                    <AgendaIcon className="h-5 w-5" />
-                    <span className="flex-1">Agenda</span>
-                    {focusTaskCount > 0 && (
-                      <span className="flex items-center gap-1 rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-700 dark:bg-amber-900/40 dark:text-amber-300">
-                        {focusTaskCount}
-                      </span>
-                    )}
-                  </NavLink>
+                    <NavLink to="/pipeline" className={linkClasses} onClick={onClose}>
+                      <AgendaIcon className="h-5 w-5" />
+                      <span className="flex-1">Agenda</span>
+                      {focusTaskCount > 0 && (
+                        <span className="flex items-center gap-1 rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-700 dark:bg-amber-900/40 dark:text-amber-300">
+                          {focusTaskCount}
+                        </span>
+                      )}
+                    </NavLink>
 
-                  <NavLink to="/agenten/chat" className={linkClasses} onClick={onClose}>
-                    <ChatIcon className="h-5 w-5" />
-                    <span className="flex-1">Chat</span>
-                  </NavLink>
+                    <NavLink to="/agenten/chat" className={linkClasses} onClick={onClose}>
+                      <ChatIcon className="h-5 w-5" />
+                      <span className="flex-1">Chat</span>
+                    </NavLink>
 
-                  <NavLink to="/agenten" className={linkClasses} onClick={onClose}>
-                    <AgentIcon className="h-5 w-5" />
-                    <span className="flex-1">Agenten</span>
-                    {activeJobCount > 0 && (
-                      <span className="flex items-center gap-1 rounded-full bg-indigo-100 px-2 py-0.5 text-xs font-medium text-indigo-700 dark:bg-indigo-900/40 dark:text-indigo-300">
-                        <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-indigo-500" />
-                        {activeJobCount}
-                      </span>
-                    )}
-                  </NavLink>
+                    <NavLink to="/agenten" className={linkClasses} onClick={onClose}>
+                      <AgentIcon className="h-5 w-5" />
+                      <span className="flex-1">Agenten</span>
+                      {activeJobCount > 0 && (
+                        <span className="flex items-center gap-1 rounded-full bg-indigo-100 px-2 py-0.5 text-xs font-medium text-indigo-700 dark:bg-indigo-900/40 dark:text-indigo-300">
+                          <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-indigo-500" />
+                          {activeJobCount}
+                        </span>
+                      )}
+                    </NavLink>
+
+                    <NavLink to="/mindmaps" className={linkClasses} onClick={onClose}>
+                      <BrainCircuit className="h-5 w-5" />
+                      <span className="flex-1">Mind-Maps</span>
+                    </NavLink>
+                  </div>
+
+                  <div className="mt-3 mb-3 shrink-0 border-t border-gray-200 dark:border-gray-800" />
+
+                  {/* Beobachten */}
+                  <div className="shrink-0 space-y-1">
+                    <NavLink to="/inbox" className={linkClasses} onClick={onClose}>
+                      <MailIcon className="h-5 w-5" />
+                      <span className="flex-1">Posteingang</span>
+                      {unreadMailCount > 0 && (
+                        <span className="rounded-full bg-blue-100 px-2 py-0.5 text-xs font-medium text-blue-700 dark:bg-blue-900/40 dark:text-blue-300">
+                          {unreadMailCount}
+                        </span>
+                      )}
+                    </NavLink>
+
+                    <NavLink to="/signale" className={linkClasses} onClick={onClose}>
+                      <SignaleIcon className="h-5 w-5" />
+                      <span className="flex-1">Signale</span>
+                    </NavLink>
+
+                    <NavLink to="/finanzen" className={linkClasses} onClick={onClose}>
+                      <FinanceIcon className="h-5 w-5" />
+                      <span className="flex-1">Finanzen</span>
+                    </NavLink>
+
+                    <NavLink to="/kapazitaet" className={linkClasses} onClick={onClose}>
+                      <CalendarClock className="h-5 w-5" />
+                      <span className="flex-1">Kapazität</span>
+                    </NavLink>
+
+                    <NavLink to="/debitoren" className={linkClasses} onClick={onClose}>
+                      <DebtorsIcon className="h-5 w-5" />
+                      <span className="flex-1">Debitoren</span>
+                    </NavLink>
+
+                    <NavLink to="/kreditoren" className={linkClasses} onClick={onClose}>
+                      <CreditorsIcon className="h-5 w-5" />
+                      <span className="flex-1">Kreditoren</span>
+                    </NavLink>
+                  </div>
+
+                  <div className="mt-3 shrink-0 border-t border-gray-200 dark:border-gray-800" />
                 </>
               )}
 
-              <div className="mt-4 mb-1 flex items-center gap-0">
-                <button
-                  onClick={() => setProjectsExpanded((v) => !v)}
-                  className="shrink-0 rounded-lg p-2 text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200"
-                  title={projectsExpanded ? 'Projekte einklappen' : 'Projekte ausklappen'}
-                >
-                  {projectsExpanded ? <LayersOpenIcon className="h-5 w-5" /> : <LayersClosedIcon className="h-5 w-5" />}
-                </button>
-                <NavLink to="/projects" className={linkClasses} onClick={onClose} end>
-                  <span className="flex-1">Projekte</span>
-                </NavLink>
+              {/* Projekte — die einzige Zone, die scrollt. Welche Projekte ohne Scrollen
+                  sichtbar sind, entscheidet die Reihenfolge, die per Ziehen gesetzt wird. */}
+              <div className="flex min-h-0 flex-1 flex-col">
+                <div className="mt-3 mb-1 flex shrink-0 items-center gap-0">
+                  <button
+                    onClick={() => toggleProjects()}
+                    className="shrink-0 rounded-lg p-2 text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200"
+                    title={projectsExpanded ? 'Projekte einklappen' : 'Projekte ausklappen'}
+                  >
+                    {projectsExpanded ? <LayersOpenIcon className="h-5 w-5" /> : <LayersClosedIcon className="h-5 w-5" />}
+                  </button>
+                  <NavLink to="/projects" className={linkClasses} onClick={onClose} end>
+                    <span className="flex-1">Projekte</span>
+                  </NavLink>
+                </div>
+
+                {projectsExpanded && (
+                  <div className={`min-h-0 flex-1 space-y-1 overflow-y-auto ${PROJEKTFENSTER}`}>
+                    <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
+                      <SortableContext items={sortedProjects.map((p) => p.id)} strategy={verticalListSortingStrategy}>
+                        {sortedProjects.map((project) => (
+                          <SortableProjectItem
+                            key={project.id}
+                            project={project}
+                            linkClasses={linkClasses}
+                            onClose={onClose}
+                          />
+                        ))}
+                      </SortableContext>
+                    </DndContext>
+                  </div>
+                )}
               </div>
-
-              {projectsExpanded && (
-                <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
-                  <SortableContext items={sortedProjects.map((p) => p.id)} strategy={verticalListSortingStrategy}>
-                    {sortedProjects.map((project) => (
-                      <SortableProjectItem
-                        key={project.id}
-                        project={project}
-                        linkClasses={linkClasses}
-                        onClose={onClose}
-                      />
-                    ))}
-                  </SortableContext>
-                </DndContext>
-              )}
-
-              {isOwner && (
-                <NavLink to="/mindmaps" className={linkClasses} onClick={onClose}>
-                  <BrainCircuit className="h-5 w-5" />
-                  <span className="flex-1">Mind-Maps</span>
-                </NavLink>
-              )}
-
-              {isOwner && (
-                <>
-                  <div className="mt-4 mb-2 border-t border-gray-200 pt-2 dark:border-gray-800" />
-
-                  <NavLink to="/inbox" className={linkClasses} onClick={onClose}>
-                    <MailIcon className="h-5 w-5" />
-                    <span className="flex-1">Posteingang</span>
-                    {unreadMailCount > 0 && (
-                      <span className="rounded-full bg-blue-100 px-2 py-0.5 text-xs font-medium text-blue-700 dark:bg-blue-900/40 dark:text-blue-300">
-                        {unreadMailCount}
-                      </span>
-                    )}
-                  </NavLink>
-
-                  <NavLink to="/signale" className={linkClasses} onClick={onClose}>
-                    <SignaleIcon className="h-5 w-5" />
-                    <span className="flex-1">Signale</span>
-                  </NavLink>
-
-                  <NavLink to="/finanzen" className={linkClasses} onClick={onClose}>
-                    <FinanceIcon className="h-5 w-5" />
-                    <span className="flex-1">Finanzen</span>
-                  </NavLink>
-
-                  <NavLink to="/kapazitaet" className={linkClasses} onClick={onClose}>
-                    <CalendarClock className="h-5 w-5" />
-                    <span className="flex-1">Kapazität</span>
-                  </NavLink>
-
-                  <NavLink to="/debitoren" className={linkClasses} onClick={onClose}>
-                    <DebtorsIcon className="h-5 w-5" />
-                    <span className="flex-1">Debitoren</span>
-                  </NavLink>
-
-                  <NavLink to="/kreditoren" className={linkClasses} onClick={onClose}>
-                    <CreditorsIcon className="h-5 w-5" />
-                    <span className="flex-1">Kreditoren</span>
-                  </NavLink>
-                </>
-              )}
             </>
           )}
         </nav>

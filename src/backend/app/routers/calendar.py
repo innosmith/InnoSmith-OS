@@ -13,6 +13,7 @@ from pydantic import BaseModel
 from app.auth.deps import get_current_user
 from app.config import get_settings
 from app.models import User
+from app.services.graph_cache import cached, invalidate
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "..", "email-graph"))
 from graph_client import GraphClient, GraphConfig  # noqa: E402
@@ -100,7 +101,10 @@ async def list_events(
     _check_configured()
     client = _get_graph_client()
     try:
-        events = await client.list_events(start, end, top)
+        events = await cached(
+            f"events:{start}:{end}:{top}",
+            lambda: client.list_events(start, end, top),
+        )
     except PermissionError as e:
         logger.warning("Kalender list_events: Zugriff verweigert: %s", e)
         raise HTTPException(status_code=403, detail="Zugriff auf den Kalender verweigert")
@@ -163,6 +167,8 @@ async def create_event(
     except PermissionError as e:
         logger.warning("Kalender create_event: Zugriff verweigert: %s", e)
         raise HTTPException(status_code=403, detail="Zugriff auf den Kalender verweigert")
+    invalidate("events:")
+    invalidate("capacity:")
     return CalendarEvent(
         id=ev.get("id", ""),
         subject=ev.get("subject"),
@@ -204,6 +210,8 @@ async def delete_event(
     except PermissionError as e:
         logger.warning("Kalender delete_event: Zugriff verweigert: %s", e)
         raise HTTPException(status_code=403, detail="Zugriff auf den Kalender verweigert")
+    invalidate("events:")
+    invalidate("capacity:")
 
 
 # ── Capacity ──────────────────────────────────────────────────
@@ -368,7 +376,12 @@ async def get_capacity(
     end_iso = month_end_dt.isoformat()
 
     try:
-        events = await client.list_events(start_iso, end_iso, top=500)
+        # Der Cache-Schlüssel wird auf die Minute gerundet -- ``start_iso`` trägt
+        # Mikrosekunden und wäre sonst bei jedem Aufruf neu.
+        events = await cached(
+            f"capacity:{now:%Y-%m-%dT%H:%M}:{month_end_date}",
+            lambda: client.list_events(start_iso, end_iso, top=500),
+        )
     except PermissionError as e:
         logger.warning("Kalender capacity: Zugriff verweigert: %s", e)
         raise HTTPException(status_code=403, detail="Zugriff auf den Kalender verweigert")

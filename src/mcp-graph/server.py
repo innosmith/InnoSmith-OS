@@ -23,8 +23,10 @@ from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import TextContent, Tool
 
+import httpx
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "email-graph"))
-from graph_client import GraphClient, GraphConfig  # noqa: E402
+from graph_client import GraphClient, GraphConfig, GraphThrottledError  # noqa: E402
 
 logging.basicConfig(
     level=logging.INFO,
@@ -32,6 +34,38 @@ logging.basicConfig(
     stream=sys.stderr,
 )
 logger = logging.getLogger("mcp_graph")
+
+
+# Tools, die eine Message-ID erwarten. Verwechselt das Modell sie mit der
+# Konversations-ID, antwortet Graph mit 400, 404 oder -- bei strukturell
+# gültiger, aber falsch zeigender ID -- mit 500. Ohne Übersetzung sah der Agent
+# nur "HTTPStatusError: Server error '500'" und versuchte es unverändert erneut
+# (Vorfall 18.08.2026).
+_MESSAGE_ID_TOOLS = frozenset({
+    "get_email", "get_email_categories", "get_email_attachments",
+})
+
+# Graph vergibt Message-IDs mit Präfix ``AAMk``, Konversations-IDs mit ``AAQk``.
+_CONVERSATION_ID_PREFIX = "AAQk"
+
+_ID_HINWEIS = (
+    "Message-IDs stammen ausschliesslich aus list_emails, get_thread oder einem "
+    "Suchergebnis -- niemals selbst zusammensetzen oder aus einer Konversations-ID "
+    "ableiten. Für den Gesprächsverlauf get_thread(conversation_id) nutzen."
+)
+
+
+def _falsche_id_meldung(tool: str, arguments: dict) -> str | None:
+    """Weist eine Konversations-ID ab, wo eine Message-ID erwartet wird."""
+    if tool not in _MESSAGE_ID_TOOLS:
+        return None
+    mid = str(arguments.get("message_id") or "")
+    if not mid.startswith(_CONVERSATION_ID_PREFIX):
+        return None
+    return (
+        f"'{mid[:16]}…' ist eine Konversations-ID (Präfix {_CONVERSATION_ID_PREFIX}), "
+        f"keine Message-ID. {_ID_HINWEIS}"
+    )
 
 
 def _html_to_text(html: str) -> str:
@@ -554,6 +588,11 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 "aus deiner Klassifikation -- gib sie im JSON-Ergebnis an."
             ),
         )]
+    hinweis = _falsche_id_meldung(name, arguments)
+    if hinweis:
+        logger.warning("Tool %s mit Konversations-ID aufgerufen -- abgewiesen", name)
+        return [TextContent(type="text", text=hinweis)]
+
     try:
         client = _get_client()
     except RuntimeError as e:
@@ -1045,6 +1084,25 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 
         return [TextContent(type="text", text=f"Unbekanntes Tool: {name}")]
+
+    except GraphThrottledError as e:
+        logger.warning("Tool %s gedrosselt: %s", name, e)
+        return [TextContent(type="text", text=(
+            f"Microsoft Graph drosselt gerade (erneut möglich in {e.retry_after}s). "
+            "Nicht sofort wiederholen -- mit den bereits vorhandenen Informationen "
+            "weiterarbeiten oder den Schritt auslassen."
+        ))]
+
+    except httpx.HTTPStatusError as e:
+        elapsed = (time.monotonic() - t0) * 1000
+        status = e.response.status_code if e.response is not None else 0
+        logger.error("Tool %s fehlgeschlagen nach %.0fms: HTTP %s", name, elapsed, status)
+        if name in _MESSAGE_ID_TOOLS and status in (400, 404, 500):
+            return [TextContent(type="text", text=(
+                f"Graph findet zu dieser ID keine E-Mail (HTTP {status}). {_ID_HINWEIS} "
+                "Denselben Aufruf nicht unverändert wiederholen."
+            ))]
+        return [TextContent(type="text", text=f"Graph antwortete mit HTTP {status}.")]
 
     except Exception as e:
         elapsed = (time.monotonic() - t0) * 1000

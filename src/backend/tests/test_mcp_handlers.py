@@ -196,3 +196,44 @@ class TestToolVisibility:
             safe = self._names(monkeypatch, "safe", triage_draft)
             assert not (safe & {"send_email", "set_email_categories",
                                 "move_email_to_folder", "mark_as_read"})
+
+
+class TestKonversationsIdGuard:
+    """Weist die Konversations-ID ab, wo eine Message-ID hingehört.
+
+    Vorfall 18.08.2026: Der Schreib-Prompt nennt die Message-ID (Präfix AAMk)
+    und wenige Zeilen darunter die Konversations-ID (Präfix AAQk). Das Modell
+    mischte beide zu einer strukturell gültigen, aber ins Leere zeigenden ID.
+    Graph antwortete mit HTTP 500, der Agent sah nur "HTTPStatusError" und
+    versuchte denselben Aufruf unverändert erneut. Ohne diesen Test fällt der
+    Guard beim nächsten Aufräumen als scheinbar überflüssig weg.
+    """
+
+    def test_conversation_id_is_rejected(self):
+        from server import _falsche_id_meldung
+
+        meldung = _falsche_id_meldung(
+            "get_email", {"message_id": "AAQkADAzMTNhZThhLTAwN2Q"}
+        )
+        assert meldung is not None
+        assert "get_thread" in meldung
+
+    def test_message_id_passes(self):
+        from server import _falsche_id_meldung
+
+        assert _falsche_id_meldung(
+            "get_email", {"message_id": "AAMkADAzMTNhZThhLTAwN2Q"}
+        ) is None
+
+    def test_guard_only_applies_to_message_id_tools(self):
+        """get_thread erwartet die Konversations-ID -- dort darf nichts blocken."""
+        from server import _falsche_id_meldung
+
+        assert _falsche_id_meldung(
+            "get_thread", {"conversation_id": "AAQkADAzMTNhZThhLTAwN2Q"}
+        ) is None
+
+    def test_missing_argument_does_not_crash(self):
+        from server import _falsche_id_meldung
+
+        assert _falsche_id_meldung("get_email", {}) is None

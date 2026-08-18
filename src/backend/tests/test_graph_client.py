@@ -3,13 +3,16 @@
 Prüft:
 - get_conversation_messages(): kein $orderby, Python-Sortierung, $search-Fallback
 - search_sender_emails(): kein $orderby, body im $select, $search-Fallback
+- Drosselung (429/503/504): Retry, Retry-After, GraphThrottledError
+- Token-Cache: von allen Client-Instanzen desselben Mandanten geteilt
 """
 
 import pytest
 import httpx
 import respx
 
-from graph_client import GraphClient, GraphConfig
+import graph_client as graph_client_modul
+from graph_client import GraphClient, GraphConfig, GraphThrottledError
 
 
 @pytest.fixture
@@ -388,3 +391,124 @@ async def test_find_free_slots_detects_overlapping_meeting(graph_client):
     # Erster freier Slot beginnt frühestens um 17:00 (nach dem Termin).
     assert slots
     assert slots[0]["start"].endswith("17:00:00")
+
+
+# ---------------------------------------------------------------------------
+# Drosselung durch Graph (Vorfall 18.08.2026)
+#
+# Ein Deploy löste einen Anfragensturm aus; Graph drosselte das Postfach und
+# antwortete 60 mal mit 429. Der Client reichte das als httpx.HTTPStatusError
+# weiter, das Backend machte daraus HTTP 500 -- die Oberfläche meldete also
+# einen Defekt, wo nur zu viel Last war. Diese Tests halten die drei
+# Eigenschaften fest, die das verhindern: wiederholen, Retry-After beachten,
+# und am Ende einen eigenen Fehlertyp werfen.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_throttled_request_is_retried(graph_client):
+    """429 mit Retry-After: der Client wartet und versucht es erneut."""
+    route = respx.get(
+        url__startswith="https://graph.microsoft.com/v1.0/users/user@example.com/messages",
+    ).mock(side_effect=[
+        httpx.Response(429, headers={"Retry-After": "0"}, json={"error": {"code": "TooManyRequests"}}),
+        httpx.Response(200, json={"value": CONVERSATION_MESSAGES}),
+    ])
+
+    result = await graph_client.get_conversation_messages("conv-123")
+
+    assert route.call_count == 2
+    assert len(result) == 2
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_persistent_throttling_raises_graph_throttled_error(graph_client):
+    """Bleibt Graph bei 429, kommt GraphThrottledError -- nicht HTTPStatusError.
+
+    Der eigene Typ ist der Unterschied zwischen "kaputt" und "zu viel Last":
+    das Backend antwortet darauf mit 503 statt mit 500.
+    """
+    route = respx.get(
+        url__startswith="https://graph.microsoft.com/v1.0/users/user@example.com/messages",
+    ).respond(429, headers={"Retry-After": "0"}, json={"error": {"code": "TooManyRequests"}})
+
+    with pytest.raises(GraphThrottledError) as exc_info:
+        await graph_client.get_email("msg-1")
+
+    assert route.call_count == graph_client_modul._MAX_ATTEMPTS
+    assert exc_info.value.retry_after > 0
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_server_error_is_retried_then_reported(graph_client):
+    """503 wird wiederholt; ein 500 dagegen sofort weitergereicht."""
+    throttle_route = respx.get(
+        url__startswith="https://graph.microsoft.com/v1.0/users/user@example.com/messages/msg-a",
+    ).mock(side_effect=[
+        httpx.Response(503, headers={"Retry-After": "0"}),
+        httpx.Response(200, json={"id": "msg-a"}),
+    ])
+    error_route = respx.get(
+        url__startswith="https://graph.microsoft.com/v1.0/users/user@example.com/messages/msg-b",
+    ).respond(500, json={"error": {"code": "ErrorInternalServerError"}})
+
+    assert (await graph_client.get_email("msg-a"))["id"] == "msg-a"
+    assert throttle_route.call_count == 2
+
+    with pytest.raises(httpx.HTTPStatusError):
+        await graph_client.get_email("msg-b")
+    assert error_route.call_count == 1
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_retry_respects_retry_after_header(graph_client, monkeypatch):
+    """Die Wartezeit stammt aus Retry-After, nicht aus dem eigenen Backoff."""
+    gewartet: list[float] = []
+
+    async def _fake_sleep(sekunden):
+        gewartet.append(sekunden)
+
+    monkeypatch.setattr(graph_client_modul.asyncio, "sleep", _fake_sleep)
+    respx.get(
+        url__startswith="https://graph.microsoft.com/v1.0/users/user@example.com/messages",
+    ).mock(side_effect=[
+        httpx.Response(429, headers={"Retry-After": "7"}),
+        httpx.Response(200, json={"id": "msg-1"}),
+    ])
+
+    await graph_client.get_email("msg-1")
+
+    assert gewartet == [7.0]
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_token_is_shared_between_client_instances():
+    """Zwei Clients desselben Mandanten holen zusammen genau einen Token.
+
+    Neun Services bauen pro Aufruf einen frischen GraphClient. Mit einem Cache
+    pro Instanz ergab das 52 Token-Erneuerungen in 24 Stunden -- unnötige Last
+    auf demselben Postfach, das anschliessend gedrosselt wurde.
+    """
+    config = GraphConfig(
+        tenant_id="shared-tenant",
+        client_id="shared-client",
+        client_secret="secret",
+        user_email="user@example.com",
+    )
+    graph_client_modul._TOKEN_CACHES.pop((config.tenant_id, config.client_id), None)
+
+    token_route = respx.post(
+        "https://login.microsoftonline.com/shared-tenant/oauth2/v2.0/token",
+    ).respond(json={"access_token": "token-1", "expires_in": 3600})
+    respx.get(
+        url__startswith="https://graph.microsoft.com/v1.0/users/user@example.com/messages",
+    ).respond(json={"id": "msg-1"})
+
+    await GraphClient(config).get_email("msg-1")
+    await GraphClient(config).get_email("msg-1")
+
+    assert token_route.call_count == 1

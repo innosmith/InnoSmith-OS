@@ -1,8 +1,10 @@
 import logging
 import os
 import pathlib
+import sys
 from contextlib import asynccontextmanager
 
+import httpx
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -10,6 +12,9 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 from sqlalchemy import text
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "email-graph"))
+from graph_client import GraphThrottledError  # noqa: E402
 
 from app.config import get_settings
 from app.database import async_session
@@ -230,6 +235,41 @@ app.add_middleware(
 limiter = Limiter(key_func=get_remote_address, default_limits=["200/minute"])
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+
+@app.exception_handler(GraphThrottledError)
+async def graph_throttled_handler(request, exc: GraphThrottledError):
+    """Drosselung durch Microsoft ist kein Serverfehler.
+
+    Am 18.08.2026 schlugen 60 gedrosselte Graph-Antworten als HTTP 500 ins
+    Frontend durch. 503 mit ``Retry-After`` sagt der UI, dass sie es später
+    erneut versuchen soll, statt einen Defekt zu melden.
+    """
+    logging.getLogger("taskpilot.graph").warning(
+        "Graph gedrosselt bei %s -- Retry-After %ds", request.url.path, exc.retry_after
+    )
+    return JSONResponse(
+        status_code=503,
+        content={"detail": "Microsoft Graph drosselt gerade -- bitte kurz warten."},
+        headers={"Retry-After": str(exc.retry_after)},
+    )
+
+
+@app.exception_handler(httpx.HTTPStatusError)
+async def upstream_http_error_handler(request, exc: httpx.HTTPStatusError):
+    """Fehler einer fremden API sind 502, nicht 500.
+
+    Sonst landet jede unbehandelte Antwort von Graph, Bexio oder Pipedrive als
+    "Internal Server Error" im Frontend, obwohl TaskPilot selbst in Ordnung ist.
+    """
+    status = exc.response.status_code if exc.response is not None else 0
+    logging.getLogger("taskpilot.upstream").warning(
+        "Externe API antwortete mit %s bei %s", status, request.url.path
+    )
+    return JSONResponse(
+        status_code=502,
+        content={"detail": f"Externe API antwortete mit HTTP {status}."},
+    )
 
 app.include_router(auth.router)
 app.include_router(projects.router)

@@ -15,6 +15,7 @@ from app.auth.deps import get_current_user
 from app.config import get_settings
 from app.database import get_db
 from app.models import AgentJob, User
+from app.services.graph_cache import cached
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "..", "email-graph"))
 from graph_client import GraphClient, GraphConfig  # noqa: E402
@@ -201,7 +202,7 @@ async def get_unread_count(
     _check_configured()
     client = _get_graph_client()
     try:
-        folders = await client.list_folders()
+        folders = await cached("folders", client.list_folders)
         inbox = next((f for f in folders if f.get("displayName", "").lower() == "inbox"), None)
         count = inbox.get("unreadItemCount", 0) if inbox else 0
         return UnreadCountResponse(unread_count=count)
@@ -235,7 +236,10 @@ async def list_flagged_emails(
     _check_configured()
     client = _get_graph_client()
     try:
-        raw = await client.list_flagged_emails(top=top, since_days=since_days)
+        raw = await cached(
+            f"flagged:{top}:{since_days}",
+            lambda: client.list_flagged_emails(top=top, since_days=since_days),
+        )
     except PermissionError as exc:
         logger.warning("Markierte E-Mails: Zugriff verweigert: %s", exc)
         raise HTTPException(status_code=403, detail="Zugriff auf E-Mails verweigert")
