@@ -23,7 +23,7 @@ archiviert (Rollback-Referenz, kein Parallelbetrieb).
 ### Modell & Provider
 - Worker-Default: `triage_model` (z. B. `qwen3.8:27b-bf16`) via Ollama `/v1`, Provider `custom`, `api_mode=chat_completions`. Übersteuerbar mit `TP_TRIAGE_MODEL`.
 - Cloud-Modelle (Chat/InnoPilot): über LiteLLM-Proxy (`custom`-Provider, voller Modellstring).
-- Context-Length: 131072 (Qwen 3.8 unterstützt nativ bis 262K).
+- Context-Length: 65536 (wie das effektive Fenster von Qwen 3.6 unter Ollama 0.24; Qwen 3.8 kann nativ 262K, das sprengt auf der GB10 Unified Memory).
 - Konstruktion: `AIAgent(base_url=…, api_key=…, provider="custom", api_mode="chat_completions", model=…)`.
 
 ## Architektur-Eckpunkte (Spike-validiert)

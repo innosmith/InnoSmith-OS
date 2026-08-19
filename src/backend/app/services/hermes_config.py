@@ -27,6 +27,10 @@ from app.core.principal import get_owner_settings
 
 logger = logging.getLogger("taskpilot.hermes_config")
 
+# Effektives Fenster der stabilen Qwen-3.6-Produktion (Ollama 0.24: KvSize 65536).
+# Nicht 256k: Ollama 0.32 setzt das auf der GB10 als VRAM-Default und sprengt Unified Memory.
+LOCAL_CONTEXT_LENGTH = 65536
+
 
 def get_hermes_home() -> Path:
     """Liefert das Hermes-Home (config.yaml, skills/, memories/, SOUL.md)."""
@@ -239,7 +243,7 @@ def build_config_dict() -> dict:
             "api_key": "ollama",
             "api_mode": "chat_completions",
             "model": cfg.triage_model.removeprefix("ollama/"),
-            "context_length": 131072,
+            "context_length": LOCAL_CONTEXT_LENGTH,
         }
 
     def stdio(server_subdir: str, env: dict, extra_pythonpath: str | None = None) -> dict:
@@ -359,7 +363,7 @@ def build_config_dict() -> dict:
             "base_url": ollama_v1,
             "api_key": "ollama",
             "api_mode": "chat_completions",
-            "context_length": 131072,
+            "context_length": LOCAL_CONTEXT_LENGTH,
         },
         # Web-Recherche: Backends EXPLIZIT statt kaskadenabhängig festlegen.
         # Suche via ddgs (DuckDuckGo): anonym (kein API-Key/Account), gratis --
