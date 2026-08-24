@@ -37,7 +37,7 @@ Tests mit `@pytest.mark.db` nutzen eine dedizierte `taskpilot_test`-Datenbank,
 die bei jedem Lauf automatisch neu erstellt wird (DROP + CREATE + Schema + Seed).
 
 ```bash
-cd /home/innosmith/dev/github/TaskPilot
+cd /home/innosmith/dev/github/innosmith-os
 make test
 
 # Einzelne Datei:

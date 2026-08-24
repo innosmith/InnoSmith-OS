@@ -18,7 +18,7 @@ TaskPilot laeuft in 3 Umgebungen auf der GX10:
 ## Makefile-Shortcuts
 
 ```bash
-cd /home/innosmith/dev/github/TaskPilot
+cd /home/innosmith/dev/github/innosmith-os
 
 make dev        # Shared Infra starten, Anleitung fuer bare-metal Backend/Frontend
 make int        # Integration komplett (inkl. Build + ClamAV)
@@ -37,7 +37,7 @@ make migrate-prod  # Schema auf Prod-DB anwenden
 
 ## Voraussetzungen
 
-- Python-venv: `/home/innosmith/dev/github/TaskPilot/.venv/`
+- Python-venv: `/home/innosmith/dev/github/innosmith-os/.venv/`
 - Docker (Snap): Volumes nur unter `$HOME` moeglich
 - Hermes-Home: `~/.hermes/` (config.yaml zur Laufzeit generiert)
 - Cloudflare Tunnel: `cloudflared` als systemd-Service
@@ -103,7 +103,7 @@ read-only unter `/input`, einziger Schreibpfad `/workspace`. `--no-new-privilege
 ### 1. Shared Infra (Postgres + LiteLLM)
 
 ```bash
-cd /home/innosmith/dev/github/TaskPilot
+cd /home/innosmith/dev/github/innosmith-os
 make infra
 # oder: docker compose -f docker/docker-compose.yml up -d
 ```

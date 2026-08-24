@@ -323,7 +323,7 @@ class Settings(BaseSettings):
 
     # Document Export & Content-Services (contentConverter)
     contentconverter_path: str = "/home/innosmith/dev/github/contentConverter"
-    contentconverter_cconv_bin: str = "/home/innosmith/dev/github/TaskPilot/.venv/bin/cconv"
+    contentconverter_cconv_bin: str = "/home/innosmith/dev/github/innosmith-os/.venv/bin/cconv"
     pptx_template_dir: str = "/home/innosmith/dev/github/contentConverter/templates"
     mapping_keys_ttl_seconds: int = 7200  # 2h
     # Zusätzliche PATH-Verzeichnisse (colon-separiert), die dem contentConverter-

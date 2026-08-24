@@ -4,6 +4,6 @@ After=docker.service
 
 [Service]
 Type=oneshot
-EnvironmentFile=%h/dev/github/TaskPilot/.env.prod
-ExecStart=%h/dev/github/TaskPilot/scripts/backup-prod.sh
+EnvironmentFile=%h/dev/github/innosmith-os/.env.prod
+ExecStart=%h/dev/github/innosmith-os/scripts/backup-prod.sh
 Environment=HOME=%h
