@@ -37,7 +37,6 @@ _TMP_DIR.mkdir(parents=True, exist_ok=True)
 
 class AnonymizeRequest(BaseModel):
     text: str
-    entities: list[str] = ["PERSON", "ORG", "LOCATION"]
     language: str = "auto"
 
 
@@ -45,6 +44,14 @@ class AnonymizeResponse(BaseModel):
     session_id: str
     anonymized_text: str
     diff: list[dict]
+    restbestaende: list[str] = []
+    """Bruchstuecke echter Werte, die im maskierten Text stehen geblieben sind.
+
+    Der typische Fall ist die Teilnennung: «Egli Immobilien AG» wird ersetzt, das
+    alleinstehende «Eglis» zwei Saetze weiter nicht. Sie automatisch nachzuziehen
+    hiesse raten -- gemeldet werden sie, damit der Mensch vor dem Kopieren
+    hinsehen kann.
+    """
 
 
 class DeanonymizeRequest(BaseModel):
@@ -54,6 +61,11 @@ class DeanonymizeRequest(BaseModel):
 
 class DeanonymizeResponse(BaseModel):
     original_text: str
+    rueckstaende: list[str] = []
+    """Ersatznamen, die die Rueckbildung nicht erwischt hat -- meist gebeugt
+    geschrieben («Weibels» statt «Weibel»). Sie sind der stillste Fehler dieser
+    Strecke: plausible fremde Namen in einem Text, der als fertig gilt.
+    """
 
 
 class ExtractResponse(BaseModel):
@@ -68,49 +80,46 @@ async def anonymize_text(
     body: AnonymizeRequest,
     user: User = Depends(require_role("owner")),
 ):
-    """Anonymisiert Text mit realistischen Fake-Namen.
+    """Anonymisiert Text mit realistischen Ersatznamen.
 
     Gibt den anonymisierten Text plus eine Session-ID zurück.
     Die Mapping-Keys bleiben im Backend (In-Memory, TTL 2h).
+
+    Die Entitätenliste ist **nicht** mehr Teil der Anfrage. Sie war es bis zum
+    24.08.2026 und stand auf ``PERSON, ORG, LOCATION`` -- E-Mail-Adressen,
+    Telefonnummern, IBAN, AHV- und UID-Nummern blieben also unberührt im Text,
+    obwohl contentConverter sie erkennt. Dieser Weg endet damit, dass ein Mensch
+    den Text in ein fremdes Sprachmodell kopiert; eine Wahl, die dabei still
+    schiefgehen kann, gehört nicht in eine Anfrage. Was gilt, steht in
+    ``app/services/anon_politik.py``.
     """
+    from app.services import anon_politik
+
     try:
-        result = await cc.call_tool(
-            "anonymize_content",
-            text=body.text,
-            entities=",".join(body.entities),
-            language=body.language,
+        anonymized_text, session_id, diff_pairs, restbestaende = await anon_politik.maskiere(
+            body.text
         )
-    except RuntimeError as e:
+    except Exception:  # noqa: BLE001
         logger.exception("Anonymisierung fehlgeschlagen")
         raise HTTPException(status_code=503, detail="Content-Service nicht erreichbar")
-
-    if isinstance(result, dict):
-        anonymized_text = result.get("anonymized_text", "")
-        mapping_keys_data = result.get("mapping_keys", {})
-    else:
-        return AnonymizeResponse(
-            session_id="",
-            anonymized_text=str(result),
-            diff=[],
-        )
-
-    session_id, diff_pairs = mapping_store.store_mapping(mapping_keys_data)
 
     return AnonymizeResponse(
         session_id=session_id,
         anonymized_text=anonymized_text,
         diff=diff_pairs,
+        restbestaende=restbestaende,
     )
 
 
 @router.post("/anonymize/file", response_model=AnonymizeResponse)
 async def anonymize_file(
     file: UploadFile = File(...),
-    entities: str = "PERSON,ORG,LOCATION",
     language: str = "auto",
     user: User = Depends(require_role("owner")),
 ):
     """Anonymisiert eine hochgeladene Datei (MD, DOCX, PDF)."""
+    from app.services import anon_politik
+
     suffix = Path(file.filename or "upload.txt").suffix
     tmp_path = _TMP_DIR / f"{uuid.uuid4().hex}{suffix}"
 
@@ -121,35 +130,20 @@ async def anonymize_file(
         extracted = await cc.call_tool("extract_content", input_file=str(tmp_path))
         text_content = extracted if isinstance(extracted, str) else str(extracted)
 
-        entity_list = [e.strip() for e in entities.split(",")]
-        result = await cc.call_tool(
-            "anonymize_content",
-            text=text_content,
-            entities=",".join(entity_list),
-            language=language,
+        anonymized_text, session_id, diff_pairs, restbestaende = await anon_politik.maskiere(
+            text_content
         )
-    except RuntimeError as e:
+    except Exception:  # noqa: BLE001
         logger.exception("Datei-Anonymisierung fehlgeschlagen")
         raise HTTPException(status_code=503, detail="Content-Service nicht erreichbar")
     finally:
         tmp_path.unlink(missing_ok=True)
 
-    if isinstance(result, dict):
-        anonymized_text = result.get("anonymized_text", "")
-        mapping_keys_data = result.get("mapping_keys", {})
-    else:
-        return AnonymizeResponse(
-            session_id="",
-            anonymized_text=str(result),
-            diff=[],
-        )
-
-    session_id, diff_pairs = mapping_store.store_mapping(mapping_keys_data)
-
     return AnonymizeResponse(
         session_id=session_id,
         anonymized_text=anonymized_text,
         diff=diff_pairs,
+        restbestaende=restbestaende,
     )
 
 
@@ -165,27 +159,20 @@ async def deanonymize_text(
 
     Nutzt die im Backend gespeicherten Mapping-Keys (via session_id).
     """
-    keys = mapping_store.get_mapping_keys(body.session_id)
-    if keys is None:
+    from app.services import anon_politik
+
+    if mapping_store.get_mapping_keys(body.session_id) is None:
         raise HTTPException(
             status_code=404,
             detail="Mapping-Keys nicht gefunden oder abgelaufen (TTL 2h). "
             "Bitte erneut anonymisieren oder die heruntergeladene Key-Datei verwenden.",
         )
 
-    try:
-        result = await cc.call_tool(
-            "deanonymize_content",
-            text=body.text,
-            mapping_keys=keys,
-        )
-    except RuntimeError as e:
-        logger.exception("De-Anonymisierung fehlgeschlagen")
-        raise HTTPException(status_code=503, detail="Content-Service nicht erreichbar")
+    original_text, rueckstaende = await anon_politik.bilde_zurueck(body.text, body.session_id)
+    if rueckstaende:
+        logger.warning("De-Anonymisierung: Ersatznamen im Text geblieben: %s", rueckstaende[:5])
 
-    return DeanonymizeResponse(
-        original_text=result if isinstance(result, str) else str(result),
-    )
+    return DeanonymizeResponse(original_text=original_text, rueckstaende=rueckstaende)
 
 
 # --- Mapping-Keys Download ---

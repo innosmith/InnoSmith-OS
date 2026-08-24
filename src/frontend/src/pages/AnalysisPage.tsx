@@ -21,6 +21,7 @@ import {
   ChevronDown,
   ChevronRight,
   ArrowLeft,
+  AlertTriangle,
   type LucideIcon,
 } from 'lucide-react';
 import { api, getToken } from '../api/client';
@@ -62,6 +63,8 @@ interface PrepareResult {
   anonymized: boolean;
   session_id: string;
   diff: DiffPair[];
+  /** Bruchstücke echter Werte, die im maskierten Prompt stehen geblieben sind. */
+  restbestaende: string[];
   snapshot_meta: Record<string, unknown>;
 }
 
@@ -357,6 +360,7 @@ export function AnalysisPage() {
         anonymized: d.anonymized,
         session_id: '',
         diff: [],
+        restbestaende: [],
         snapshot_meta: d.snapshot_meta || {},
       });
       setReport(d.report || '');
@@ -551,6 +555,31 @@ export function AnalysisPage() {
 
               {showPrompt && (
                 <div className="space-y-4 border-t border-gray-200 p-4 dark:border-gray-700">
+                  {/* Restbestände zuerst: Dieser Aufklappbereich endet mit dem
+                      Knopf «Analyse starten». Was den Prompt daran hindern
+                      soll, hinauszugehen, muss gelesen sein, bevor der Finger
+                      dort ankommt. */}
+                  {prepared.restbestaende.length > 0 && (
+                    <div className="rounded-lg border border-red-300 bg-red-50 px-3 py-2 dark:border-red-800 dark:bg-red-900/20">
+                      <h4 className="mb-1 flex items-center gap-1.5 text-xs font-semibold text-red-800 dark:text-red-300">
+                        <AlertTriangle className="h-3.5 w-3.5" />
+                        Echte Werte im Prompt geblieben ({prepared.restbestaende.length})
+                      </h4>
+                      <p className="mb-2 text-[11px] text-red-700 dark:text-red-300">
+                        Diese Bruchstücke wurden nicht ersetzt — meist Teilnennungen wie ein
+                        Nachname ohne Vornamen. Sie gehen so an <strong>{prepared.model}</strong>.
+                        Bitte prüfen, ob das vertretbar ist, oder ein lokales Modell wählen.
+                      </p>
+                      <div className="flex flex-wrap gap-1.5">
+                        {prepared.restbestaende.map((r, i) => (
+                          <span key={i} className="rounded bg-red-200 px-1.5 py-0.5 font-mono text-[11px] text-red-900 dark:bg-red-800/60 dark:text-red-100">
+                            {r}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
                   {prepared.diff.length > 0 && (
                     <div>
                       <h4 className="mb-2 text-xs font-medium text-gray-600 dark:text-gray-400">

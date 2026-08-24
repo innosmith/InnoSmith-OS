@@ -28,7 +28,6 @@ from app.database import async_session, get_db
 from app.models import FinanceAnalysis, FinanceDocument, User
 from app.routers.uploads import _scan_with_clamav
 from ai9 import content_converter as cc
-from ai9 import mapping_store
 from app.services import analysis_prompts as ap
 from app.services import financial_snapshot as fs
 
@@ -44,8 +43,8 @@ _DOC_TMP_DIR.mkdir(parents=True, exist_ok=True)
 # Token-bewusste Obergrenze fuer extrahierten Dokumenttext
 MAX_DOC_TEXT_CHARS = 60000
 
-# Entitäten analog zum bewährten AnonymizePanel (contentConverter-Konvention)
-_ANON_ENTITIES = ["PERSON", "ORG", "LOCATION", "EMAIL", "PHONE", "IBAN"]
+# Entitäten und Schwelle stehen in app/services/anon_politik.py -- siehe dort,
+# warum diese Liste nicht mehr je Router ausgeschrieben wird.
 
 
 def _setup_api_keys() -> None:
@@ -75,32 +74,36 @@ def _is_gemini_deep_research(m: str) -> bool:
     )
 
 
-async def _anonymize(text: str) -> tuple[str, str, list[dict]]:
-    """Anonymisiert Text -> (anonymisierter_text, session_id, diff). Best-effort."""
-    result = await cc.call_tool(
-        "anonymize_content",
-        text=text,
-        entities=",".join(_ANON_ENTITIES),
-        language="de",
-    )
-    if isinstance(result, dict):
-        anon = result.get("anonymized_text", text)
-        mapping = result.get("mapping_keys", {})
-        session_id, diff = mapping_store.store_mapping(mapping)
-        return anon, session_id, diff
-    return str(result), "", []
+_RUECKSTAND_HINWEIS = (
+    "\n\n---\n\n"
+    "> **Achtung -- erfundene Namen im Bericht.**\n"
+    "> Dieser Bericht entstand mit einem Cloud-Modell und wurde dafuer maskiert. "
+    "Beim Zurueckbilden blieben folgende Ersatzwerte stehen: {namen}.\n"
+    "> Sie sehen echt aus und sind es nicht. Bitte pruefen, bevor der Bericht "
+    "weiterverwendet wird.\n"
+)
 
 
 async def _deanonymize(text: str, session_id: str) -> str:
-    keys = mapping_store.get_mapping_keys(session_id)
-    if not keys:
-        return text
-    try:
-        result = await cc.call_tool("deanonymize_content", text=text, mapping_keys=keys)
-        return result if isinstance(result, str) else str(result)
-    except Exception as e:  # noqa: BLE001
-        logger.warning("De-Anonymisierung fehlgeschlagen: %s", e)
-        return text
+    """Bildet den Bericht zurueck und macht Rueckstaende im Text selbst sichtbar.
+
+    Bis zum 24.08.2026 gab diese Funktion bei jedem Fehlschlag stillschweigend
+    ihre Eingabe zurueck -- also den **maskierten** Text. Der wanderte dann als
+    fertiger Bericht in die Datenbank, und weil die Maskierung Ersatznamen statt
+    Platzhalter verwendet, las er sich vollkommen unauffaellig. Ein Bericht ueber
+    «Hess & Partner», wo «InnoSmith GmbH» stehen muesste, gibt keinen Anlass zu
+    zweifeln.
+
+    Der Hinweis steht bewusst **im Berichtstext** und nicht nur im Log: Der
+    Bericht wird gelesen, das Log nicht.
+    """
+    from app.services import anon_politik
+
+    klar, rueckstaende = await anon_politik.bilde_zurueck(text, session_id)
+    if rueckstaende:
+        logger.warning("Analyse: Ersatzwerte nach der Rueckbildung: %s", rueckstaende[:5])
+        return klar + _RUECKSTAND_HINWEIS.format(namen=", ".join(rueckstaende[:10]))
+    return klar
 
 
 async def _load_documents_md(document_ids: list[str] | None, user: User) -> str:
@@ -161,10 +164,15 @@ async def _prepare(
 
     session_id = ""
     diff: list[dict] = []
+    restbestaende: list[str] = []
     md_for_prompt = snapshot_md
     if do_anon:
+        from app.services import anon_politik
+
         try:
-            md_for_prompt, session_id, diff = await _anonymize(snapshot_md)
+            md_for_prompt, session_id, diff, restbestaende = await anon_politik.maskiere(
+                snapshot_md
+            )
         except Exception as e:  # noqa: BLE001
             logger.warning("Anonymisierung fehlgeschlagen, breche ab: %s", e)
             raise HTTPException(
@@ -172,6 +180,8 @@ async def _prepare(
                 detail="Anonymisierung nicht möglich (Content-Service nicht erreichbar). "
                 "Bitte lokales Modell wählen oder Anonymisierung deaktivieren.",
             )
+        if restbestaende:
+            logger.warning("Analyse-Prompt: Restbestaende gemeldet: %s", restbestaende[:5])
 
     user_prompt = ap.build_user_prompt(analysis_type, md_for_prompt)
     return {
@@ -183,6 +193,13 @@ async def _prepare(
         "anonymized": do_anon,
         "session_id": session_id,
         "diff": diff,
+        # Bruchstuecke echter Werte, die im maskierten Prompt stehen geblieben sind.
+        # Hier wird gemeldet und nicht abgebrochen -- anders als beim Agent-Job, weil
+        # dieser Weg beaufsichtigt ist: Der Prompt steht in der Vorschau, und erst
+        # eine bewusste Freigabe schickt ihn hinaus. Die Entscheidung gehoert dem
+        # Menschen, der den Text vor sich hat; ihm die Stelle zu zeigen ist mehr wert,
+        # als ihm den Weg zu versperren.
+        "restbestaende": restbestaende,
         "snapshot_meta": snapshot["meta"],
         "is_local": is_local,
         "document_ids": document_ids or [],
@@ -321,6 +338,7 @@ async def prepare_analysis(body: dict, user: User = Depends(require_role("owner"
         "anonymized": prep["anonymized"],
         "session_id": prep["session_id"],
         "diff": prep["diff"],
+        "restbestaende": prep["restbestaende"],
         "snapshot_meta": prep["snapshot_meta"],
     }
 

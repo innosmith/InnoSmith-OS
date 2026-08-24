@@ -491,24 +491,40 @@ async def test_cloud_writer_falls_back_to_local_when_anonymization_fails():
 
 @pytest.mark.asyncio
 async def test_cloud_writer_discards_draft_when_deanonymization_fails():
-    """Lieber kein Entwurf als einer mit Platzhaltern statt echter Namen."""
+    """Lieber kein Entwurf als einer mit fremden Namen statt echter.
+
+    Die Ruecksetzung wirft nicht mehr, sie meldet den Fehlschlag als Rueckstand
+    (siehe ``app.services.anon_politik``). Fuer diesen Weg ist die Konsequenz
+    dieselbe wie bei einem echten Rueckstand: lokal neu schreiben. Der Entwurf
+    geht an einen echten Kunden -- ein fremder Name darin ist nicht zu erklaeren.
+    """
     meta = {"email_message_id": "M1"}
     create = AsyncMock(return_value="D9")
+    local_run = _writing_agent("LOKAL3")
+    calls: list = []
+
+    async def _tracking(*args, **kwargs):
+        calls.append(args)
+        if len(calls) == 2:
+            return "Hallo Senad Weibel"
+        return await local_run.to_thread(*args, **kwargs)
+
     with (
         patch.object(hw, "get_settings", lambda: _settings()),
+        patch.object(hw, "_agent", object()),
         patch.object(hw, "_anonymize_for_cloud", AsyncMock(return_value=("MASKIERT", "S1"))),
         patch.object(hw, "_build_cloud_job_agent", lambda m: object()),
+        patch.object(hw, "asyncio", SimpleNamespace(to_thread=_tracking)),
         patch.object(
-            hw, "asyncio", SimpleNamespace(to_thread=AsyncMock(return_value="Hallo <PERSON_1>"))
-        ),
-        patch.object(
-            hw, "_deanonymize_from_cloud", AsyncMock(side_effect=RuntimeError("weg"))
+            hw,
+            "_deanonymize_from_cloud",
+            AsyncMock(return_value=("Hallo Senad Weibel", ["(Rueckbildung fehlgeschlagen)"])),
         ),
         patch.object(hw, "_create_reply_draft_from_text", create),
     ):
         result = await hw._write_draft_with_cloud_model(meta, "PROMPT", "anthropic/opus")
 
-    assert result is None
+    assert result == "LOKAL3"
     create.assert_not_awaited()
 
 
@@ -530,7 +546,7 @@ async def test_cloud_writer_creates_draft_server_side():
             hw, "asyncio", SimpleNamespace(to_thread=AsyncMock(return_value="Hallo <PERSON_1>"))
         ),
         patch.object(
-            hw, "_deanonymize_from_cloud", AsyncMock(return_value="Hallo Franziska")
+            hw, "_deanonymize_from_cloud", AsyncMock(return_value=("Hallo Franziska", []))
         ),
         patch.object(hw, "_create_reply_draft_from_text", create),
     ):
@@ -582,8 +598,11 @@ async def test_cloud_writer_falls_back_locally_when_pseudonym_survives():
         patch.object(hw, "_anonymize_for_cloud", AsyncMock(return_value=("MASKIERT", "S1"))),
         patch.object(hw, "_build_cloud_job_agent", lambda m: object()),
         patch.object(hw, "asyncio", SimpleNamespace(to_thread=_tracking)),
-        patch.object(hw, "_deanonymize_from_cloud", AsyncMock(return_value="Hoi Senad, danke")),
-        patch.object(hw, "_residual_pseudonyms", lambda text, sid: ["Senad"]),
+        patch.object(
+            hw,
+            "_deanonymize_from_cloud",
+            AsyncMock(return_value=("Hoi Senad, danke", ["Senad"])),
+        ),
         patch.object(hw, "_create_reply_draft_from_text", create),
     ):
         result = await hw._write_draft_with_cloud_model(meta, "PROMPT", "anthropic/opus")

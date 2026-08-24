@@ -17,6 +17,14 @@ Gemessen wird pro Testtext:
 3. **Technischer Schaden** -- welche Hostnames, IPs und Mengen aus dem Original
    fehlen nach dem Round-Trip? (Nutzt ``text_style.factual_tokens``, also genau die
    Pruefung, die spaeter auch den Entwurf bewertet.)
+4. **Rueckstand** -- ist ein Ersatzname im zurueckgesetzten Text geblieben?
+
+Punkt 1 misst seit dem 24.08.2026 zwei verschiedene Dinge, und der Unterschied
+ist der Kern: Die Liste ``secrets`` prueft, was der Mensch als heikel erkannt
+hat. Der **Restbestand** aus ``anon_politik.maskiere`` prueft, was das System
+selbst als heikel erkannt und trotzdem nicht vollstaendig ersetzt hat -- also
+gerade die Faelle, an die beim Schreiben des Testfalls niemand gedacht hat.
+Ein Test, der nur die eigene Erwartungsliste prueft, findet nur eigene Fehler.
 
 Laeuft nur dort, wo ``ai9.content_converter`` konfiguriert ist -- in der Regel im
 Backend-Container:
@@ -84,18 +92,67 @@ CASES: list[dict] = [
         ),
         "secrets": ["Anthony"],
     },
+    {
+        # Der Anlass fuer diesen Fall: AHV und UID standen in keiner der drei
+        # Entitaetenlisten des Backends. Nicht abgewaehlt -- nie dazugekommen,
+        # als contentConverter die Erkenner bekam. Eine AHV-Nummer ist die
+        # eindeutige Kennung eines Menschen; sie ist der teuerste Datenpunkt in
+        # einer Treuhand-Mail und war der einzige, den niemand geprueft hat.
+        #
+        # Die UID unten (CHE-291.417.777) traegt eine **gueltige** Pruefziffer.
+        # Das ist keine Kosmetik: Ein erster Anlauf am 24.08.2026 nutzte eine
+        # frei erfundene Nummer, sie blieb unmaskiert stehen, und das sah nach
+        # einem Loch im Erkenner aus. Es war das Gegenteil -- die Modulo-11-Probe
+        # verwarf sie korrekt, denn ohne gueltige Pruefziffer ist es keine UID,
+        # sondern eine Zeichenkette. Wer diesen Fall mit einer Phantasienummer
+        # nachbaut, misst nicht die Erkennung, sondern die Pruefziffer.
+        "name": "Schweizer Kennungen (AHV, UID, IBAN)",
+        "text": (
+            "Guten Tag Herr Chuard\n\n"
+            "Für die Lohnabrechnung von Frau Sandra Odermatt "
+            "(AHV 756.1234.5678.97) brauche ich noch die Bestätigung. "
+            "Die Firma Egli Immobilien AG ist unter CHE-291.417.777 MWST "
+            "registriert. Zahlungen bitte auf CH93 0076 2011 6238 5295 7.\n\n"
+            "Freundliche Grüsse\nAnthony Smith"
+        ),
+        "secrets": [
+            "Chuard",
+            "Sandra Odermatt",
+            "756.1234.5678.97",
+            "CHE-291.417.777",
+            "Anthony Smith",
+        ],
+    },
+    {
+        # Die Teilnennung: derselbe Mensch einmal voll, einmal nur mit Nachnamen.
+        # Am 24.08.2026 im Container gemessen -- «Odermatts» und «Eglis» bleiben
+        # stehen, und der Restbestandsbefund meldet beide. Dieser Fall ist darum
+        # **erwartet auffaellig**: Er belegt nicht, dass die Maskierung dicht ist,
+        # sondern dass die Undichtigkeit gemeldet wird. Wird er eines Tages
+        # unauffaellig, ist die Erkennung besser geworden -- verschwindet dagegen
+        # nur die Meldung, ist die Warnung kaputt und niemand merkt es.
+        "name": "Teilnennung derselben Person (erwartet auffaellig)",
+        "text": (
+            "Guten Tag\n\n"
+            "Frau Sandra Odermatt hat die Unterlagen eingereicht. "
+            "Wir haben Odermatts Angaben geprüft und an die Egli Immobilien AG "
+            "weitergeleitet; Eglis Buchhaltung meldet sich direkt.\n\n"
+            "Freundliche Grüsse\nAnthony Smith"
+        ),
+        "secrets": ["Sandra Odermatt", "Anthony Smith"],
+    },
 ]
 
 
 async def probe(case: dict) -> dict:
-    from app.services.hermes_worker import (
-        _anonymize_for_cloud,
-        _deanonymize_from_cloud,
-    )
+    # Direkt ueber anon_politik statt ueber _anonymize_for_cloud: Letzteres wirft
+    # bei Restbestaenden, damit der Job lokal laeuft. Fuer die Messung ist genau
+    # dieser Befund das Ergebnis und darf den Lauf nicht abbrechen.
+    from app.services import anon_politik
 
     original = case["text"]
-    anon, session_id = await _anonymize_for_cloud(original)
-    restored = await _deanonymize_from_cloud(anon, session_id)
+    anon, session_id, _diff, restbestaende = await anon_politik.maskiere(original)
+    restored, rueckstaende = await anon_politik.bilde_zurueck(anon, session_id)
 
     # Wortgrenzen, und nicht innerhalb eines Hostnamens (``.innosmith.cloud``):
     # der Firmenname in der Domain ist beabsichtigt unmaskiert, damit technische
@@ -116,6 +173,8 @@ async def probe(case: dict) -> dict:
         "anon": anon,
         "restored": restored,
         "leaks": leaks,
+        "restbestaende": restbestaende,
+        "rueckstaende": rueckstaende,
         "roundtrip_exact": restored.strip() == original.strip(),
         "tokens_before": before,
         "lost_tokens": lost,
@@ -146,6 +205,16 @@ async def main() -> int:
             findings += 1
         else:
             print("  Maskierung: keine der erwarteten Bezuege im Klartext")
+
+        if r["restbestaende"]:
+            print(f"  RESTBESTAND (System-Befund): {r['restbestaende']}")
+            findings += 1
+        else:
+            print("  Restbestaende: keine")
+
+        if r["rueckstaende"]:
+            print(f"  RUECKSTAND (Ersatzname geblieben): {r['rueckstaende']}")
+            findings += 1
 
         if r["roundtrip_exact"]:
             print("  Round-Trip: identisch")

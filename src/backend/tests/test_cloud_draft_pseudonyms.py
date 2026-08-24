@@ -1,4 +1,4 @@
-"""Tests: kein Entwurf mit fremdem Namen aus dem Cloud-Schreibpfad.
+"""Tests: was gilt, wenn Text das Haus verlaesst.
 
 Am 04.08.2026 gegen das echte contentConverter-Modell geprueft: die Maskierung
 arbeitet nicht mit Platzhaltern, sondern mit ERSATZNAMEN -- «Gabriel» wird zu
@@ -6,23 +6,34 @@ arbeitet nicht mit Platzhaltern, sondern mit ERSATZNAMEN -- «Gabriel» wird zu
 (Hostnames, IPs, Ports, Fristen) bleiben unversehrt, der Round-Trip war in allen
 drei Testtexten exakt.
 
-Das Restrisiko liegt genau in dieser Fluessigkeit: schreibt das Modell den
-Ersatznamen verkuerzt («Hoi Senad»), findet die Ruecksetzung ihn nicht. Der Entwurf
-traegt dann einen fremden, voellig plausiblen Namen -- schwer zu erkennen, weil
-nichts nach Fehler aussieht. Darum wird nach der Ruecksetzung geprueft und im
-Zweifel lokal neu geschrieben.
+Das Restrisiko liegt genau in dieser Fluessigkeit. Es hat **zwei** Richtungen,
+und die zweite fiel erst am 24.08.2026 auf:
+
+- **Hinaus** (Restbestand): Ein Bruchstueck des echten Werts bleibt im maskierten
+  Text stehen -- «Egli Immobilien AG» wird ersetzt, das alleinstehende «Eglis»
+  zwei Saetze weiter nicht. Echte Daten gehen mit.
+- **Zurueck** (Rueckstand): Das Modell schreibt den Ersatznamen gebeugt («Hoi
+  Senad»), die Ruecksetzung findet ihn nicht. Ein fremder, plausibler Name bleibt
+  im Ergebnis -- schwer zu erkennen, weil nichts nach Fehler aussieht.
+
+Die Konsequenz haengt nicht am Fehler, sondern daran, **ob ein Mensch den Text
+sieht, bevor er wirkt** (siehe ``app/services/anon_politik``): Der Agent-Job
+bricht ab und laeuft lokal, die Finanzanalyse warnt in der Vorschau.
 """
 
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from app.services import anon_politik
 from app.services.hermes_worker import (
+    _anonymize_for_cloud,
     _deanonymize_from_cloud,
-    _residual_pseudonyms,
+    _schleuse_nach_draussen,
 )
 
 _KEYS = {
+    "session_id": "s1",
     "mappings": {
         "Senad Weibel": "Gabriel Brunner",
         "Hess & Partner": "InnoSmith GmbH",
@@ -31,42 +42,248 @@ _KEYS = {
 }
 
 
+def _cc(**antworten):
+    """Ersetzt contentConverter durch feste Antworten je Werkzeugname."""
+
+    async def ruf(name, **_kwargs):
+        if name not in antworten:
+            raise AssertionError(f"unerwarteter Werkzeugaufruf: {name}")
+        wert = antworten[name]
+        if isinstance(wert, Exception):
+            raise wert
+        return wert
+
+    return patch("ai9.content_converter.call_tool", side_effect=ruf)
+
+
 def _store(keys):
     return patch("ai9.mapping_store.get_mapping_keys", return_value=keys)
 
 
-def test_clean_text_has_no_residue():
-    with _store(_KEYS):
-        text = "Hoi Gabriel\n\nMerci. Liebe Grüsse\nAnthony, InnoSmith GmbH"
-        assert _residual_pseudonyms(text, "s1") == []
+# ── Die Politik selbst ───────────────────────────────────────────────────────
 
 
-def test_full_pseudonym_is_caught():
-    with _store(_KEYS):
-        assert _residual_pseudonyms("Hoi Senad Weibel", "s1") == ["Senad Weibel"]
+def test_ahv_und_uid_werden_maskiert():
+    """AHV und UID fehlten in allen drei Listen -- nie abgewaehlt, nur vergessen.
+
+    Der Regressionswert dieses Tests liegt nicht in den beiden Namen, sondern
+    darin, dass die Liste jetzt an einem Ort steht. Wer sie kuerzt, kommt hier
+    vorbei.
+    """
+    assert "AHV" in anon_politik.ENTITAETEN
+    assert "UID" in anon_politik.ENTITAETEN
 
 
-def test_shortened_person_pseudonym_is_caught():
-    """Der eigentliche Schadensfall: nur der Vorname des Tarnnamens bleibt stehen."""
-    with _store(_KEYS):
-        assert _residual_pseudonyms("Hoi Senad, besten Dank", "s1") == ["Senad"]
+def test_schwelle_liegt_unter_der_vorgabe():
+    """Nach draussen wird grosszuegiger maskiert als im Haus.
+
+    Ein zu viel maskiertes Sachwort ist sichtbar und kostet Kontext; ein
+    uebersehener Name ist ein Abfluss, den niemand bemerkt. Die Fehlerarten sind
+    nicht gleichwertig, also darf die Schwelle nicht neutral sein.
+    """
+    assert anon_politik.SCHWELLE < 0.4
 
 
-def test_org_fragment_does_not_trigger():
-    # «Partner» allein ist ein Alltagswort -- Firmen nur als ganzer String pruefen.
-    with _store(_KEYS):
-        assert _residual_pseudonyms("Wir suchen einen Partner dafür.", "s1") == []
-
-
-def test_expired_session_cannot_be_checked_here():
-    """Ohne Mapping ist keine Pruefung moeglich -- deshalb wirft die Ruecksetzung."""
-    with _store(None):
-        assert _residual_pseudonyms("Hoi Senad Weibel", "s1") == []
+# ── Hinaus: Restbestaende ────────────────────────────────────────────────────
 
 
 @pytest.mark.asyncio
-async def test_deanonymize_raises_when_mapping_gone():
-    # Ein abgelaufenes Mapping darf nicht stillschweigend den maskierten Text
-    # durchlassen: der Aufrufer verwirft bei Fehlern, gibt aber Text weiter.
-    with _store(None), pytest.raises(RuntimeError):
-        await _deanonymize_from_cloud("Hoi Senad Weibel", "s1")
+async def test_maskieren_meldet_restbestaende():
+    ergebnis = {"anonymized_text": "Wir prüfen Eglis Antrag.", "mapping_keys": _KEYS}
+    with _cc(anonymize_content=ergebnis, find_residual_originals=["Eglis"]):
+        _text, _sid, _diff, reste = await anon_politik.maskiere("...")
+    assert reste == ["Eglis"]
+
+
+@pytest.mark.asyncio
+async def test_nicht_pruefbar_gilt_als_fund():
+    """Ein nicht geprueter Text ist kein sauberer Text.
+
+    Faellt contentConverter aus, waere die bequeme Annahme «keine Treffer». Sie
+    haette hier die falsche Richtung: Der Aufrufer schickt den Text dann hinaus,
+    obwohl niemand hingesehen hat.
+    """
+    ergebnis = {"anonymized_text": "...", "mapping_keys": _KEYS}
+    with _cc(anonymize_content=ergebnis, find_residual_originals=RuntimeError("weg")):
+        _text, _sid, _diff, reste = await anon_politik.maskiere("...")
+    assert reste  # nicht leer
+
+
+@pytest.mark.asyncio
+async def test_agent_job_bricht_bei_restbestand_ab():
+    """Unbeaufsichtigter Weg: Abbruch, nicht Warnung.
+
+    Der Auftrag laeuft dann lokal. Eine Warnung waere hier wertlos -- sie wuerde
+    gelesen, nachdem der Text bereits beim Cloud-Anbieter liegt.
+    """
+    ergebnis = {"anonymized_text": "...", "mapping_keys": _KEYS}
+    with _cc(anonymize_content=ergebnis, find_residual_originals=["Eglis"]):
+        with pytest.raises(RuntimeError, match="Bruchstuecke"):
+            await _anonymize_for_cloud("...")
+
+
+@pytest.mark.asyncio
+async def test_sauberer_text_geht_durch():
+    ergebnis = {"anonymized_text": "Hoi Senad Weibel", "mapping_keys": _KEYS}
+    with _cc(anonymize_content=ergebnis, find_residual_originals=[]):
+        text, session_id = await _anonymize_for_cloud("Hoi Gabriel Brunner")
+    assert text == "Hoi Senad Weibel"
+    assert session_id
+
+
+# ── Zurueck: Rueckstaende ────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_sauberer_ruecklauf_meldet_nichts():
+    with _store(_KEYS), _cc(
+        deanonymize_content="Hoi Gabriel Brunner", find_residual_fakes=[]
+    ):
+        text, rueckstaende = await _deanonymize_from_cloud("Hoi Senad Weibel", "s1")
+    assert text == "Hoi Gabriel Brunner"
+    assert rueckstaende == []
+
+
+@pytest.mark.asyncio
+async def test_verkuerzter_ersatzname_wird_gemeldet():
+    """Der eigentliche Schadensfall: nur der Vorname des Ersatznamens bleibt stehen.
+
+    Die Pruefung liegt seit dem 24.08.2026 in contentConverter
+    (``find_residual_fakes``) statt in einer eigenen Heuristik hier. Der Grund
+    ist nicht Aufraeumen: Die hiesige Heuristik kannte die Beugungsregeln nicht,
+    die der Anonymisierer beim Ersetzen selbst anwendet -- sie suchte «Senad
+    Weibel» und uebersah «Weibels». Wer maskiert, muss auch pruefen, sonst laufen
+    zwei Vorstellungen davon auseinander, was ein Rueckstand ist, und die
+    stillere von beiden gewinnt.
+    """
+    with _store(_KEYS), _cc(
+        deanonymize_content="Hoi Senad, besten Dank", find_residual_fakes=["Senad"]
+    ):
+        _text, rueckstaende = await _deanonymize_from_cloud("...", "s1")
+    assert rueckstaende == ["Senad"]
+
+
+@pytest.mark.asyncio
+async def test_abgelaufenes_mapping_gibt_maskierten_text_mit_warnung():
+    """Frueher gab dieser Fall stillschweigend den maskierten Text zurueck.
+
+    Weil die Maskierung Ersatznamen statt Platzhalter verwendet, las der sich
+    vollkommen unauffaellig: ein Bericht ueber «Hess & Partner», wo «InnoSmith
+    GmbH» stehen muesste, gibt keinen Anlass zu zweifeln. Der Rueckstand ist das
+    einzige Anzeichen, das der Aufrufer noch hat.
+    """
+    with _store(None):
+        text, rueckstaende = await _deanonymize_from_cloud("Hoi Senad Weibel", "s1")
+    assert text == "Hoi Senad Weibel"  # unveraendert, also maskiert
+    assert rueckstaende  # aber als solcher gekennzeichnet
+
+
+@pytest.mark.asyncio
+async def test_gescheiterte_rueckbildung_meldet_rueckstand():
+    with _store(_KEYS), _cc(deanonymize_content=RuntimeError("weg")):
+        text, rueckstaende = await _deanonymize_from_cloud("Hoi Senad Weibel", "s1")
+    assert text == "Hoi Senad Weibel"
+    assert rueckstaende
+
+
+# ── Die Schleuse: gilt fuer jeden Job-Typ, nicht nur fuer den Entwurf ────────
+
+_LOKAL = object()
+_CLOUD = object()
+
+
+def _schleuse_umgebung(**extra):
+    return patch.multiple(
+        "app.services.hermes_worker",
+        _is_local_model=lambda m: m.startswith("ollama/"),
+        _build_cloud_job_agent=lambda m: _CLOUD,
+        **extra,
+    )
+
+
+@pytest.mark.asyncio
+async def test_meeting_mit_cloud_override_geht_maskiert_hinaus():
+    """Der Vorfall: Die Meeting-Nachanalyse schickte das Transkript im Klartext.
+
+    Das Meeting ist hier nur das Beispiel. Geprueft wird, dass die Schleuse den
+    Job-Typ gar nicht ansieht -- der Entwurfspfad hatte seine Maskierung, weil
+    dort jemand daran gedacht hatte, das Protokoll hatte keine, weil dort
+    niemand daran gedacht hatte. Eine Regel, die bei jeder Erweiterung mitgedacht
+    werden muss, ist keine Regel.
+    """
+    meta = {"llm_override": "anthropic/opus", "meeting_transcript_id": "M1"}
+    with _schleuse_umgebung(
+        _anonymize_for_cloud=AsyncMock(return_value=("MASKIERT", "S1"))
+    ):
+        agent, prompt, session = await _schleuse_nach_draussen(
+            _LOKAL, "Transkript mit Gabriel Brunner", meta, "job1"
+        )
+
+    assert agent is _CLOUD
+    assert prompt == "MASKIERT"
+    assert session == "S1"
+
+
+@pytest.mark.asyncio
+async def test_gescheiterte_maskierung_haelt_den_job_im_haus():
+    """Fail-closed: lieber langsam lokal als schnell nach draussen.
+
+    Der Rueckfall gibt den **urspruenglichen** Prompt zurueck, nicht einen halb
+    maskierten -- lokal gibt es nichts zu verbergen, und ein beschaedigter Prompt
+    waere ein zweiter Fehler.
+    """
+    meta = {"llm_override": "anthropic/opus"}
+    with _schleuse_umgebung(
+        _anonymize_for_cloud=AsyncMock(side_effect=RuntimeError("Bruchstuecke"))
+    ):
+        agent, prompt, session = await _schleuse_nach_draussen(
+            _LOKAL, "Transkript mit Gabriel Brunner", meta, "job1"
+        )
+
+    assert agent is _LOKAL
+    assert prompt == "Transkript mit Gabriel Brunner"
+    assert session is None
+
+
+@pytest.mark.asyncio
+async def test_lokaler_override_wird_nicht_maskiert():
+    """Im Haus bleibt der Klartext -- Maskierung kostet dort nur Kontext."""
+    maskieren = AsyncMock()
+    meta = {"llm_override": "ollama/qwen3.6:latest"}
+    with _schleuse_umgebung(_anonymize_for_cloud=maskieren):
+        agent, prompt, session = await _schleuse_nach_draussen(
+            _LOKAL, "Klartext", meta, "job1"
+        )
+
+    assert (agent, prompt, session) == (_LOKAL, "Klartext", None)
+    maskieren.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_ohne_override_passiert_nichts():
+    maskieren = AsyncMock()
+    with _schleuse_umgebung(_anonymize_for_cloud=maskieren):
+        agent, prompt, session = await _schleuse_nach_draussen(_LOKAL, "Klartext", {}, "j")
+
+    assert (agent, prompt, session) == (_LOKAL, "Klartext", None)
+    maskieren.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_mapping_verlaesst_das_backend_nicht():
+    """Die Rueckbildung nimmt eine Session-Kennung, keine Klartextwerte.
+
+    Sonst reisten die Originalwerte durch Antwortkoerper und Frontend-Zustand --
+    und damit ausgerechnet durch die Schichten, vor denen die Maskierung sie
+    schuetzen soll.
+    """
+    gesehen = {}
+
+    async def ruf(name, **kwargs):
+        gesehen[name] = kwargs
+        return "Hoi Gabriel Brunner" if name == "deanonymize_content" else []
+
+    with _store(_KEYS), patch("ai9.content_converter.call_tool", side_effect=ruf):
+        await anon_politik.bilde_zurueck("Hoi Senad Weibel", "s1")
+
+    assert gesehen["deanonymize_content"]["mapping_keys"] is _KEYS

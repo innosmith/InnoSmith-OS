@@ -4516,79 +4516,40 @@ async def _anonymize_for_cloud(text: str) -> tuple[str, str]:
     damit es genau eine Anonymisierungs-Implementierung im System gibt. Gibt
     ``(maskierter_text, session_id)`` zurueck. Wirft bei Fehlschlag -- der Aufrufer
     faellt dann auf das lokale Modell zurueck (fail-closed).
-    """
-    from ai9 import content_converter as cc
-    from ai9 import mapping_store
 
-    result = await cc.call_tool(
-        "anonymize_content",
-        text=text,
-        entities=",".join(_CLOUD_ANON_ENTITIES),
-        language="de",
-    )
-    if not isinstance(result, dict):
-        raise RuntimeError("Anonymisierung lieferte kein Mapping")
-    anon = result.get("anonymized_text") or ""
-    if not anon:
-        raise RuntimeError("Anonymisierung lieferte leeren Text")
-    session_id, _diff = mapping_store.store_mapping(result.get("mapping_keys", {}))
+    Restbestaende -- Bruchstuecke echter Werte, die die Erkennung stehen liess --
+    fuehren hier zum **Abbruch**, nicht zur Warnung. Dieser Weg ist
+    unbeaufsichtigt: Der Text geht hinaus, waehrend niemand hinsieht, und eine
+    Warnung, die erst danach jemand liest, aendert nichts mehr. Der Aufrufer
+    faellt auf das lokale Modell zurueck.
+    """
+    from app.services import anon_politik
+
+    anon, session_id, _diff, reste = await anon_politik.maskiere(text)
+    if reste:
+        raise RuntimeError(f"Bruchstuecke echter Werte im maskierten Text: {reste[:5]}")
     return anon, session_id
 
 
-async def _deanonymize_from_cloud(text: str, session_id: str) -> str:
+async def _deanonymize_from_cloud(text: str, session_id: str) -> tuple[str, list[str]]:
     """Setzt die Originalwerte in der Cloud-Antwort wieder ein.
 
-    Fehlt das Mapping (TTL abgelaufen, Backend-Neustart), wird geworfen statt den
-    maskierten Text zurueckzugeben. Sonst entstuende ein Entwurf, in dem die
-    Tarnnamen stehen -- und die sind echte, plausible Namen, kein sichtbarer Fehler.
+    Liefert ``(text, rueckstaende)``. Die Arbeit liegt in ``anon_politik``, hier
+    steht nur der Grund, warum die Rueckstandsliste nicht ignoriert werden darf:
+
+    Die Maskierung arbeitet nicht mit Platzhaltern, sondern mit ERSATZNAMEN -- aus
+    «Gabriel» wird «Senad Weibel», aus «InnoSmith GmbH» wird «Hess & Partner».
+    Das haelt den Text fluessig, birgt aber ein Risiko, das Platzhalter nicht
+    haetten: Schreibt das Modell den Ersatznamen gebeugt («Hoi Senad», «Weibels»),
+    findet die Ruecksetzung ihn nicht. Im Entwurf an einen echten Kunden steht
+    dann ein fremder, voellig plausibler Name -- ein Fehler ohne jedes Anzeichen.
+
+    Ein ``[PERSON_1]`` waere hier harmlos, weil er auffaellt. Genau darum ist die
+    Rueckstandspruefung der Preis fuer die Lesbarkeit, und nicht optional.
     """
-    from ai9 import content_converter as cc
-    from ai9 import mapping_store
+    from app.services import anon_politik
 
-    keys = mapping_store.get_mapping_keys(session_id)
-    if not keys:
-        raise RuntimeError("Anonymisierungs-Mapping nicht mehr verfuegbar")
-    result = await cc.call_tool("deanonymize_content", text=text, mapping_keys=keys)
-    return result if isinstance(result, str) else str(result)
-
-
-def _residual_pseudonyms(text: str, session_id: str) -> list[str]:
-    """Deckt Tarnnamen auf, die die Ruecksetzung nicht erwischt hat.
-
-    Die Maskierung arbeitet nicht mit Platzhaltern, sondern mit ERSATZNAMEN: aus
-    «Gabriel» wird «Senad Weibel», aus «InnoSmith GmbH» wird «Hess & Partner»
-    (geprueft am 04.08.2026 gegen das echte contentConverter-Modell). Das schuetzt
-    die Fluessigkeit des Textes, birgt aber ein Risiko, das Platzhalter nicht
-    haetten: schreibt das Modell den Ersatznamen verkuerzt oder gebeugt («Hoi
-    Senad»), findet die Ruecksetzung ihn nicht -- und im Entwurf an einen echten
-    Kunden steht ein fremder, voellig plausibler Name.
-
-    Geprueft wird deshalb der ganze Ersatzname und -- nur bei Personen -- jeder
-    Namensteil. Bei Firmen bleibt es beim ganzen String, weil Bestandteile wie
-    «Partner» oder «Gruppe» sonst Fehlalarme ausloesen.
-    """
-    from ai9 import mapping_store
-
-    keys = mapping_store.get_mapping_keys(session_id) or {}
-    mappings = keys.get("mappings") or {}
-    entity_types = keys.get("entity_types") or {}
-    lowered = (text or "").lower()
-
-    hits: list[str] = []
-    for fake in mappings:
-        fake_str = str(fake).strip()
-        if not fake_str:
-            continue
-        if fake_str.lower() in lowered:
-            hits.append(fake_str)
-            continue
-        if str(entity_types.get(fake) or "").upper() != "PERSON":
-            continue
-        for part in re.findall(r"[^\W\d_]{4,}", fake_str, re.UNICODE):
-            if part.lower() in lowered:
-                hits.append(part)
-                break
-    return hits
+    return await anon_politik.bilde_zurueck(text, session_id)
 
 
 async def _write_draft_locally(prompt: str) -> str | None:
@@ -4606,8 +4567,9 @@ async def _write_draft_locally(prompt: str) -> str | None:
     return _job_created_draft_id
 
 
-# Entitaeten analog zur Finanzanalyse-Pipeline (contentConverter-Konvention).
-_CLOUD_ANON_ENTITIES = ["PERSON", "ORG", "LOCATION", "EMAIL", "PHONE", "IBAN"]
+# Entitaeten und Schwelle stehen in app/services/anon_politik.py -- an genau
+# einem Ort, weil dieselbe Liste zuvor an drei Orten abgeschrieben war und an
+# zweien davon veraltet.
 
 
 async def _write_draft_with_cloud_model(
@@ -4654,18 +4616,15 @@ async def _write_draft_with_cloud_model(
         logger.warning("Cloud-Entwurf: leere Antwort von %s", model)
         return None
 
-    try:
-        text = await _deanonymize_from_cloud(text, session_id)
-    except Exception:  # noqa: BLE001 - lieber kein Entwurf als ein maskierter
-        logger.exception("Cloud-Entwurf: De-Anonymisierung fehlgeschlagen -- verworfen")
-        return None
-
-    residual = _residual_pseudonyms(text, session_id)
-    if residual:
+    text, rueckstaende = await _deanonymize_from_cloud(text, session_id)
+    if rueckstaende:
+        # Hier wird nicht gewarnt, sondern neu geschrieben: Der Entwurf geht an
+        # einen echten Kunden, und ein fremder Name darin ist nicht zu erklaeren.
+        # Ein lokaler Lauf kostet Sekunden -- das ist der guenstigere Fehler.
         logger.warning(
-            "Cloud-Entwurf: Tarnnamen nach Ruecksetzung noch im Text (%s) -- "
+            "Cloud-Entwurf: Ersatznamen nach der Ruecksetzung noch im Text (%s) -- "
             "lokaler Schreib-Pass statt Entwurf mit fremdem Namen",
-            residual[:5],
+            rueckstaende[:5],
         )
         return await _write_draft_locally(prompt)
 
@@ -4791,8 +4750,47 @@ def _local_override_request(
     return overrides
 
 
-async def _process_job(agent, job_id, job_type: str, prompt: str, meta: dict) -> None:
-    """Verarbeitet einen einzelnen AgentJob via Hermes AIAgent."""
+_RUECKSTAND_HINWEIS = (
+    "\n\n---\n\n"
+    "> **Achtung -- erfundene Namen im Text.**\n"
+    "> Dieser Text entstand mit einem Cloud-Modell und wurde dafuer maskiert. "
+    "Beim Zurueckbilden blieben folgende Ersatzwerte stehen: {namen}.\n"
+    "> Sie sehen echt aus und sind es nicht. Bitte pruefen, bevor der Text "
+    "weiterverwendet wird.\n"
+)
+
+
+async def _entmaskiere_cloud_antwort(job_id, content: str, session_id: str) -> str:
+    """Bildet die Cloud-Antwort zurueck und macht Rueckstaende sichtbar.
+
+    Anders als beim E-Mail-Entwurf wird hier **gewarnt statt verworfen**. Der
+    Unterschied liegt im Adressaten: Ein Entwurf geht an einen Kunden, ein
+    Job-Ergebnis (Protokoll, Analyse, Briefing) bleibt im Haus und wird gelesen,
+    bevor damit etwas geschieht. Ein Protokoll neu erzeugen zu lassen kostet
+    Minuten; ein Hinweis darauf, wo hinzusehen ist, kostet nichts.
+
+    Bleibt die Rueckbildung ganz aus, wird der **maskierte** Text mit Warnblock
+    abgelegt. Ihn stillschweigend auszugeben waere der schlimmste Fall: ein
+    Protokoll voller plausibler fremder Namen, das niemand anzweifelt.
+    """
+    klartext, rueckstaende = await _deanonymize_from_cloud(content, session_id)
+    if rueckstaende:
+        logger.warning("Job %s: Ersatzwerte nach der Rueckbildung: %s", job_id, rueckstaende[:5])
+        return klartext + _RUECKSTAND_HINWEIS.format(namen=", ".join(rueckstaende[:10]))
+    return klartext
+
+
+async def _process_job(
+    agent, job_id, job_type: str, prompt: str, meta: dict, *, anon_session: str | None = None
+) -> None:
+    """Verarbeitet einen einzelnen AgentJob via Hermes AIAgent.
+
+    ``anon_session`` ist gesetzt, wenn der Prompt fuer ein Cloud-Modell maskiert
+    wurde. Dann wird die Antwort zurueckgebildet, **bevor** irgendeine
+    Nachverarbeitung sie zu sehen bekommt: Ab dort wird geschrieben -- in die
+    Meeting-Tabelle, in Task-Titel, in Episoden -- und ein Ersatzname, der bis
+    dahin durchrutscht, steht danach in der Datenbank und sieht echt aus.
+    """
     global _job_trace, _job_created_draft_id, _job_moved_message_id
     logger.info("Starte Job %s (type=%s)", job_id, job_type)
 
@@ -4849,6 +4847,8 @@ async def _process_job(agent, job_id, job_type: str, prompt: str, meta: dict) ->
         content = await asyncio.to_thread(
             _run_agent_sync, agent, prompt, disable_thinking, overrides
         )
+        if anon_session:
+            content = await _entmaskiere_cloud_antwort(job_id, content, anon_session)
         # Echte Draft-ID aus dem Tool-Ergebnis (ground truth) an das Post-Processing
         # weiterreichen -- die vom LLM gemeldete ID wird bewusst ignoriert.
         captured_draft_id = _job_created_draft_id
@@ -5193,6 +5193,56 @@ async def _resweep_unclassified_triages(limit: int = 20) -> int:
     return requeued
 
 
+async def _schleuse_nach_draussen(agent, prompt: str, meta: dict, job_id):
+    """Entscheidet, ob ein Job in die Cloud darf -- und zu welchen Bedingungen.
+
+    Liefert ``(agent, prompt, anon_session)``.
+
+    Der Prompt traegt den vollen Kontext des Auftrags: bei einem Meeting das
+    ganze Transkript, bei einer Finanzfrage die Kreditorenliste. Bis zum
+    24.08.2026 ging er unmaskiert hinaus, sobald ``llm_override`` auf ein
+    Cloud-Modell zeigte. Der Schalter hiess «anderes Modell» und bedeutete
+    zugleich «Klartext ausser Haus», ohne dass das irgendwo stand.
+
+    Die Barriere sitzt **hier** und nicht je Job-Typ. Das ist die eigentliche
+    Lehre aus dem Vorfall: Der Entwurfspfad hatte seine Maskierung, weil dort
+    jemand daran gedacht hat. Das Meeting-Protokoll hatte keine, weil dort
+    niemand daran gedacht hat -- und der naechste Job-Typ haette wieder keine
+    gehabt. Eine Regel, die bei jeder Erweiterung mitgedacht werden muss, ist
+    keine Regel, sondern eine Gewohnheit.
+
+    **Fail-closed:** Scheitert die Maskierung oder meldet sie Restbestaende,
+    laeuft der Job lokal weiter. Ein langsameres Modell ist der guenstigere
+    Fehler; einmal versandte Daten kommen nicht zurueck.
+    """
+    override_model = (meta.get("llm_override") or "").strip()
+    if not override_model or _is_local_model(override_model):
+        return agent, prompt, None
+
+    try:
+        cloud_agent = await asyncio.to_thread(_build_cloud_job_agent, override_model)
+    except Exception:
+        logger.exception(
+            "Cloud-Override-Agent (%s) fehlgeschlagen -- lokaler Fallback", override_model
+        )
+        return agent, prompt, None
+
+    try:
+        maskiert, session_id = await _anonymize_for_cloud(prompt)
+    except Exception as exc:  # noqa: BLE001 - fail-closed
+        logger.warning(
+            "Job %s: Maskierung fuer die Cloud fehlgeschlagen (%s) -- laeuft lokal",
+            job_id, exc,
+        )
+        return agent, prompt, None
+
+    logger.info(
+        "Job %s: Cloud-LLM-Override -> %s (maskiert, Default-Deny-Toolset)",
+        job_id, override_model,
+    )
+    return cloud_agent, maskiert, session_id
+
+
 # ── Worker-Loop ──────────────────────────────────────────
 
 async def _worker_loop() -> None:
@@ -5278,24 +5328,18 @@ async def _worker_loop() -> None:
                     job_agent = await _init_triage_agent() or agent
                 # Cloud-LLM-Override: eigener ephemerer Agent (Default-Deny) via
                 # LiteLLM-Proxy; lokale Overrides laufen via request_overrides.
-                override_model = (meta.get("llm_override") or "").strip()
-                if override_model and not _is_local_model(override_model):
-                    try:
-                        job_agent = await asyncio.to_thread(
-                            _build_cloud_job_agent, override_model
-                        )
-                        logger.info(
-                            "Job %s: Cloud-LLM-Override -> %s (Default-Deny-Toolset)",
-                            job.id, override_model,
-                        )
-                    except Exception:
-                        logger.exception(
-                            "Cloud-Override-Agent (%s) fehlgeschlagen -- lokaler Fallback",
-                            override_model,
-                        )
-                        job_agent = agent
+                job_agent, prompt, anon_session = await _schleuse_nach_draussen(
+                    agent, prompt, meta, job.id
+                )
 
-                await _process_job(job_agent, job.id, job.job_type or "generic", prompt, meta)
+                await _process_job(
+                    job_agent,
+                    job.id,
+                    job.job_type or "generic",
+                    prompt,
+                    meta,
+                    anon_session=anon_session,
+                )
             else:
                 await asyncio.sleep(POLL_INTERVAL)
 

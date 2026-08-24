@@ -11,6 +11,8 @@ interface AnonymizeResult {
   session_id: string;
   anonymized_text: string;
   diff: DiffPair[];
+  /** Bruchstücke echter Werte, die im maskierten Text stehen geblieben sind. */
+  restbestaende: string[];
 }
 
 interface AnonymizePanelProps {
@@ -20,13 +22,23 @@ interface AnonymizePanelProps {
   initialText?: string;
 }
 
-const ENTITY_OPTIONS = [
-  { id: 'PERSON', label: 'Personen', defaultOn: true },
-  { id: 'ORG', label: 'Organisationen', defaultOn: true },
-  { id: 'LOCATION', label: 'Orte', defaultOn: true },
-  { id: 'EMAIL', label: 'E-Mail-Adressen', defaultOn: true },
-  { id: 'PHONE', label: 'Telefonnummern', defaultOn: true },
-  { id: 'IBAN', label: 'IBAN-Nummern', defaultOn: true },
+/** Was maskiert wird — zur Anzeige, nicht zur Auswahl.
+ *
+ * Bis zum 24.08.2026 konnte man hier Typen abwählen, und die Voreinstellung
+ * liess AHV- und UID-Nummern ganz aus. Wer diesen Weg nutzt, kopiert den Text
+ * anschliessend in ein fremdes Sprachmodell; eine Wahl, die dabei still
+ * schiefgehen kann, ist keine Freiheit, sondern eine Falle. Massgeblich ist
+ * `app/services/anon_politik.py` im Backend, das hier ist die Beschriftung dazu.
+ */
+const ENTITAETEN = [
+  { id: 'PERSON', label: 'Personen' },
+  { id: 'ORG', label: 'Organisationen' },
+  { id: 'LOCATION', label: 'Orte' },
+  { id: 'EMAIL', label: 'E-Mail-Adressen' },
+  { id: 'PHONE', label: 'Telefonnummern' },
+  { id: 'IBAN', label: 'IBAN' },
+  { id: 'AHV', label: 'AHV-Nummern' },
+  { id: 'UID', label: 'UID / MWST' },
 ];
 
 const ENTITY_COLORS: Record<string, string> = {
@@ -36,26 +48,45 @@ const ENTITY_COLORS: Record<string, string> = {
   EMAIL: 'bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300',
   PHONE: 'bg-rose-100 text-rose-800 dark:bg-rose-900/40 dark:text-rose-300',
   IBAN: 'bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-300',
+  AHV: 'bg-orange-100 text-orange-800 dark:bg-orange-900/40 dark:text-orange-300',
+  UID: 'bg-teal-100 text-teal-800 dark:bg-teal-900/40 dark:text-teal-300',
   UNKNOWN: 'bg-gray-100 text-gray-800 dark:bg-gray-900/40 dark:text-gray-300',
 };
 
+/** Hebt gefundene Bruchstücke im Text hervor.
+ *
+ * Eine Liste unter dem Text sagt *dass* etwas übersehen wurde, nicht *wo*.
+ * Bei einer Jahresrechnung über zwei Bildschirmseiten ist das der Unterschied
+ * zwischen einer Warnung, die man beachtet, und einer, die man wegklickt.
+ */
+function markiere(text: string, nadeln: string[]) {
+  if (nadeln.length === 0) return text;
+  const muster = new RegExp(
+    `(${nadeln.map(n => n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})`,
+    'g',
+  );
+  return text.split(muster).map((teil, i) =>
+    nadeln.includes(teil) ? (
+      <mark
+        key={i}
+        className="rounded bg-red-200 px-0.5 font-semibold text-red-900 dark:bg-red-800/60 dark:text-red-100"
+      >
+        {teil}
+      </mark>
+    ) : (
+      teil
+    ),
+  );
+}
+
 export function AnonymizePanel({ isOpen, onClose, onInsertText, initialText = '' }: AnonymizePanelProps) {
   const [inputText, setInputText] = useState(initialText);
-  const [entities, setEntities] = useState<string[]>(
-    ENTITY_OPTIONS.filter(e => e.defaultOn).map(e => e.id)
-  );
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<AnonymizeResult | null>(null);
   const [uploadFile, setUploadFile] = useState<File | null>(null);
   const [copied, setCopied] = useState(false);
   const [downloading, setDownloading] = useState(false);
-
-  const toggleEntity = (id: string) => {
-    setEntities(prev =>
-      prev.includes(id) ? prev.filter(e => e !== id) : [...prev, id]
-    );
-  };
 
   const handleAnonymize = useCallback(async () => {
     setLoading(true);
@@ -68,7 +99,6 @@ export function AnonymizePanel({ isOpen, onClose, onInsertText, initialText = ''
       if (uploadFile) {
         const formData = new FormData();
         formData.append('file', uploadFile);
-        formData.append('entities', entities.join(','));
         data = await api.upload<AnonymizeResult>('/api/content/anonymize/file', formData);
       } else {
         if (!inputText.trim()) {
@@ -78,7 +108,6 @@ export function AnonymizePanel({ isOpen, onClose, onInsertText, initialText = ''
         }
         data = await api.post<AnonymizeResult>('/api/content/anonymize', {
           text: inputText,
-          entities,
         });
       }
 
@@ -88,7 +117,7 @@ export function AnonymizePanel({ isOpen, onClose, onInsertText, initialText = ''
     } finally {
       setLoading(false);
     }
-  }, [inputText, entities, uploadFile]);
+  }, [inputText, uploadFile]);
 
   const handleCopy = async () => {
     if (!result) return;
@@ -189,36 +218,22 @@ export function AnonymizePanel({ isOpen, onClose, onInsertText, initialText = ''
                 )}
               </div>
 
-              {/* Entity-Auswahl */}
+              {/* Was maskiert wird — Anzeige, keine Auswahl (siehe ENTITAETEN) */}
               <div>
-                <label className="mb-2 block text-sm font-medium text-gray-700 dark:text-gray-300">Zu anonymisieren</label>
+                <label className="mb-2 block text-sm font-medium text-gray-700 dark:text-gray-300">
+                  Wird maskiert
+                </label>
                 <div className="flex flex-wrap gap-2">
-                  {ENTITY_OPTIONS.map(opt => {
-                    const active = entities.includes(opt.id);
-                    return (
-                      <button
-                        key={opt.id}
-                        onClick={() => toggleEntity(opt.id)}
-                        className={`inline-flex cursor-pointer items-center gap-1.5 rounded-full px-3 py-1 text-xs font-medium transition-colors ${
-                          active
-                            ? ENTITY_COLORS[opt.id]
-                            : 'bg-gray-100 text-gray-400 opacity-60 dark:bg-gray-700 dark:text-gray-500'
-                        }`}
-                        title={active ? `${opt.label} nicht anonymisieren` : `${opt.label} anonymisieren`}
-                      >
-                        {opt.label}
-                        {active ? (
-                          <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M6 18 18 6M6 6l12 12" /></svg>
-                        ) : (
-                          <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" /></svg>
-                        )}
-                      </button>
-                    );
-                  })}
+                  {ENTITAETEN.map(opt => (
+                    <span
+                      key={opt.id}
+                      className={`inline-flex items-center rounded-full px-3 py-1 text-xs font-medium ${ENTITY_COLORS[opt.id]}`}
+                    >
+                      {opt.label}
+                    </span>
+                  ))}
                 </div>
               </div>
-
-            
             </div>
           ) : (
             /* Ergebnis-Ansicht */
@@ -260,9 +275,33 @@ export function AnonymizePanel({ isOpen, onClose, onInsertText, initialText = ''
                 </div>
               )}
 
-              {result.diff.length === 0 && (
+              {result.diff.length === 0 && result.restbestaende.length === 0 && (
                 <div className="rounded-lg border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-800 dark:border-green-800 dark:bg-green-900/20 dark:text-green-300">
                   Keine personenbezogenen Daten erkannt. Der Text ist bereits sicher.
+                </div>
+              )}
+
+              {/* Restbestände: das Wichtigste steht oben, nicht als Fussnote.
+                  Wer den Text kopiert, ohne hier hinzusehen, gibt echte Daten
+                  weiter — und merkt es nie. */}
+              {result.restbestaende.length > 0 && (
+                <div className="rounded-lg border border-red-300 bg-red-50 px-4 py-3 dark:border-red-800 dark:bg-red-900/20">
+                  <h4 className="mb-1 flex items-center gap-1.5 text-sm font-semibold text-red-800 dark:text-red-300">
+                    <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.007v.008H12v-.008Z" /></svg>
+                    Echte Werte im Text geblieben ({result.restbestaende.length})
+                  </h4>
+                  <p className="mb-2 text-xs text-red-700 dark:text-red-300">
+                    Diese Bruchstücke wurden nicht ersetzt — meist Teilnennungen, etwa ein
+                    Nachname ohne Vornamen. Sie sind unten rot markiert. Bitte vor dem
+                    Kopieren im Text von Hand korrigieren.
+                  </p>
+                  <div className="flex flex-wrap gap-1.5">
+                    {result.restbestaende.map((r, i) => (
+                      <span key={i} className="rounded bg-red-200 px-1.5 py-0.5 font-mono text-xs text-red-900 dark:bg-red-800/60 dark:text-red-100">
+                        {r}
+                      </span>
+                    ))}
+                  </div>
                 </div>
               )}
 
@@ -270,7 +309,9 @@ export function AnonymizePanel({ isOpen, onClose, onInsertText, initialText = ''
               <div>
                 <h4 className="mb-2 text-sm font-medium text-gray-700 dark:text-gray-300">Anonymisierter Text</h4>
                 <div className="max-h-64 overflow-y-auto rounded-lg border border-gray-200 bg-gray-50 p-3 font-mono text-sm text-gray-900 dark:border-gray-600 dark:bg-gray-700/50 dark:text-gray-100">
-                  <pre className="whitespace-pre-wrap">{result.anonymized_text}</pre>
+                  <pre className="whitespace-pre-wrap">
+                    {markiere(result.anonymized_text, result.restbestaende)}
+                  </pre>
                 </div>
               </div>
 
