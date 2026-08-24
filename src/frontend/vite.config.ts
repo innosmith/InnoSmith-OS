@@ -13,9 +13,9 @@ export default defineConfig({
       includeAssets: ['favicon.png'],
       devOptions: { enabled: false },
       manifest: {
-        name: 'TaskPilot Cockpit',
-        short_name: 'TaskPilot',
-        description: 'AI-agentic Task Management Cockpit',
+        name: 'InnoSmith OS',
+        short_name: 'InnoSmith OS',
+        description: 'Arbeitszentrale für Mensch und Agenten',
         theme_color: '#4F46E5',
         background_color: '#030712',
         display: 'standalone',

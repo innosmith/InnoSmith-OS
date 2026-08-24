@@ -13,7 +13,7 @@ Das verbindliche Pflichtenheft liegt in [docs/pflichtenheft-taskpilot.md](docs/p
 - **Backend:** FastAPI (Python 3.12) + SQLAlchemy 2.0 (async) + asyncpg + Pydantic v2
 - **Datenbank:** PostgreSQL mit pgvector, Port 5435
 - **Agent-Runtime:** Hermes (`hermes-agent`, Nous Research), in-process Worker (`hermes_worker.py`), Config: `~/.hermes/config.yaml` (zur Laufzeit generiert via `app/services/hermes_config.py`)
-- **LLM-Gateway:** LiteLLM-Proxy, Default-Modell: Qwen 3.8 27B bf16 (Ollama lokal)
+- **LLM-Gateway:** LiteLLM-Proxy, Default-Modell: Qwen 3.8 27B q8_0 (Ollama lokal)
 - **MCP-Server:** `src/mcp-taskpilot/` (DB), `src/mcp-graph/` (Microsoft Graph), `src/mcp-pipedrive/` (Pipedrive CRM), `src/mcp-bexio/` (Buchhaltung), `src/mcp-toggl/` (Zeiterfassung), `src/mcp-signa/` (Strategic Intelligence), `src/mcp-invoiceinsight/` (Kreditoren-Analyse), `src/mcp-scripts/` (Script-Orchestrierung), `src/mcp-sandbox/` (Code-Sandbox)
 - **Graph API:** `src/email-graph/graph_client.py` (Shared Library)
 - **Pipedrive API:** `src/pipedrive/pipedrive_client.py` (Shared Library)
@@ -55,6 +55,43 @@ docker/              → Dockerfiles, Compose (Dev + Prod), build.sh
 | `/project/:id` | ProjectBoardPage | Kanban-Board pro Projekt |
 | `/inbox` | InboxPage | E-Mail-Posteingang (Graph API) |
 | `/einstellungen` | SettingsPage | Profil, Triage-Config, Hintergrund (Intelligenz ist ins Agenten-Cockpit umgezogen) |
+
+## Mail-Zustand im Postfach — eine Wahrheit, zwei Projektionen
+
+Die Wahrheit steht in der Datenbank: ein Task mit `email_message_id` und
+`is_completed = false`. Im Postfach wird sie zweifach abgebildet, und beide
+Abbildungen setzt bzw. löst **ausschliesslich** `app/services/email_projection.py`:
+
+| Abbildung | Bedeutung | gesetzt von | aufgelöst von |
+|----|----|----|----|
+| Outlook-Fahne | «dazu gibt es offene Arbeit» — reist mit der Mail, in Outlook auf jedem Gerät durchsuchbar | `mark_open_work()` | `release_open_work()` |
+| Ordner `Posteingang/Tasks` | Ordnung — hält den Posteingang leer (Name via Owner-Setting `tasks_mail_folder`) | `mark_open_work()` | `release_open_work()` |
+
+**Zwei Aufrufstellen, nicht mehr:** `confirm_review_task` bzw. `POST /api/tasks` mit
+`email_message_id` (Menschenentscheidung) setzen, der `is_completed`-Übergang im
+PATCH-Pfad löst auf. Franst das aus, bedeutet «Fahne gesetzt» zwei Dinge und das
+Merkmal wird wertlos. Darum steht `Tasks` auch **nicht** in der Allowlist von
+`move_email_to_folder`, und es gibt kein `set_flag`-Tool für den Agenten.
+
+**Die tragende Regel:** *TaskPilot verschiebt nur vorwärts, Richtung Archiv.
+Rückwärts nur der Mensch.* Der Abgleich (`reconcile_tasks_folder`, alle ~15 Min. im
+`triage_loop`) archiviert nur Mails, deren Task erledigt ist; alles andere bleibt
+liegen und wird höchstens protokolliert. Möglich wird der Verzicht aufs Zurückholen
+durch die Fahne: rutscht eine Mail aus dem Ordner, bleibt sie als offen erkennbar.
+
+**Identität vs. Handle:** `email_message_id` ist ein Graph-Handle und ändert sich bei
+jedem Move; `internet_message_id` (RFC 5322) ist die Identität. Jeder eigene Move
+schreibt das neue Handle über `sync_message_id` zurück. Reparaturstelle für veraltete
+Handles ist ausschliesslich `resolve_message_id`.
+
+**Zwei Nachläufe** ergänzen den Posteingang-Pfad (beide seltener Takt, best-effort):
+
+- `_archive_rescan_cycle` — Mails, die vor der Sichtung archiviert wurden, werden
+  **nur gelesen** und als Vorschlag (`needs_review`) angeboten. Der Marker
+  `readonly_mail` im Job-Metadata sperrt in `_finalize_email_state` jede
+  Outlook-Änderung.
+- `_flag_pickup_cycle` — manuell gesetzte Fahnen werden **deterministisch** (ohne LLM)
+  zu Aufgaben. Nur ab Aktivierungszeitpunkt, Archiv ausgenommen, kein Altbestand.
 
 ## Agent-Job-Lifecycle
 

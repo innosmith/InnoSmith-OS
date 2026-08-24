@@ -873,6 +873,11 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             }, indent=2, ensure_ascii=False))]
 
         elif name == "move_email_to_folder":
+            # 'Tasks' gehoert hier bewusst NICHT dazu, und eine Fahne kann der Agent
+            # gar nicht setzen (kein Tool dafuer). Beide Merkmale sind Projektionen
+            # des Task-Zustands und gehoeren allein dem Backend
+            # (app/services/email_projection.py). Setzt sie ein Agent nach Ermessen,
+            # bedeutet 'Fahne gesetzt' zwei Dinge und das Merkmal wird wertlos.
             allowed = {"System", "Newsletter", "Junk", "Kalender"}
             folder = arguments["folder_name"]
             if folder not in allowed:

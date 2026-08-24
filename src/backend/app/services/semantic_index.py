@@ -390,6 +390,34 @@ async def _existing_modified(
     return row.scalar()
 
 
+async def _relink_email_handle(
+    db: AsyncSession, identity: str, message_id: str, user_id
+) -> bool:
+    """Schreibt ein neues Graph-Handle auf bereits indexierte Chunks um.
+
+    Gibt ``True`` zurueck, wenn die Mail unter ihrer Identitaet schon im Index lag --
+    dann ist nichts neu einzubetten, es genuegt der neue Schluessel. Das ist die
+    guenstige Variante: Umschreiben kostet eine Anweisung, Neu-Einbetten kostet einen
+    Ollama-Aufruf pro Chunk.
+    """
+    updated = await db.execute(
+        text(
+            "UPDATE semantic_documents SET source_id = :new_sid "
+            "WHERE user_id = :uid AND source_type = 'email' "
+            "AND metadata->>'internetMessageId' = :identity "
+            "AND source_id <> :new_sid"
+        ),
+        {"uid": user_id, "new_sid": message_id, "identity": identity},
+    )
+    if updated.rowcount:
+        logger.info(
+            "Index: Handle umgeschrieben (%s Chunks, identity=%s)",
+            updated.rowcount, identity[:60],
+        )
+        return True
+    return False
+
+
 async def _index_email(db: AsyncSession, client, message_id: str, user_id) -> int:
     """Indexiert eine einzelne E-Mail (voller Body). Skip, wenn bereits vorhanden.
 
@@ -398,12 +426,23 @@ async def _index_email(db: AsyncSession, client, message_id: str, user_id) -> in
     eine Entwurfs-ID auf einem anderen Weg hereinkommt. Grund: ein indexierter
     Entwurf wird von der Recherche als belegte Quelle geliefert, obwohl er nie
     gesendet wurde -- der Agent liest damit seine eigenen Formulierungen als Fakten.
+
+    Der Inhalt einer E-Mail ist unveraenderlich, ihre Graph-ID ist es nicht: sie
+    wechselt bei jedem Ordnerwechsel. Ein Dedupe allein ueber ``source_id`` erkannte
+    eine verschobene Mail darum nicht wieder und legte einen zweiten Chunk-Satz an --
+    dieselbe Mail erschien mehrfach in der Suche. Seit dem 24.08.2026 wandern Mails
+    haeufiger (Posteingang -> Tasks -> Archiv), womit der Fehler von einem Randfall
+    zum Regelfall geworden waere. Der Handle-Check bleibt als schnelle Vorpruefung;
+    dahinter entscheidet die RFC-5322-Identitaet.
     """
     existing = await _existing_modified(db, "email", message_id, user_id)
     if existing is not None:
-        return 0  # E-Mails sind unveränderlich -> bereits indexiert
+        return 0  # gleiches Handle schon indexiert
     msg = await client.get_email(message_id)
     if msg.get("isDraft"):
+        return 0
+    identity = msg.get("internetMessageId")
+    if identity and await _relink_email_handle(db, identity, message_id, user_id):
         return 0
     subject = msg.get("subject") or "(kein Betreff)"
     raw = (msg.get("body") or {}).get("content") or msg.get("bodyPreview") or ""
@@ -420,6 +459,9 @@ async def _index_email(db: AsyncSession, client, message_id: str, user_id) -> in
         "from": sender,
         "receivedDateTime": msg.get("receivedDateTime"),
         "conversationId": msg.get("conversationId"),
+        # Identitaet mitschreiben, damit ``_relink_email_handle`` die Mail nach einem
+        # Move wiedererkennt, ohne sie neu einbetten zu muessen.
+        "internetMessageId": identity,
     }
     return await _upsert_chunks(
         db,

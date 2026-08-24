@@ -59,6 +59,7 @@ interface FolderInfo {
   id: string;
   display_name: string;
   total_count: number;
+  unread_count: number;
 }
 
 interface EmailListResponse {
@@ -274,6 +275,14 @@ export function InboxPage() {
       .then(s => setBgUrl(s.inbox_background_url))
       .catch(() => {});
   }, [fetchEmails]);
+
+  // Systemordner erscheinen als feste Einträge, benutzerdefinierte kommen aus Graph.
+  // Der Tasks-Ordner braucht damit keine Sonderbehandlung -- er taucht auf, weil er
+  // im Postfach existiert, und verschwindet, wenn Anthony ihn ausblendet.
+  const visibleFolders = folders.filter(
+    f => !['Inbox', 'Drafts', 'Sent Items', 'Deleted Items', 'Junk Email', ...hiddenFolders]
+      .includes(f.display_name)
+  );
 
   useEffect(() => {
     fetchTriage();
@@ -584,9 +593,10 @@ export function InboxPage() {
           { id: 'inbox', name: 'Posteingang' },
           { id: 'drafts', name: 'Entwürfe' },
           { id: 'sentitems', name: 'Gesendet' },
-          ...folders
-            .filter(f => !['Inbox', 'Drafts', 'Sent Items', 'Deleted Items', 'Junk Email', ...hiddenFolders].includes(f.display_name))
-            .map(f => ({ id: f.id, name: f.display_name })),
+          ...visibleFolders.map(f => ({
+            id: f.id,
+            name: f.total_count > 0 ? `${f.display_name} (${f.total_count})` : f.display_name,
+          })),
         ].map(folder => (
           <button
             key={folder.id}
@@ -646,12 +656,15 @@ export function InboxPage() {
           </h3>
           <div className="space-y-1">
             {[
-              { id: 'inbox', name: 'Posteingang' },
-              { id: 'drafts', name: 'Entwürfe' },
-              { id: 'sentitems', name: 'Gesendet' },
-              ...(folders
-                .filter((f) => !['Inbox', 'Drafts', 'Sent Items', 'Deleted Items', 'Junk Email', ...hiddenFolders].includes(f.display_name))
-                .map((f) => ({ id: f.id, name: f.display_name }))),
+              { id: 'inbox', name: 'Posteingang', count: 0, unread: 0 },
+              { id: 'drafts', name: 'Entwürfe', count: 0, unread: 0 },
+              { id: 'sentitems', name: 'Gesendet', count: 0, unread: 0 },
+              ...visibleFolders.map((f) => ({
+                id: f.id,
+                name: f.display_name,
+                count: f.total_count,
+                unread: f.unread_count,
+              })),
             ].map((folder) => (
               <button
                 key={folder.id}
@@ -666,7 +679,23 @@ export function InboxPage() {
                       : 'text-gray-600 hover:bg-gray-100/80 dark:text-gray-400 dark:hover:bg-gray-800/60'
                 }`}
               >
-                {folder.name}
+                <span className="min-w-0 flex-1 truncate text-left">{folder.name}</span>
+                {folder.count > 0 && (
+                  <span
+                    title={folder.unread > 0 ? `${folder.count} Mails, davon ${folder.unread} ungelesen` : `${folder.count} Mails`}
+                    className={`shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-semibold tabular-nums ${
+                      folder.unread > 0
+                        ? hasBg
+                          ? 'bg-white/25 text-white'
+                          : 'bg-indigo-500 text-white'
+                        : hasBg
+                          ? 'bg-white/10 text-white/60'
+                          : 'bg-gray-200 text-gray-600 dark:bg-gray-700 dark:text-gray-300'
+                    }`}
+                  >
+                    {folder.count}
+                  </span>
+                )}
               </button>
             ))}
           </div>

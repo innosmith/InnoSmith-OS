@@ -494,7 +494,7 @@ async def _sec_planning_check(owner: User, start: date, end: date) -> str:
     if unlinked:
         lines.append(
             "- Ohne Board-Verknüpfung (Planungs-Check nicht möglich — in der "
-            "Kapazitätsplanung «TaskPilot-Board» setzen): " + ", ".join(unlinked)
+            "Kapazitätsplanung «InnoSmith OS-Board» setzen): " + ", ".join(unlinked)
         )
     return "\n".join(lines)
 

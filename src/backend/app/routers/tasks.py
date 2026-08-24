@@ -10,7 +10,7 @@ import bleach
 from croniter import croniter
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, status
 from pydantic import BaseModel
-from sqlalchemy import and_, func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy import delete as sa_delete
 from sqlalchemy import update as sa_update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -21,7 +21,9 @@ from app.auth.deps import MEMBER_RESTRICTED_TASK_FIELDS, check_project_access, g
 from app.routers.uploads import _scan_with_clamav
 from app.database import get_db
 from app.models import ActivityLog, AgentJob, Attachment, BoardColumn, BoardMember, ChatTriage, ChecklistItem, EmailTriage, FollowupSuggestion, MeetingTranscript, PipelineColumn, Project, Task, User
+from app.services.email_identity import fetch_mail_facts
 from app.services.email_links import outlook_deeplink
+from app.services.email_projection import mark_open_work, release_open_work
 from app.services.notification import notify_mentions, notify_task_assigned
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "..", "email-graph"))
@@ -58,11 +60,11 @@ async def _resolve_task_origin(
         return False, None, None
     job_id: uuid.UUID | None = None
     sender: str | None = None
-    if task.email_message_id:
+    if task.email_message_id or task.internet_message_id:
         try:
             row = await db.execute(
                 select(EmailTriage.agent_job_id, EmailTriage.from_address)
-                .where(EmailTriage.message_id == task.email_message_id)
+                .where(_triage_matches(task))
                 .limit(1)
             )
             r = row.first()
@@ -71,6 +73,22 @@ async def _resolve_task_origin(
         except Exception:  # noqa: BLE001 - best-effort
             logger.warning("Task-Origin konnte nicht aufgelöst werden")
     return True, job_id, sender
+
+
+def _triage_matches(task: Task):
+    """Bedingung, die den Triage-Record zu einem Task findet.
+
+    Bevorzugt die Identität (``internet_message_id``), weil das Graph-Handle bei
+    jedem Ordnerwechsel wechselt und der Join darüber still leer lief -- der Task
+    verlor dann Betreff und Absender seiner Quell-Mail. Das Handle bleibt als
+    Rückfall für Altdaten ohne Identität.
+    """
+    conditions = []
+    if task.internet_message_id:
+        conditions.append(EmailTriage.internet_message_id == task.internet_message_id)
+    if task.email_message_id:
+        conditions.append(EmailTriage.message_id == task.email_message_id)
+    return or_(*conditions) if len(conditions) > 1 else conditions[0]
 
 
 def _get_email_client() -> GraphClient | None:
@@ -83,22 +101,6 @@ def _get_email_client() -> GraphClient | None:
         client_secret=s.graph_client_secret,
         user_email=s.graph_user_email,
     ))
-
-
-async def _archive_source_email(email_message_id: str | None) -> None:
-    """Archiviert die Quell-Mail in Outlook (best-effort)."""
-    if not email_message_id:
-        return
-    client = _get_email_client()
-    if not client:
-        return
-    try:
-        await client.archive_email(email_message_id)
-        logger.info("Quell-Mail %s archiviert", email_message_id)
-    except Exception:
-        logger.warning("Quell-Mail %s konnte nicht archiviert werden", email_message_id)
-    finally:
-        await client.close()
 
 
 async def _resolve_assignee_user(assignee: str, db: AsyncSession) -> AssigneeUser | None:
@@ -230,6 +232,21 @@ async def create_task(
         await _validate_assignee(body.assignee, project_id, db)
 
     task = Task(**body.model_dump())
+    # Identität und Konversation serverseitig nachziehen, nicht vom Client verlangen:
+    # Wer aus der Inbox einen Task erstellt, kennt nur das Graph-Handle. Ohne die
+    # internetMessageId wäre die Mail nach dem ersten Ordnerwechsel nicht mehr
+    # auffindbar, und ohne conversation_id fehlt dem Task das Thread-Panel. Dass der
+    # Aufrufer beides mitliefert, wäre eine Bitte -- hier ist es eine Garantie.
+    if task.email_message_id and not task.internet_message_id:
+        client = _get_email_client()
+        if client:
+            try:
+                facts = await fetch_mail_facts(client, task.email_message_id)
+                task.internet_message_id = facts.internet_message_id
+                if not task.email_conversation_id:
+                    task.email_conversation_id = facts.conversation_id
+            finally:
+                await client.close()
     db.add(task)
     await db.flush()
 
@@ -254,6 +271,12 @@ async def create_task(
     if task.due_date and task.assignee != "agent":
         from app.services.pipeline_promoter import auto_place_task
         await auto_place_task(db, task)
+
+    # Ein Task aus einer Mail, den ein Mensch anlegt, ist sofort offene Arbeit --
+    # keine Sichtung nötig, die Entscheidung ist schon gefallen. Vorschläge des
+    # Agenten (needs_review) durchlaufen stattdessen confirm_review_task.
+    if task.email_message_id and not task.needs_review and not task.is_completed:
+        await mark_open_work(db, task)
 
     result = await db.execute(
         select(Task)
@@ -613,7 +636,8 @@ async def get_task(
         task_out.source_email_web_link = outlook_deeplink(task.email_message_id)
         et_result = await db.execute(
             select(EmailTriage.subject, EmailTriage.from_name, EmailTriage.from_address)
-            .where(EmailTriage.message_id == task.email_message_id)
+            .where(_triage_matches(task))
+            .limit(1)
         )
         et_row = et_result.one_or_none()
         if et_row:
@@ -648,6 +672,7 @@ async def update_task(
 
     old_assignee = task.assignee
     old_project_id = task.project_id
+    was_completed = task.is_completed
     update_data = body.model_dump(exclude_unset=True)
 
     if "assignee" in update_data:
@@ -712,6 +737,12 @@ async def update_task(
     if "due_date" in update_data and task.assignee != "agent" and task.pipeline_column_id:
         from app.services.pipeline_promoter import auto_place_task
         await auto_place_task(db, task)
+
+    # Erst beim Erledigen wird die Mail archiviert und die Fahne entfernt. Der
+    # Uebergang, nicht der Zustand: ein zweiter PATCH auf einen schon erledigten Task
+    # darf keinen weiteren Graph-Aufruf ausloesen.
+    if task.is_completed and not was_completed:
+        await release_open_work(db, task)
 
     # Implizites Lernsignal: agent-stammender Task in anderes Projekt verschoben.
     if "project_id" in update_data and task.project_id != old_project_id:
@@ -892,7 +923,10 @@ async def confirm_review_task(
             if first_col:
                 task.board_column_id = first_col.id
 
-    await _archive_source_email(task.email_message_id)
+    # Nicht mehr archivieren, sondern als offene Arbeit kennzeichnen: Fahne setzen
+    # und in den Tasks-Ordner verschieben. Archiv heisst «erledigt» -- eine Mail mit
+    # offenem Task dort abzulegen war der Grund, warum Aufgaben verloren gingen.
+    await mark_open_work(db, task)
 
     return task
 
@@ -936,11 +970,11 @@ async def dismiss_review_task(
     # Verwerfen-Entscheid auf der Quell-Triage festschreiben: Ohne diesen Marker
     # erzeugte die nächste praktisch identische E-Mail (z. B. n8n-Fehler-Burst)
     # denselben Vorschlag erneut, weil der Dedupe nur OFFENE Tasks prüft.
-    if task.email_message_id:
+    if task.email_message_id or task.internet_message_id:
         try:
             triage_row = (
                 await db.execute(
-                    select(EmailTriage).where(EmailTriage.message_id == task.email_message_id)
+                    select(EmailTriage).where(_triage_matches(task)).limit(1)
                 )
             ).scalar_one_or_none()
             if triage_row is not None:

@@ -7,6 +7,10 @@
     {
       "name": "AI9 (Core)",
       "path": "../AI9"
+    },
+    {
+      "name": "InnoHealth",
+      "path": "../InnoHealth"
     }
   ],
   "settings": {

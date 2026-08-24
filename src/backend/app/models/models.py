@@ -109,7 +109,11 @@ class Task(Base):
     recurrence_max_instances: Mapped[int | None] = mapped_column(Integer)
     recurrence_last_spawn: Mapped[date | None] = mapped_column(Date)
     template_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("tasks.id"))
+    # ``email_message_id`` ist ein Graph-Handle und aendert sich bei jedem
+    # Ordnerwechsel; ``internet_message_id`` (RFC 5322) ist die Identitaet und
+    # ueberlebt Moves. Wer die Mail wiederfinden muss, nimmt die Identitaet.
     email_message_id: Mapped[str | None] = mapped_column(Text)
+    internet_message_id: Mapped[str | None] = mapped_column(Text)
     email_conversation_id: Mapped[str | None] = mapped_column(Text)
     calendar_event_id: Mapped[str | None] = mapped_column(Text)
     calendar_duration_minutes: Mapped[int | None] = mapped_column(Integer)
@@ -226,6 +230,7 @@ class EmailTriage(Base):
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
     user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
     message_id: Mapped[str] = mapped_column(Text, nullable=False)
+    internet_message_id: Mapped[str | None] = mapped_column(Text)
     subject: Mapped[str | None] = mapped_column(Text)
     from_address: Mapped[str | None] = mapped_column(Text)
     from_name: Mapped[str | None] = mapped_column(Text)

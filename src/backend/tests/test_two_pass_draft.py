@@ -65,7 +65,12 @@ def _postprocess_patches(job=None, two_pass=True):
     return [
         patch.object(hw, "async_session", _session_factory(job)),
         patch.object(hw, "_create_email_task", new=AsyncMock(return_value=None)),
-        patch.object(hw, "_finalize_email_state", new=AsyncMock(return_value=None)),
+        # Siehe test_triage_postprocess: die Finalisierung gibt jetzt (Grund, Handle)
+        # zurueck, damit der Aufrufer das Handle nach einem Move persistieren kann.
+        patch.object(
+            hw, "_finalize_email_state",
+            new=AsyncMock(return_value=hw.FinalizeResult(None, "M1")),
+        ),
         patch.object(hw, "record_episode", new=AsyncMock()),
         patch.object(hw, "notify_agent_awaiting_approval", new=AsyncMock()),
         patch.object(hw, "_snapshot_agent_draft", new=AsyncMock(return_value=None)),

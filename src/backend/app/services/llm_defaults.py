@@ -4,7 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.principal import get_owner_settings
 
-FALLBACK_LOCAL_MODEL = "ollama/qwen3.8:27b-bf16"
+FALLBACK_LOCAL_MODEL = "ollama/qwen3.8:27b"
 
 
 async def get_default_local_model(db: AsyncSession) -> str:

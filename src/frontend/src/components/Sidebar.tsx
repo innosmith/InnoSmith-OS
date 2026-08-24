@@ -166,12 +166,12 @@ export function Sidebar({
               {appLogoUrl ? (
                 <img src={appLogoUrl} alt="" className="h-8 w-8 shrink-0 rounded-lg object-cover" />
               ) : (
-                <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-indigo-600 text-sm font-bold text-white">
-                  T
+                <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-indigo-600 text-[10px] font-bold text-white">
+                  OS
                 </div>
               )}
               <span className="flex-1 text-lg font-semibold text-gray-900 dark:text-white">
-                TaskPilot
+                InnoSmith OS
               </span>
               <button
                 onClick={onToggleCollapse}

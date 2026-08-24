@@ -1,0 +1,13 @@
+# Ziel: /etc/logrotate.d/gx10-telemetrie
+
+/var/log/gx10-telemetrie.log {
+    daily
+    rotate 14
+    compress
+    delaycompress
+    missingok
+    notifempty
+    # copytruncate hält den Sampler ununterbrochen am Schreiben -- ein
+    # Neustart des Dienstes zur Rotation würde eine Messlücke erzeugen.
+    copytruncate
+}

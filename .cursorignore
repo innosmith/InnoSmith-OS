@@ -11,3 +11,10 @@ build/
 .cache/
 src/frontend/node_modules/.vite/
 .nanobot/
+
+!.env.example
+
+.pytest_cache/
+src/backend/vendor/
+
+docs/received/

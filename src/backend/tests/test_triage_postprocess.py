@@ -56,7 +56,14 @@ def _patches(job=None):
     return [
         patch.object(hw, "async_session", _session_factory(job)),
         patch.object(hw, "_create_email_task", new=AsyncMock(return_value=None)),
-        patch.object(hw, "_finalize_email_state", new=AsyncMock(return_value=None)),
+        # ``_finalize_email_state`` gibt seit dem 24.08.2026 zusaetzlich das nach
+        # allen Schritten gueltige Handle zurueck; der Aufrufer schreibt es in die
+        # Datenbank. Das Double muss die Form mitbringen, sonst prueft der Test eine
+        # Schnittstelle, die es nicht gibt.
+        patch.object(
+            hw, "_finalize_email_state",
+            new=AsyncMock(return_value=hw.FinalizeResult(None, "M1")),
+        ),
         patch.object(hw, "record_episode", new=AsyncMock()),
         patch.object(hw, "notify_agent_awaiting_approval", new=AsyncMock()),
         patch.object(hw, "_snapshot_agent_draft", new=AsyncMock(return_value=None)),

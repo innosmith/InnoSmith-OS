@@ -79,17 +79,6 @@ interface CalendarEvent {
   categories: string[];
 }
 
-interface FlaggedEmail {
-  id: string;
-  subject: string | null;
-  from_address: string | null;
-  from_name: string | null;
-  received_at: string | null;
-  body_preview: string | null;
-  importance: string | null;
-  has_attachments: boolean;
-}
-
 interface CockpitSettings {
   cockpit_background_url: string | null;
   cockpit_calendar_exclude_categories: string | null;
@@ -150,7 +139,6 @@ export function CockpitPage() {
   const [pendingReview, setPendingReview] = useState<PendingReviewTask[]>([]);
   const [_triageStats, setTriageStats] = useState<TriageStats | null>(null);
   const [calendarEvents, setCalendarEvents] = useState<CalendarEvent[]>([]);
-  const [flaggedEmails, setFlaggedEmails] = useState<FlaggedEmail[]>([]);
 
   const [pipedriveActivities, setPipedriveActivities] = useState<PipedriveActivitySummary[]>([]);
 
@@ -223,13 +211,12 @@ export function CockpitPage() {
       const excludeCats = settingsData.cockpit_calendar_exclude_categories ?? 'Transfer, Privat';
       const hidePrivate = settingsData.cockpit_calendar_hide_private ?? true;
 
-      const [jobsData, reviewData, triageData, pipelineData, calData, flaggedData] = await Promise.all([
+      const [jobsData, reviewData, triageData, pipelineData, calData] = await Promise.all([
         api.get<AgentJob[]>('/api/agent-jobs'),
         api.get<PendingReviewTask[]>('/api/tasks/pending-review').catch(() => [] as PendingReviewTask[]),
         api.get<TriageStats>('/api/triage/stats').catch(() => null),
         api.get<PipelineData>('/api/pipeline').catch(() => null),
         api.get<CalendarEvent[]>(`/api/calendar/events?start=${encodeURIComponent(startOfDay)}&end=${encodeURIComponent(endOfDay)}&exclude_categories=${encodeURIComponent(excludeCats)}&hide_private=${hidePrivate}&hide_free=true`).catch(() => [] as CalendarEvent[]),
-        api.get<FlaggedEmail[]>('/api/emails/flagged?top=10').catch(() => [] as FlaggedEmail[]),
       ]);
 
       const awaitingApproval = jobsData.filter(j => j.status === 'awaiting_approval');
@@ -250,7 +237,6 @@ export function CockpitPage() {
         const endTime = new Date(ev.end);
         return endTime > now;
       }));
-      setFlaggedEmails(flaggedData);
 
       if (pipelineData?.columns) {
         const sorted = [...pipelineData.columns].sort((a, b) => a.position - b.position);
@@ -694,22 +680,22 @@ export function CockpitPage() {
               )}
             </section>
 
-            {/* E-Mails & CRM (zurück in der Agenda/Heute-Zeile).
+            {/* CRM (zurück in der Agenda/Heute-Zeile).
                 flex-1 füllt die Resthöhe, min-h-0 lässt die Liste darin scrollen
-                statt die Kachel über die Zeilenhöhe hinaus zu dehnen. */}
+                statt die Kachel über die Zeilenhöhe hinaus zu dehnen.
+
+                Markierte E-Mails standen hier bis 24.08.2026 ebenfalls. Sie sind
+                entfallen: eine Fahne heisst «dazu gibt es offene Arbeit», und die
+                sichtbare Form davon ist der Ordner Posteingang/Tasks plus das Board
+                -- eine dritte Liste derselben Sache wäre nur ein weiterer Ort zum
+                Vergessen. Ohne Pipedrive-Aktivitäten entfällt die Kachel ganz. */}
+            {pipedriveActivities.length > 0 && (
             <section className={`flex min-h-0 flex-1 flex-col rounded-xl border p-4 ${cardClass}`}>
               <div className="mb-3 flex items-center justify-between">
                 <h2 className={`text-sm font-semibold uppercase tracking-wider ${textSecondary}`}>
-                  E-Mails & CRM
+                  CRM
                 </h2>
                 <div className={`flex items-center gap-1.5 text-xs font-medium`}>
-                  <button
-                    onClick={() => navigate('/inbox')}
-                    className={`${hasBg ? 'text-white/60 hover:text-white' : 'text-indigo-600 hover:text-indigo-800 dark:text-indigo-400'}`}
-                  >
-                    Posteingang
-                  </button>
-                  <span className={`${hasBg ? 'text-white/30' : 'text-gray-300 dark:text-gray-600'}`}>·</span>
                   <a
                     href="https://innosmith.pipedrive.com"
                     target="_blank"
@@ -721,30 +707,6 @@ export function CockpitPage() {
                 </div>
               </div>
               <div className="min-h-[5rem] flex-1 space-y-1.5 overflow-y-auto">
-                {flaggedEmails.map(email => (
-                  <div
-                    key={email.id}
-                    className={`flex items-start gap-2.5 rounded-lg p-2.5 cursor-pointer transition-colors ${
-                      hasBg ? 'hover:bg-white/10' : 'hover:bg-gray-50 dark:hover:bg-gray-800'
-                    }`}
-                    onClick={() => navigate('/inbox')}
-                  >
-                    <FlagIcon className={`mt-0.5 h-4 w-4 shrink-0 ${hasBg ? 'text-orange-300' : 'text-orange-500 dark:text-orange-400'}`} />
-                    <div className="min-w-0 flex-1">
-                      <div className={`text-sm font-medium truncate ${textPrimary}`}>{email.subject || 'Kein Betreff'}</div>
-                      <div className={`text-[11px] ${textMuted}`}>
-                        {email.from_name || email.from_address}
-                        {email.received_at && ` · ${relativeDate(email.received_at)}`}
-                      </div>
-                    </div>
-                    {email.has_attachments && (
-                      <PaperclipIcon className={`mt-0.5 h-3.5 w-3.5 shrink-0 ${textMuted}`} />
-                    )}
-                  </div>
-                ))}
-                {pipedriveActivities.length > 0 && flaggedEmails.length > 0 && (
-                  <div className={`my-2 border-t ${hasBg ? 'border-white/10' : 'border-gray-100 dark:border-gray-800'}`} />
-                )}
                 {pipedriveActivities.map(act => {
                   const isOverdue = act.due_date && new Date(act.due_date) < new Date();
                   return (
@@ -769,13 +731,9 @@ export function CockpitPage() {
                     </a>
                   );
                 })}
-                {flaggedEmails.length === 0 && pipedriveActivities.length === 0 && (
-                  <div className={`flex h-full min-h-20 items-center justify-center rounded-lg text-sm ${textMuted}`}>
-                    Keine E-Mails oder Aufgaben
-                  </div>
-                )}
               </div>
             </section>
+            )}
             </div>
           </div>
 
@@ -1223,12 +1181,12 @@ export function CockpitPage() {
           )}
 
           {/* Alles erledigt */}
-          {pendingDecisions === 0 && focusTasks.length === 0 && flaggedEmails.length === 0 && calendarEvents.length === 0 && (
+          {pendingDecisions === 0 && focusTasks.length === 0 && calendarEvents.length === 0 && (
             <div className={`flex flex-col items-center justify-center rounded-xl border p-12 ${cardClass}`}>
               <CheckCircleIcon className={`h-12 w-12 mb-3 ${hasBg ? 'text-white/40' : 'text-emerald-300 dark:text-emerald-700'}`} />
               <p className={`text-lg font-medium ${textPrimary}`}>Alles erledigt</p>
               <p className={`mt-1 text-sm ${textSecondary}`}>
-                Keine offenen Entscheidungen, Termine oder markierten E-Mails.
+                Keine offenen Entscheidungen, Termine oder Fokus-Aufgaben.
               </p>
             </div>
           )}
@@ -1554,22 +1512,6 @@ function ClockIcon({ className }: { className?: string }) {
   return (
     <svg className={className} fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
       <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" />
-    </svg>
-  );
-}
-
-function FlagIcon({ className }: { className?: string }) {
-  return (
-    <svg className={className} fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
-      <path strokeLinecap="round" strokeLinejoin="round" d="M3 3v1.5M3 21v-6m0 0 2.77-.693a9 9 0 0 1 6.208.682l.108.054a9 9 0 0 0 6.086.71l3.114-.732a48.524 48.524 0 0 1-.005-10.499l-3.11.732a9 9 0 0 1-6.085-.711l-.108-.054a9 9 0 0 0-6.208-.682L3 4.5M3 15V4.5" />
-    </svg>
-  );
-}
-
-function PaperclipIcon({ className }: { className?: string }) {
-  return (
-    <svg className={className} fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
-      <path strokeLinecap="round" strokeLinejoin="round" d="m18.375 12.739-7.693 7.693a4.5 4.5 0 0 1-6.364-6.364l10.94-10.94A3 3 0 1 1 19.5 7.372L8.552 18.32m.009-.01-.01.01m5.699-9.941-7.81 7.81a1.5 1.5 0 0 0 2.112 2.13" />
     </svg>
   );
 }

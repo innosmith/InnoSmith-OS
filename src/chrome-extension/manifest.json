@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "name": "TaskPilot LinkedIn Sync",
+  "name": "InnoSmith OS LinkedIn Sync",
   "description": "LinkedIn-Kontakte mit einem Klick in Pipedrive synchronisieren — powered by InnoSmith",
   "version": "1.0.0",
   "permissions": ["activeTab", "storage"],
@@ -25,7 +25,7 @@
   ],
   "action": {
     "default_popup": "src/popup/popup.html",
-    "default_title": "TaskPilot LinkedIn Sync"
+    "default_title": "InnoSmith OS LinkedIn Sync"
   },
   "options_ui": {
     "page": "src/options/options.html",

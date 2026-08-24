@@ -49,11 +49,11 @@ export function LoginPage() {
         <div className="mb-8 text-center">
           <img
             src="/favicon.png"
-            alt="TaskPilot"
+            alt="InnoSmith OS"
             className="mx-auto mb-4 h-14 w-14 rounded-2xl drop-shadow-lg"
           />
           <h1 className="text-2xl font-bold text-gray-900 dark:text-white">
-            TaskPilot
+            InnoSmith OS
           </h1>
           <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
             {requiresMfa ? 'Authentifizierungscode eingeben' : 'Melde dich an, um fortzufahren'}

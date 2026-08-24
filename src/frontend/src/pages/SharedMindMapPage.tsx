@@ -109,7 +109,7 @@ function SharedMindMapInner() {
             <div className="mx-auto w-14 h-14 rounded-2xl bg-indigo-100 dark:bg-indigo-950 flex items-center justify-center mb-4">
               <BrainCircuit size={28} className="text-indigo-600" />
             </div>
-            <h1 className="text-xl font-bold text-gray-900 dark:text-white">TaskPilot Mind-Map</h1>
+            <h1 className="text-xl font-bold text-gray-900 dark:text-white">InnoSmith OS Mind-Map</h1>
             <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">Passwort eingeben, um fortzufahren</p>
           </div>
 

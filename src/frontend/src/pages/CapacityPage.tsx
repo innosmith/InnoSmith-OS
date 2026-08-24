@@ -658,7 +658,7 @@ function SortableProjectRow({
           </span>
         )}
         {!project.project_id && (
-          <span title="Kein TaskPilot-Board verknüpft — Planungs-Check im Briefing nicht möglich" className="text-amber-400 dark:text-amber-500">
+          <span title="Kein InnoSmith OS-Board verknüpft — Planungs-Check im Briefing nicht möglich" className="text-amber-400 dark:text-amber-500">
             <Link2Off className="h-3 w-3" />
           </span>
         )}
@@ -1461,9 +1461,9 @@ function ProjectDialog({
   const colors = ['#3B82F6', '#10B981', '#F59E0B', '#EF4444', '#8B5CF6', '#EC4899', '#06B6D4', '#6366F1', '#84CC16', '#F97316'];
 
   const sourceBadge = (src: string) => {
-    if (src === 'both') return <span className="rounded bg-emerald-100 px-1 py-0.5 text-[9px] font-medium text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400">Toggl + TaskPilot</span>;
+    if (src === 'both') return <span className="rounded bg-emerald-100 px-1 py-0.5 text-[9px] font-medium text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400">Toggl + InnoSmith OS</span>;
     if (src === 'toggl') return <span className="rounded bg-purple-100 px-1 py-0.5 text-[9px] font-medium text-purple-700 dark:bg-purple-900/30 dark:text-purple-400">Toggl</span>;
-    return <span className="rounded bg-blue-100 px-1 py-0.5 text-[9px] font-medium text-blue-700 dark:bg-blue-900/30 dark:text-blue-400">TaskPilot</span>;
+    return <span className="rounded bg-blue-100 px-1 py-0.5 text-[9px] font-medium text-blue-700 dark:bg-blue-900/30 dark:text-blue-400">InnoSmith OS</span>;
   };
 
   const handleSelectAvailable = (p: AvailableProjectOption) => {
@@ -1538,7 +1538,7 @@ function ProjectDialog({
             <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Bestehendes Projekt übernehmen</label>
             <input
               type="text"
-              placeholder="Projekt suchen (Toggl + TaskPilot)..."
+              placeholder="Projekt suchen (Toggl + InnoSmith OS)..."
               value={filter}
               onChange={e => setFilter(e.target.value)}
               className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm dark:border-gray-600 dark:bg-gray-800 dark:text-gray-200"
@@ -1722,7 +1722,7 @@ function ProjectDialog({
           )}
 
           <div>
-            <label className="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-300">TaskPilot-Board</label>
+            <label className="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-300">InnoSmith OS-Board</label>
             <select
               value={projectId ?? ''}
               onChange={e => setProjectId(e.target.value || null)}

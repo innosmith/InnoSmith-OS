@@ -166,6 +166,10 @@ class TriageSettings(BaseModel):
     triage_interval_seconds: int | None = None
     triage_enabled: bool | None = None
     inbox_hidden_folders: list[str] | None = None
+    # Ordner unter «Posteingang», in dem Mails mit offener Aufgabe liegen. Der Ordner
+    # gehört dem Menschen -- also benennt er ihn. Leerer Wert heisst «nur Fahne,
+    # keinen Ordner verwenden» und ist ein zulässiger Betriebsmodus.
+    tasks_mail_folder: str | None = None
 
 
 class TriageSettingsResponse(TriageSettings):
@@ -173,7 +177,10 @@ class TriageSettingsResponse(TriageSettings):
     app_env: str = "prod"
 
 
-TRIAGE_FIELDS = ["triage_prompt", "triage_interval_seconds", "triage_enabled", "inbox_hidden_folders"]
+TRIAGE_FIELDS = [
+    "triage_prompt", "triage_interval_seconds", "triage_enabled",
+    "inbox_hidden_folders", "tasks_mail_folder",
+]
 
 
 @router.get("/triage", response_model=TriageSettingsResponse)

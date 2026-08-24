@@ -398,7 +398,8 @@ class GraphClient:
             # muss per OData-Cast selektiert werden -- ein direktes Select auf der
             # ``message``-Collection liefert sonst 400 (Property nicht auf message).
             # Kommt im Ergebnis trotzdem als Schluessel ``meetingMessageType`` zurueck.
-            "$select": "id,subject,from,toRecipients,ccRecipients,receivedDateTime,isRead,"
+            "$select": "id,internetMessageId,subject,from,toRecipients,ccRecipients,"
+                       "receivedDateTime,isRead,"
                        "bodyPreview,categories,inferenceClassification,hasAttachments,"
                        "importance,conversationId,flag,"
                        "microsoft.graph.eventMessage/meetingMessageType",
@@ -411,10 +412,39 @@ class GraphClient:
         """Einzelne E-Mail mit Body laden."""
         return await self._get(
             f"{self._user_path}/messages/{message_id}",
-            {"$select": "id,subject,from,toRecipients,ccRecipients,receivedDateTime,"
+            {"$select": "id,internetMessageId,subject,from,toRecipients,ccRecipients,"
+                        "receivedDateTime,"
                         "body,bodyPreview,categories,inferenceClassification,"
                         "hasAttachments,importance,isRead,isDraft,conversationId"},
         )
+
+    async def find_by_internet_message_id(self, internet_message_id: str) -> dict | None:
+        """Aktuelle Graph-Nachricht zu einer ``internetMessageId`` suchen.
+
+        Die Graph-``id`` einer Nachricht aendert sich bei **jedem** Ordnerwechsel --
+        sie ist ein Handle, keine Identitaet. ``internetMessageId`` (RFC 5322) bleibt
+        dagegen ueber Moves hinweg gleich und ist deshalb der Schluessel, mit dem eine
+        Mail nach einem Move wiedergefunden wird, egal in welchem Ordner sie liegt.
+
+        Der Wert enthaelt spitze Klammern und ein ``@`` und muss darum URL-kodiert
+        werden, sonst antwortet Graph mit 400. Mehrere Treffer sind moeglich (dieselbe
+        Mail in mehreren Ordnern); Entwuerfe werden verworfen, vom Rest wird der erste
+        genommen. Gibt ``None`` zurueck, wenn nichts gefunden wurde -- Unsicherheit ist
+        ein zulaessiges Ergebnis und besser als ein geratenes Handle.
+        """
+        if not internet_message_id:
+            return None
+        escaped = internet_message_id.replace("'", "''")
+        data = await self._get(
+            f"{self._user_path}/messages",
+            {
+                "$filter": f"internetMessageId eq '{escaped}'",
+                "$top": "10",
+                "$select": "id,internetMessageId,subject,conversationId,parentFolderId,isDraft",
+            },
+        )
+        msgs = self._drop_drafts(data.get("value", []))
+        return msgs[0] if msgs else None
 
     async def get_message_headers(self, message_id: str) -> list[dict]:
         """Internet-Header einer E-Mail als ``[{name, value}, ...]``.
@@ -616,6 +646,46 @@ class GraphClient:
             {"categories": categories},
         )
 
+    async def well_known_folder_id(self, name: str) -> str | None:
+        """Die echte Ordner-ID eines Well-Known-Ordners (``archive``, ``inbox``, …).
+
+        Nachrichten tragen in ``parentFolderId`` immer die echte ID, nie den
+        Well-Known-Namen. Wer wissen will, ob eine Mail im Archiv liegt, braucht
+        deshalb diese Auflösung. ``None``, wenn der Ordner fehlt oder Graph nicht
+        antwortet -- der Aufrufer entscheidet dann, was das bedeutet.
+        """
+        try:
+            data = await self._get(
+                f"{self._user_path}/mailFolders/{name}", {"$select": "id"}
+            )
+        except Exception as exc:  # noqa: BLE001 - Ordner evtl. nicht vorhanden
+            logger.info("Well-Known-Ordner '%s' nicht aufloesbar: %s", name, exc)
+            return None
+        return (data or {}).get("id")
+
+    async def set_flag(self, message_id: str, flagged: bool) -> dict:
+        """Outlook-Fahne setzen oder entfernen, ohne den Gelesen-Status zu verlieren.
+
+        Jeder PATCH auf eine Nachricht kippt ``isRead`` in Exchange auf ``true`` --
+        dieselbe Falle wie bei ``set_categories``. Eine ungelesene Mail waere nach
+        dem Setzen der Fahne also stillschweigend gelesen und damit aus dem Blick.
+        Deshalb: vorherigen Zustand lesen, patchen, Zustand wiederherstellen.
+
+        Nur das Wiederherstellen wird nachgeholt, nie das Umgekehrte: war die Mail
+        gelesen, bleibt sie gelesen.
+        """
+        before = await self._get(
+            f"{self._user_path}/messages/{message_id}", {"$select": "id,isRead"}
+        )
+        was_read = bool((before or {}).get("isRead"))
+        result = await self._patch(
+            f"{self._user_path}/messages/{message_id}",
+            {"flag": {"flagStatus": "flagged" if flagged else "notFlagged"}},
+        )
+        if not was_read:
+            await self.mark_as_unread(message_id)
+        return result
+
     async def get_or_create_folder(
         self, display_name: str, parent_folder: str = "inbox"
     ) -> dict:
@@ -807,6 +877,15 @@ class GraphClient:
         )
         return self._drop_drafts(data.get("value", []))
 
+    # ``internetMessageId`` traegt die Identitaet (ueberlebt Moves), ``parentFolderId``
+    # sagt, wo die Mail liegt -- im Archiv ist eine Fahne kein Auftrag, sondern ein
+    # Ueberrest. Beides braucht das Aufgreifen manuell gesetzter Fahnen.
+    _FLAGGED_SELECT = (
+        "id,internetMessageId,subject,from,toRecipients,ccRecipients,receivedDateTime,"
+        "bodyPreview,flag,categories,importance,hasAttachments,conversationId,"
+        "parentFolderId,inferenceClassification,isDraft"
+    )
+
     async def list_flagged_emails(self, top: int = 20, since_days: int = 180) -> list[dict]:
         """Markierte E-Mails (Outlook-Fahne gesetzt) laden, nur aus den letzten since_days Tagen."""
         import datetime as _dt
@@ -817,8 +896,7 @@ class GraphClient:
                 {
                     "$filter": f"flag/flagStatus eq 'flagged' and receivedDateTime ge {since}",
                     "$top": str(top),
-                    "$select": "id,subject,from,receivedDateTime,bodyPreview,"
-                               "flag,categories,importance,hasAttachments,conversationId",
+                    "$select": self._FLAGGED_SELECT,
                 },
             )
         except Exception:
@@ -827,11 +905,10 @@ class GraphClient:
                 {
                     "$filter": "flag/flagStatus eq 'flagged'",
                     "$top": "100",
-                    "$select": "id,subject,from,receivedDateTime,bodyPreview,"
-                               "flag,categories,importance,hasAttachments,conversationId",
+                    "$select": self._FLAGGED_SELECT,
                 },
             )
-        msgs = data.get("value", [])
+        msgs = self._drop_drafts(data.get("value", []))
         msgs.sort(key=lambda m: m.get("receivedDateTime", ""), reverse=True)
         return msgs[:top]
 

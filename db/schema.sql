@@ -82,7 +82,8 @@ CREATE TABLE tasks (
     recurrence_max_instances INT,
     recurrence_last_spawn DATE,  -- zuletzt gespawnte Okkurrenz (Scheduler-Merker)
     template_id     UUID REFERENCES tasks(id),
-    email_message_id TEXT,
+    email_message_id TEXT,          -- Graph-Handle, aendert sich bei jedem Ordnerwechsel
+    internet_message_id TEXT,       -- RFC-5322-Identitaet, ueberlebt jeden Move
     email_conversation_id TEXT,
     calendar_event_id TEXT,
     calendar_duration_minutes INT,
@@ -186,7 +187,8 @@ CREATE TABLE board_members (
 CREATE TABLE email_triage (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id         UUID REFERENCES users(id) ON DELETE CASCADE,
-    message_id      TEXT NOT NULL,
+    message_id      TEXT NOT NULL,  -- Graph-Handle, aendert sich bei jedem Ordnerwechsel
+    internet_message_id TEXT,       -- RFC-5322-Identitaet, ueberlebt jeden Move
     subject         TEXT,
     from_address    TEXT,
     from_name       TEXT,
@@ -240,7 +242,9 @@ CREATE INDEX idx_board_members_project ON board_members(project_id);
 CREATE INDEX idx_board_members_user ON board_members(user_id);
 CREATE INDEX idx_email_triage_status ON email_triage(status);
 CREATE INDEX idx_email_triage_message_id ON email_triage(message_id);
+CREATE INDEX idx_email_triage_internet_message_id ON email_triage(internet_message_id);
 CREATE INDEX idx_tasks_email_message ON tasks(email_message_id);
+CREATE INDEX idx_tasks_internet_message_id ON tasks(internet_message_id);
 CREATE INDEX idx_sender_profiles_email ON sender_profiles(email);
 
 -- NOTIFY-Trigger fuer Real-Time-Updates

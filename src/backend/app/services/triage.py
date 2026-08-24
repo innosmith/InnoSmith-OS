@@ -20,13 +20,16 @@ import sys
 from datetime import datetime, timedelta, timezone
 
 from dateutil.parser import isoparse
-from sqlalchemy import select, update
+from sqlalchemy import cast, func, select, update
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.database import async_session
-from app.models import AgentJob, ChatTriage, EmailTriage
-from app.core.principal import get_owner, system_principal_id
+from app.models import AgentJob, ChatTriage, EmailTriage, Task, User
+from app.core.principal import get_owner, get_principal_settings, system_principal_id
+from app.services.email_identity import backfill_identities, sync_message_id
+from app.services.email_projection import reconcile_tasks_folder
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "..", "email-graph"))
 from graph_client import GraphClient, GraphConfig  # noqa: E402
@@ -45,6 +48,9 @@ MAX_NEW_EMAILS_PER_CYCLE = 200  # Rest wird im naechsten Zyklus nachgezogen.
 # (verhindert, dass nach laengerer Downtime der ganze Posteingang neu triagiert
 # wird). Grosszuegig genug, um kurze Ausfaelle zu ueberbruecken.
 COLD_START_CUTOFF_HOURS = 72
+# Wie viele Alt-Tasks pro Zyklus ihre internetMessageId nachgeholt bekommen. Klein
+# gehalten, weil jede Zeile eine Graph-Anfrage kostet und der Bestand endlich ist.
+BACKFILL_BATCH = 25
 
 
 async def _is_triage_enabled_in_db() -> bool:
@@ -73,12 +79,28 @@ def _get_graph_client() -> GraphClient | None:
 
 
 async def _get_known_message_ids(db: AsyncSession) -> set[str]:
+    """Alle bereits gesichteten Mails -- als Handles UND als Identitaeten.
+
+    Ein Move aendert das Graph-Handle. Ein Set aus reinen Handles kann eine Mail
+    darum nach dem Verschieben nicht wiedererkennen und liesse sie ein zweites Mal
+    durch die Triage laufen (samt zweitem ``email_triage``-Record, den die
+    UNIQUE-Bedingung nicht verhindert, weil sie am Handle haengt). Die
+    ``internetMessageId`` steht im selben Set, weil der Aufrufer beide Werte
+    dagegen prueft -- Handle und Identitaet kollidieren nie, sie sehen zu
+    unterschiedlich aus.
+    """
     result = await db.execute(
-        select(EmailTriage.message_id).where(
+        select(EmailTriage.message_id, EmailTriage.internet_message_id).where(
             EmailTriage.user_id == await system_principal_id(db)
         )
     )
-    return {row[0] for row in result.all()}
+    known: set[str] = set()
+    for handle, identity in result.all():
+        if handle:
+            known.add(handle)
+        if identity:
+            known.add(identity)
+    return known
 
 
 async def _fetch_new_inbox_emails(
@@ -115,7 +137,9 @@ async def _fetch_new_inbox_emails(
                         continue
                 except (ValueError, TypeError):
                     pass
-            if mid in known_ids:
+            # Gegen Handle UND Identitaet pruefen: nach einem Move traegt dieselbe
+            # Mail ein neues Handle, die Identitaet dagegen nicht.
+            if mid in known_ids or (msg.get("internetMessageId") or "") in known_ids:
                 continue
             new_emails.append(msg)
         # Aeltere-als-Cutoff erreicht oder letzte (Teil-)Seite -> fertig.
@@ -187,6 +211,7 @@ async def _handle_meeting_response(db: AsyncSession, client: GraphClient, email_
     triage_record = EmailTriage(
         user_id=await system_principal_id(db),
         message_id=message_id,
+        internet_message_id=email_data.get("internetMessageId"),
         subject=subject,
         from_address=from_addr,
         from_name=from_info.get("name"),
@@ -218,7 +243,12 @@ async def _handle_meeting_response(db: AsyncSession, client: GraphClient, email_
     except Exception:  # noqa: BLE001 - Finalisierung darf den Zyklus nie stoppen
         logger.warning("Meeting-Response: Kategorie setzen fehlgeschlagen (mid=%s)", message_id[:30])
     try:
-        await client.move_to_folder(message_id, "Kalender")
+        moved = await client.move_to_folder(message_id, "Kalender")
+        await sync_message_id(
+            db,
+            internet_message_id=triage_record.internet_message_id,
+            new_message_id=(moved or {}).get("id"),
+        )
     except Exception:  # noqa: BLE001
         logger.info("Meeting-Response: Move nach 'Kalender' nicht moeglich (Ordner fehlt?)")
 
@@ -292,6 +322,7 @@ async def _execute_deterministic_action(
     triage_record = EmailTriage(
         user_id=await system_principal_id(db),
         message_id=message_id,
+        internet_message_id=email_data.get("internetMessageId"),
         subject=subject,
         from_address=from_addr,
         from_name=from_info.get("name"),
@@ -321,6 +352,7 @@ async def _execute_deterministic_action(
 
             meta = {
                 "email_message_id": message_id,
+                "internet_message_id": email_data.get("internetMessageId", ""),
                 "subject": subject,
                 "from_address": from_addr,
                 "from_name": from_info.get("name", ""),
@@ -347,7 +379,12 @@ async def _execute_deterministic_action(
             logger.warning("Det. Regel: Kategorie '%s' setzen fehlgeschlagen (mid=%s)", category, message_id[:30])
     if folder:
         try:
-            await client.move_to_folder(message_id, folder)
+            moved = await client.move_to_folder(message_id, folder)
+            await sync_message_id(
+                db,
+                internet_message_id=triage_record.internet_message_id,
+                new_message_id=(moved or {}).get("id"),
+            )
         except Exception:  # noqa: BLE001
             logger.info("Det. Regel: Move nach '%s' nicht möglich (Ordner fehlt?)", folder)
 
@@ -433,6 +470,7 @@ async def _create_triage_job(db: AsyncSession, email_data: dict) -> None:
     triage_record = EmailTriage(
         user_id=principal,
         message_id=email_data["id"],
+        internet_message_id=email_data.get("internetMessageId"),
         subject=subject,
         from_address=from_addr,
         from_name=from_info.get("name"),
@@ -455,6 +493,7 @@ async def _create_triage_job(db: AsyncSession, email_data: dict) -> None:
         llm_model=local_model,
         metadata_json={
             "email_message_id": email_data["id"],
+            "internet_message_id": email_data.get("internetMessageId", ""),
             "subject": subject,
             "from_address": from_addr,
             "from_name": from_info.get("name", ""),
@@ -464,6 +503,8 @@ async def _create_triage_job(db: AsyncSession, email_data: dict) -> None:
             "conversation_id": email_data.get("conversationId", ""),
             "recipient_type": recipient_type,
             "auto_submitted": email_data.get("autoSubmitted", ""),
+            # Sperrt jede Outlook-Aenderung an dieser Mail (Archiv-Nachlauf).
+            "readonly_mail": bool(email_data.get("readonly_mail")),
         },
     )
     db.add(agent_job)
@@ -501,6 +542,12 @@ async def _triage_cycle() -> int:
                 else:
                     await _create_triage_job(db, email_data)
                 processed += 1
+
+            # Altbestand in kleinen Portionen nachziehen. Haengt am Triage-Zyklus,
+            # weil hier ohnehin ein Graph-Client offen ist und die Drosselung schon
+            # beachtet wird -- ein eigener Scheduler waere ein zweiter Ort fuer
+            # dieselbe Sache.
+            await backfill_identities(db, client, limit=BACKFILL_BATCH)
 
             await db.commit()
 
@@ -703,12 +750,315 @@ async def _reconcile_stuck_processing() -> int:
         return 0
 
 
+ARCHIVE_RESCAN_SINCE_KEY = "archive_rescan_since"
+ARCHIVE_PAGE_SIZE = 50
+MAX_ARCHIVE_PAGES = 6
+
+
+async def _archive_rescan_cycle() -> int:
+    """Sucht im Archiv nach Mails, die die Triage nie gesehen hat -- rein lesend.
+
+    Der eine Fall, den keine Projektion fangen kann: Anthony archiviert unterwegs auf
+    dem Handy, bevor die Triage die Mail überhaupt gesichtet hat. Genau dafür ist
+    dieser Nachlauf da.
+
+    Er **fasst die Mail nicht an**. Was daraus entsteht, ist ein Task-Vorschlag mit
+    ``needs_review`` in «Vorschläge prüfen». Erst wenn Anthony ihn bestätigt, wird die
+    Mail bewegt -- und dann, weil er es entschieden hat. Das ist auch die richtige
+    Fehlerart-Zuordnung: ein überflüssiger Vorschlag ist laut und in zwei Klicks
+    verworfen, ein übersehener Task ist still. Nur die stille Variante ist gefährlich.
+
+    Verwirft er den Vorschlag, verhindert der dann existierende Triage-Record, dass
+    dieselbe Mail je wieder aufgegriffen wird.
+    """
+    client = _get_graph_client()
+    if client is None:
+        return 0
+
+    processed = 0
+    try:
+        async with async_session() as db:
+            cutoff = await _activation_cutoff(
+                db, ARCHIVE_RESCAN_SINCE_KEY, "Archiv-Nachlauf"
+            )
+            if cutoff is None:
+                await db.commit()
+                return 0
+            known_ids = await _get_known_message_ids(db)
+            candidates = await _fetch_untriaged_archive_emails(client, known_ids, cutoff)
+            for email_data in candidates:
+                # Der Marker sperrt jede Outlook-Änderung an dieser Mail. Struktur
+                # statt Anweisung: das Sperren sitzt im einzigen Schreibpfad
+                # (_finalize_email_state), nicht in einer Bitte an den Agenten.
+                email_data["readonly_mail"] = True
+                await _create_triage_job(db, email_data)
+                processed += 1
+            await db.commit()
+    except Exception:  # noqa: BLE001 - darf den Poll-Loop nie stoppen
+        logger.exception("Archiv-Nachlauf fehlgeschlagen")
+    finally:
+        if client:
+            await client.close()
+
+    return processed
+
+
+async def _fetch_untriaged_archive_emails(
+    client: GraphClient, known_ids: set[str], cutoff: datetime
+) -> list[dict]:
+    """Blättert das Archiv nach ``receivedDateTime desc`` bis zum Stichtag durch.
+
+    Gleiche Mechanik wie beim Posteingang, gleiche Deckel. Erkannt wird über die
+    ``internetMessageId``: Das Graph-Handle einer archivierten Mail ist ein anderes
+    als das, unter dem sie im Posteingang triagiert wurde -- ohne die Identität würde
+    hier jede bereits gesichtete Mail als neu gelten und der Nachlauf das Postfach
+    fluten. Das ist der Grund, warum Phase 1 vor Phase 3 kommt.
+    """
+    found: list[dict] = []
+    for page in range(MAX_ARCHIVE_PAGES):
+        data = await client.list_emails(
+            folder="archive", top=ARCHIVE_PAGE_SIZE, skip=page * ARCHIVE_PAGE_SIZE
+        )
+        msgs = data.get("value", [])
+        if not msgs:
+            break
+        reached_old = False
+        for msg in msgs:
+            received = msg.get("receivedDateTime")
+            if received:
+                try:
+                    if isoparse(received) < cutoff:
+                        reached_old = True
+                        continue
+                except (ValueError, TypeError):
+                    pass
+            mid = msg.get("id")
+            identity = msg.get("internetMessageId") or ""
+            if not mid or mid in known_ids or (identity and identity in known_ids):
+                continue
+            if not identity:
+                # Ohne Identität liesse sich diese Mail beim naechsten Lauf nicht
+                # wiedererkennen -- sie wuerde in jedem Zyklus erneut vorgeschlagen.
+                continue
+            found.append(msg)
+        if reached_old or len(msgs) < ARCHIVE_PAGE_SIZE:
+            break
+        if len(found) >= MAX_NEW_EMAILS_PER_CYCLE:
+            logger.info("Archiv-Nachlauf: Mengenlimit erreicht -- Rest im naechsten Lauf")
+            break
+    return found
+
+
+FLAG_PICKUP_SINCE_KEY = "flag_pickup_since"
+FLAG_PICKUP_LIMIT = 25
+
+
+async def _flag_pickup_cycle() -> int:
+    """Greift selbst gesetzte Outlook-Fahnen auf und macht daraus Aufgaben.
+
+    Die Gegenrichtung zu Phase 2: nicht das System markiert, sondern der Mensch.
+    Markieren heisst dann dasselbe wie dort -- *daraus wird eine Aufgabe*. Damit gibt
+    es Quick-Capture vom Handy ohne PWA, und die Outlook-Suche nach markierten Mails
+    wird zu einer verlässlichen Liste der offenen Arbeit mit Mail-Bezug.
+
+    **Deterministisch, kein LLM.** Der Mensch hat entschieden; das ist keine
+    Ermessensfrage. Der Task entsteht darum ohne Sichtungsmarke, und die Fahne
+    **bleibt** gesetzt -- sie ist ab jetzt der Nachweis aus Phase 2 und wird beim
+    Erledigen aufgelöst. Genau dadurch behält «Fahne gesetzt» eine einzige Bedeutung.
+
+    **Kein Altbestand.** Aufgegriffen wird nur, was ab dem Aktivierungszeitpunkt
+    markiert wurde, und Mails im Archiv bleiben aussen vor: dort ist eine Fahne kein
+    Auftrag, sondern ein Überrest. Die alten Fahnen räumt Anthony selbst auf.
+    """
+    from app.services.email_projection import mark_open_work
+
+    client = _get_graph_client()
+    if client is None:
+        return 0
+
+    picked = 0
+    try:
+        async with async_session() as db:
+            cutoff = await _activation_cutoff(db, FLAG_PICKUP_SINCE_KEY, "Fahnen-Aufgriff")
+            if cutoff is None:
+                await db.commit()
+                return 0
+            archive_id = await client.well_known_folder_id("archive")
+            known_ids = await _get_known_message_ids(db)
+
+            mails = await client.list_flagged_emails(top=FLAG_PICKUP_LIMIT, since_days=30)
+            for mail in mails:
+                identity = mail.get("internetMessageId")
+                if not identity or identity in known_ids or mail.get("id") in known_ids:
+                    continue
+                if archive_id and mail.get("parentFolderId") == archive_id:
+                    continue
+                received = _parse_received_at(mail.get("receivedDateTime"))
+                if received is None or received < cutoff:
+                    continue
+
+                task = await _create_task_from_flag(db, mail)
+                if task is None:
+                    continue
+                picked += 1
+                # Ordnung nachziehen: Die Fahne steht schon, es fehlt nur der Move.
+                # Nur fuer den frisch angelegten Task -- hat die Duplikaterkennung
+                # stattdessen einen bestehenden Task zurueckgegeben, gehoert dessen
+                # Mail einer anderen Identitaet und ist schon am richtigen Ort.
+                if task.internet_message_id == identity:
+                    await mark_open_work(db, task)
+
+            await db.commit()
+    except Exception:  # noqa: BLE001 - darf den Poll-Loop nie stoppen
+        logger.exception("Fahnen-Aufgriff fehlgeschlagen")
+    finally:
+        if client:
+            await client.close()
+
+    return picked
+
+
+async def _create_task_from_flag(db: AsyncSession, mail: dict) -> Task | None:
+    """Legt Triage-Record und Task zu einer markierten Mail an. Gibt den Task zurueck.
+
+    Der Triage-Record ist nicht Beigabe, sondern die Sperre: ohne ihn kennt
+    ``_get_known_message_ids`` die Mail nicht und der nächste Zyklus legt denselben
+    Task erneut an.
+    """
+    from app.services.hermes_worker import _create_email_task
+
+    from_info = (mail.get("from") or {}).get("emailAddress", {}) or {}
+    from_addr = from_info.get("address", "")
+    subject = mail.get("subject") or "(kein Betreff)"
+    preview = (mail.get("bodyPreview") or "").strip()
+
+    triage_record = EmailTriage(
+        user_id=await system_principal_id(db),
+        message_id=mail["id"],
+        internet_message_id=mail.get("internetMessageId"),
+        subject=subject,
+        from_address=from_addr,
+        from_name=from_info.get("name"),
+        received_at=_parse_received_at(mail.get("receivedDateTime")),
+        inference_class=mail.get("inferenceClassification", ""),
+        triage_class="task",
+        reply_expected=False,
+        confidence=1.0,
+        suggested_action={
+            "label": "Aufgabe",
+            "triage_class": "task",
+            "deterministic_override": "manual_flag",
+            "rationale": (
+                "Vom Menschen in Outlook markiert -- deterministisch als Aufgabe "
+                "verbucht, kein LLM. Die Fahne bleibt als Nachweis gesetzt."
+            ),
+        },
+        status="acted",
+    )
+    db.add(triage_record)
+    await db.flush()
+
+    meta = {
+        "email_message_id": mail["id"],
+        "internet_message_id": mail.get("internetMessageId", ""),
+        "subject": subject,
+        "from_address": from_addr,
+        "from_name": from_info.get("name", ""),
+        "conversation_id": mail.get("conversationId", ""),
+        "body_preview": preview[:500],
+    }
+    task = await _create_email_task(
+        db,
+        None,
+        meta,
+        task_title=subject,
+        task_description=(
+            f"In Outlook markiert von {from_info.get('name') or from_addr}."
+            + (f"\n\n> {preview[:400]}" if preview else "")
+        ),
+        suggested_project=None,
+        deadline=None,
+        reply_expected=False,
+        needs_review=False,
+    )
+    if task is None:
+        logger.warning("Fahnen-Aufgriff: kein Task angelegt (Projekt/Spalte fehlt)")
+        return None
+    logger.info("Fahnen-Aufgriff: Task '%s' aus markierter Mail angelegt", subject[:60])
+    return task
+
+
+async def _activation_cutoff(
+    db: AsyncSession, key: str, label: str
+) -> datetime | None:
+    """Aktivierungszeitpunkt einer Nachlauf-Funktion; beim ersten Lauf festgeschrieben.
+
+    Ohne Stichtag liefe die halbe Postfach-Historie in die Warteschlange. Der erste
+    Lauf setzt darum «jetzt» und findet nichts -- absichtlich: aufgegriffen wird nur,
+    was **nach** der Aktivierung entsteht.
+    """
+    principal = await system_principal_id(db)
+    if principal is None:
+        return None
+    settings = await get_principal_settings(db, principal)
+    raw = settings.get(key)
+    if raw:
+        try:
+            return isoparse(str(raw))
+        except (ValueError, TypeError):
+            logger.warning("Stichtag '%s' unlesbar -- wird neu gesetzt", key)
+    now = datetime.now(timezone.utc)
+    await db.execute(
+        update(User)
+        .where(User.id == principal)
+        .values(
+            settings=func.coalesce(User.settings, cast({}, JSONB)).op("||")(
+                cast({key: now.isoformat()}, JSONB)
+            )
+        )
+        .execution_options(synchronize_session=False)
+    )
+    logger.info("%s aktiviert, Stichtag: %s", label, now.isoformat())
+    return now
+
+
+# Bei 120 s Takt entspricht das rund einer Viertelstunde.
+SLOW_MAINTENANCE_EVERY = 8
+
+
+async def _run_slow_maintenance() -> None:
+    """Die drei Postfach-Nachläufe, die nicht in jeden Zyklus gehören.
+
+    Abgleich, Archiv-Nachlauf und Fahnen-Aufgriff kosten je mehrere Graph-Anfragen und
+    haben keine Eile. Der seltene Takt ist keine Sparmassnahme, sondern eine Lehre:
+    am 18.08.2026 gingen 2858 Anfragen in 36 Sekunden ans Postfach, danach drosselte
+    Graph. Jede dieser Funktionen ist zudem in sich best-effort -- ein Ausfall bleibt
+    ein Logeintrag.
+    """
+    async with async_session() as db:
+        repaired = await reconcile_tasks_folder(db)
+        await db.commit()
+    if repaired:
+        logger.info("Abgleich: %d erledigte Task-Mail(s) nachträglich archiviert", repaired)
+
+    proposed = await _archive_rescan_cycle()
+    if proposed:
+        logger.info("Archiv-Nachlauf: %d ungesichtete Mail(s) zur Sichtung vorgeschlagen", proposed)
+
+    picked = await _flag_pickup_cycle()
+    if picked:
+        logger.info("Fahnen-Aufgriff: %d markierte Mail(s) zu Aufgaben gemacht", picked)
+
+
 async def triage_loop() -> None:
     """Automatische Endlosschleife: Prueft alle 2 Minuten auf neue E-Mails.
 
     Prüft vor jedem Zyklus:
     - Stufe 1: TP_INTEGRATIONS_ACTIVE (Env)
     - Stufe 2: triage_enabled (Owner-Settings in DB)
+
+    Die Postfach-Nachläufe laufen nur jeden ``SLOW_MAINTENANCE_EVERY``-ten Zyklus
+    (Richtwert eine Viertelstunde), siehe :func:`_run_slow_maintenance`.
     """
     settings = get_settings()
     interval = settings.triage_interval_seconds
@@ -717,6 +1067,7 @@ async def triage_loop() -> None:
         interval,
     )
     await asyncio.sleep(5)
+    cycle = 0
     while True:
         try:
             if not settings.integrations_active:
@@ -735,6 +1086,9 @@ async def triage_loop() -> None:
             stuck_fixed = await _reconcile_stuck_processing()
             if stuck_fixed:
                 logger.info("Reconciliation: %d haengende 'processing'-Triage(s) auf 'acted' gesetzt", stuck_fixed)
+            cycle += 1
+            if cycle % SLOW_MAINTENANCE_EVERY == 0:
+                await _run_slow_maintenance()
         except Exception:
             logger.exception("Triage-Service: unerwarteter Fehler")
         await asyncio.sleep(interval)

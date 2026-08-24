@@ -1117,7 +1117,7 @@ async def _build_task_briefing(task_id) -> str:
             return ""
         return (
             "\n## Verknüpfte Aufgabe (Kontext dieser Konversation)\n\n"
-            "Diese Konversation ist mit folgender TaskPilot-Aufgabe verknüpft. "
+            "Diese Konversation ist mit folgender InnoSmith OS-Aufgabe verknüpft. "
             "Beziehe dich bei deinen Antworten darauf:\n\n"
             f"{_format_task_context(task)}\n"
         )

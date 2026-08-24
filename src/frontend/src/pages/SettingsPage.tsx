@@ -60,6 +60,7 @@ interface TriageSettingsData {
   triage_interval_seconds: number | null;
   triage_enabled: boolean | null;
   inbox_hidden_folders: string[] | null;
+  tasks_mail_folder: string | null;
   integrations_active_env: boolean;
   app_env: string;
 }
@@ -150,6 +151,7 @@ export function SettingsPage() {
   const [briefingMsg, setBriefingMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
   const [hiddenFolders, setHiddenFolders] = useState<string[]>(['ArchivSorted', 'Conversation History', 'Outbox']);
   const [hiddenFolderInput, setHiddenFolderInput] = useState('');
+  const [tasksMailFolder, setTasksMailFolder] = useState('Tasks');
   const [excludedPaths, setExcludedPaths] = useState<string[]>([]);
   const [excludedInput, setExcludedInput] = useState('');
   const [searchIndexMsg, setSearchIndexMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
@@ -205,6 +207,10 @@ export function SettingsPage() {
         if (ts.triage_interval_seconds) setTriageInterval(Math.round(ts.triage_interval_seconds / 60));
         if (ts.triage_enabled !== null && ts.triage_enabled !== undefined) setTriageEnabled(ts.triage_enabled);
         if (ts.inbox_hidden_folders) setHiddenFolders(ts.inbox_hidden_folders);
+        // Leerer String ist eine Aussage («nur markieren»), nicht ein fehlender Wert.
+        if (ts.tasks_mail_folder !== null && ts.tasks_mail_folder !== undefined) {
+          setTasksMailFolder(ts.tasks_mail_folder);
+        }
         setIntegrationsActiveEnv(ts.integrations_active_env ?? true);
         setAppEnv(ts.app_env ?? 'prod');
         if (si.excluded_paths) setExcludedPaths(si.excluded_paths);
@@ -399,6 +405,7 @@ export function SettingsPage() {
         triage_interval_seconds: triageInterval * 60,
         triage_enabled: triageEnabled,
         inbox_hidden_folders: hiddenFolders.length > 0 ? hiddenFolders : null,
+        tasks_mail_folder: tasksMailFolder.trim(),
       });
       setTriageMsg({ type: 'ok', text: 'Triage-Einstellungen gespeichert' });
       setTimeout(() => setTriageMsg(null), 3000);
@@ -1810,6 +1817,25 @@ export function SettingsPage() {
                     rows={12}
                     placeholder="Standard-Prompt wird verwendet wenn leer..."
                     className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:border-gray-700 dark:bg-gray-800 dark:text-white font-mono"
+                  />
+                </div>
+
+                <div>
+                  <label className="mb-2 block text-sm font-medium text-gray-700 dark:text-gray-300">
+                    Ordner für Mails mit offener Aufgabe
+                  </label>
+                  <p className="mb-2 text-xs text-gray-500 dark:text-gray-400">
+                    Unterordner von «Posteingang». Wird eine Aufgabe bestätigt, wandert die
+                    Mail dorthin und wird in Outlook markiert; beim Erledigen wird die Markierung
+                    entfernt und die Mail archiviert. Der Ordner muss in Outlook bestehen — leer
+                    lassen heisst: nur markieren, nicht verschieben.
+                  </p>
+                  <input
+                    type="text"
+                    value={tasksMailFolder}
+                    onChange={e => setTasksMailFolder(e.target.value)}
+                    placeholder="Tasks"
+                    className="w-full max-w-xs rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-sm text-gray-900 focus:border-indigo-500 focus:outline-none dark:border-gray-700 dark:bg-gray-800 dark:text-white"
                   />
                 </div>
 

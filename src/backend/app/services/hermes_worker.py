@@ -36,6 +36,8 @@ import uuid
 import httpx
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from typing import NamedTuple
+
 from sqlalchemy import cast, func, select, update
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import selectinload
@@ -65,6 +67,7 @@ from app.services.draft_prompt import (
     render_draft_task,
     render_gather_task,
 )
+from app.services.email_identity import resolve_message_id, sync_message_id
 from app.services.learning import has_content_between_greeting_and_closing, record_episode
 from app.services.notification import (
     notify_agent_awaiting_approval,
@@ -127,7 +130,7 @@ PIPELINE_COLUMNS = {
 }
 
 WORKER_SYSTEM_PROMPT = (
-    "Du bist der TaskPilot-Agent von Anthony Smith (InnoSmith GmbH, Schweiz). "
+    "Du bist der InnoSmith OS-Agent von Anthony Smith (InnoSmith GmbH, Schweiz). "
     "Du nutzt deine MCP-Tools aktiv und behauptest nie, keinen Zugriff zu haben. "
     "Befolge die Instruktionen in der Nachricht exakt und Schritt fuer Schritt. "
     "Wenn du eine dauerhaft gueltige Tatsache ueber Anthony, einen Absender oder "
@@ -1475,7 +1478,9 @@ async def _build_draft_prompt(
     )
 
     # Vollstaendigen Body server-seitig laden (kein Verlass auf get_email-Tool).
-    body_text = await _load_email_body_text(email_id)
+    body_text = await _load_email_body_text(
+        email_id, internet_message_id=meta.get("internet_message_id")
+    )
     body_block = body_text or preview or "(kein Textinhalt verfügbar)"
     briefing_block = _build_draft_briefing(parsed)
     today = _today_context_line()
@@ -2262,7 +2267,9 @@ def _today_context_line() -> str:
     return f"{_WEEKDAYS_DE[now.weekday()]}, {now.strftime('%d.%m.%Y')}"
 
 
-async def _load_email_body_text(email_id: str, cap: int = 4000) -> str:
+async def _load_email_body_text(
+    email_id: str, cap: int = 4000, internet_message_id: str | None = None
+) -> str:
     """Laedt den vollstaendigen E-Mail-Body server-seitig (HTML->Text, gekappt).
 
     Wird direkt in den Draft-Prompt eingebettet, damit der Schreib-Pass den echten
@@ -2270,6 +2277,11 @@ async def _load_email_body_text(email_id: str, cap: int = 4000) -> str:
     zu sein -- verhindert Halluzinationen bei abgekuerztem Vorgehen. Der zitierte
     Original-Thread wird fuer einen fokussierten Prompt entfernt. Best-effort:
     liefert "" bei fehlender Graph-Konfiguration oder Fehler.
+
+    Ein veraltetes Handle ist hier besonders heimtueckisch: der Schreib-Pass bekaeme
+    einen leeren Body und formulierte auf Basis von Betreff und Vorschau -- ein
+    stiller Qualitaetsverlust, den niemand am Ergebnis erkennt. Darum wird bei einem
+    Fehlschlag ueber die Identitaet neu aufgeloest, falls sie mitgegeben wurde.
     """
     if not email_id:
         return ""
@@ -2279,7 +2291,14 @@ async def _load_email_body_text(email_id: str, cap: int = 4000) -> str:
     try:
         from app.services.learning import html_to_text, strip_quoted_history
 
-        msg = await client.get_email(email_id)
+        try:
+            msg = await client.get_email(email_id)
+        except Exception:  # noqa: BLE001 - Handle evtl. durch Move veraltet
+            fresh = await resolve_message_id(client, internet_message_id)
+            if not fresh:
+                raise
+            logger.info("Draft: Body ueber Identitaet neu aufgeloest (mid war veraltet)")
+            msg = await client.get_email(fresh)
         body = msg.get("body", {}) or {}
         raw = body.get("content") or msg.get("bodyPreview") or ""
         text_body = html_to_text(raw) if raw else ""
@@ -2396,6 +2415,19 @@ async def _is_known_correspondent(client, address: str | None) -> bool | None:
     return bool(sent)
 
 
+class FinalizeResult(NamedTuple):
+    """Ergebnis der Outlook-Finalisierung.
+
+    ``message_id`` ist das Handle, das nach allen Schritten gilt. Es weicht vom
+    Ausgangswert ab, sobald ein Move stattgefunden hat, und muss vom Aufrufer in
+    die Datenbank zurueckgeschrieben werden -- vor dem 24.08.2026 fiel es hier
+    einfach auf den Boden, weshalb Task-Links nach dem Archivieren tot waren.
+    """
+
+    move_suppressed: str | None
+    message_id: str | None
+
+
 async def _finalize_email_state(
     meta: dict,
     label: str | None,
@@ -2403,7 +2435,7 @@ async def _finalize_email_state(
     *,
     triage_class: str | None = None,
     needs_review: bool = False,
-) -> str | None:
+) -> FinalizeResult:
     """Der EINZIGE Schreibpfad auf den Outlook-Zustand nach der Triage.
 
     Das LLM klassifiziert, diese Funktion mutiert. Der Triage-Agent hat die
@@ -2430,15 +2462,27 @@ async def _finalize_email_state(
 
     Gibt den Grund zurueck, falls ein moeglicher Move unterdrueckt wurde -- der
     Aufrufer schreibt ihn ins Triage-Protokoll, damit im Cockpit nicht bloss eine
-    unverschobene Mail steht, sondern auch warum.
+    unverschobene Mail steht, sondern auch warum -- und dazu das nach allen
+    Schritten gueltige Handle, damit der Aufrufer es persistieren kann.
     """
     final_mid = moved_id or meta.get("email_message_id")
     if not final_mid:
-        return None
+        return FinalizeResult(None, None)
+
+    # Der Archiv-Nachlauf sichtet Mails, die der Mensch schon weggeraeumt hat. Dort
+    # darf nichts angefasst werden -- kein Move, keine Kategorie, kein Ungelesen. Die
+    # Sperre sitzt hier, im einzigen Schreibpfad, und nicht als Bitte im Prompt:
+    # Struktur statt Anweisung.
+    if meta.get("readonly_mail"):
+        logger.info(
+            "Finalize: Mail bleibt unberuehrt (Archiv-Nachlauf, mid=%s)",
+            str(final_mid)[:40],
+        )
+        return FinalizeResult(None, final_mid)
 
     client = await _build_graph_client()
     if client is None:
-        return None
+        return FinalizeResult(None, final_mid)
     try:
         # Schritt 1: Move -- deterministisch aus der Klassifikation und dem
         # Korrespondenz-Nachweis, nicht vom LLM. Der Nachweis kostet eine
@@ -2499,15 +2543,39 @@ async def _finalize_email_state(
                 logger.info("Finalize: ungelesen nicht setzbar (404, z. B. CC-only/veraltete ID)")
             else:
                 logger.warning("Finalize: ungelesen-Schritt fehlgeschlagen (HTTP %s)", status)
-        return suppressed
+        return FinalizeResult(suppressed, final_mid)
     except Exception:  # noqa: BLE001 - Finalisierung darf den Job nie stoppen
         logger.warning("Finalize: unerwarteter Fehler (mid=%s)", str(final_mid)[:40])
-        return None
+        return FinalizeResult(None, final_mid)
     finally:
         try:
             await client.close()
         except Exception:  # noqa: BLE001
             pass
+
+
+async def _persist_final_message_id(meta: dict, final_message_id: str | None) -> None:
+    """Schreibt das nach der Finalisierung gueltige Handle in die Datenbank.
+
+    Bewusst als eigener Schritt nach ``_finalize_email_state``: diese Funktion ist
+    reine Netz-I/O und laeuft ausserhalb jeder Transaktion. Hier wird die Session
+    geoeffnet, sonst nirgends.
+    """
+    identity = meta.get("internet_message_id")
+    if not identity or not final_message_id:
+        return
+    if final_message_id == meta.get("email_message_id"):
+        return
+    try:
+        async with async_session() as db:
+            await sync_message_id(
+                db, internet_message_id=identity, new_message_id=final_message_id
+            )
+            await db.commit()
+    except Exception:  # noqa: BLE001 - darf den Job nie stoppen
+        logger.warning(
+            "Handle konnte nicht nachgefuehrt werden (identity=%s)", str(identity)[:60]
+        )
 
 
 async def apply_label_category(message_id: str, label: str) -> bool:
@@ -2956,13 +3024,19 @@ async def _create_email_task(
     suggested_project: str | None,
     deadline: str | None,
     reply_expected: bool = False,
+    needs_review: bool = True,
 ) -> Task | None:
     """Legt aus einer triagierten E-Mail eine Task an (geteilt von Normal- + Fallback-Pfad).
 
     Waehlt das passende Projekt (oder das erste), die erste Board-Spalte und die
     Pipeline-Spalte nach Deadline. Verknuepft ``email_message_id`` /
-    ``email_conversation_id`` und setzt ``needs_review=True``. Gibt die Task
-    zurueck oder None, wenn kein Projekt/keine Spalte existiert.
+    ``email_conversation_id``. Gibt die Task zurueck oder None, wenn kein
+    Projekt/keine Spalte existiert.
+
+    ``needs_review`` ist der Regelfall: Was das Modell ableitet, ist ein Vorschlag.
+    ``False`` setzt nur, wer eine **Menschenentscheidung** verbucht -- beim Aufgreifen
+    einer selbst gesetzten Outlook-Fahne ist nichts mehr zu sichten, die Entscheidung
+    ist gefallen.
 
     Duplikat-Schutz: Existiert bereits ein offener Task zur selben Sache (gleiche
     Konversation oder Absender+Betreff), wird KEIN neuer Task erstellt. Stattdessen
@@ -3079,19 +3153,21 @@ async def _create_email_task(
         board_position=next_pos,
         pipeline_column_id=pipeline_col_id,
         email_message_id=meta.get("email_message_id"),
+        internet_message_id=meta.get("internet_message_id") or None,
         email_conversation_id=meta.get("conversation_id"),
         due_date=due_date,
-        needs_review=True,
+        needs_review=needs_review,
         assignee="me",
     )
     db.add(new_task)
     await db.flush()
-    await notify_task_suggested(
-        db,
-        task_id=new_task.id,
-        task_title=task_title,
-        from_email=meta.get("from_address"),
-    )
+    if needs_review:
+        await notify_task_suggested(
+            db,
+            task_id=new_task.id,
+            task_title=task_title,
+            from_email=meta.get("from_address"),
+        )
     logger.info(
         "Job %s: Task erstellt '%s' in Projekt '%s' (reply_expected=%s)",
         job_id, task_title, matched_project.name, reply_expected,
@@ -3246,9 +3322,10 @@ async def _fallback_unparsed_triage(job_id, meta: dict, moved_id: str | None = N
     # ueberspringt das Kategorie-Setzen (kein Raten einer Outlook-Kategorie),
     # die Mail wird aber auf ungelesen zurueckgesetzt und bleibt sichtbar.
     # needs_review verhindert jeden Move -- was nicht verstanden wurde, bleibt liegen.
-    await _finalize_email_state(
+    finalized = await _finalize_email_state(
         meta, NO_CATEGORY, moved_id, triage_class="fyi", needs_review=True
     )
+    await _persist_final_message_id(meta, finalized.message_id)
     return "completed"
 
 
@@ -3619,13 +3696,15 @@ async def _post_process_triage(
     # Deterministische Outlook-Finalisierung NACH der DB-Transaktion (reine Netz-
     # I/O): Move gemaess Politik, Kategorie aus dem validierten Label, Mail immer
     # auf ungelesen. Laeuft fuer alle Klassen (task/auto_reply/fyi).
-    move_suppressed = await _finalize_email_state(
+    finalized = await _finalize_email_state(
         meta,
         label,
         moved_id,
         triage_class=triage_class,
         needs_review=needs_review,
     )
+    await _persist_final_message_id(meta, finalized.message_id)
+    move_suppressed = finalized.move_suppressed
 
     # Unterdrueckten Move als Klartext nachtragen. Ohne diese Notiz sieht das
     # Cockpit nur eine Mail, die trotz 'System' liegen blieb -- und niemand kann
@@ -4259,7 +4338,10 @@ async def _build_gather_prompt(meta: dict, parsed: dict | None = None) -> str:
     from_addr = meta.get("from_address", "")
     subject = meta.get("subject", "")
     conversation_id = meta.get("conversation_id", "")
-    body_text = await _load_email_body_text(meta.get("email_message_id", ""))
+    body_text = await _load_email_body_text(
+        meta.get("email_message_id", ""),
+        internet_message_id=meta.get("internet_message_id"),
+    )
     body_block = body_text or (meta.get("body_preview") or "")[:300] or "(kein Textinhalt verfügbar)"
 
     extra_tools = ""

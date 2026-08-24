@@ -34,7 +34,7 @@ function resolveTitle(pathname: string, projectName: string | null): string {
   if (pathname.startsWith('/projects/')) return projectName || 'Projekt';
   if (pathname.startsWith('/mindmaps/')) return 'Mind-Map';
   if (pathname.startsWith('/finanzen/')) return 'Finanzen';
-  return 'TaskPilot';
+  return 'InnoSmith OS';
 }
 
 export function MobileHeader({ onMenuOpen, onSearchOpen, notificationCount = 0, onNotificationOpen }: MobileHeaderProps) {

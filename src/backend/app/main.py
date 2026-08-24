@@ -146,6 +146,46 @@ def _export_template_dir() -> None:
         os.environ.setdefault("CONTENTCONVERTER_TEMPLATE_DIR", str(template_dir))
 
 
+async def _check_tasks_folder() -> None:
+    """Sagt beim Start, ob der Ordner für offene Task-Mails existiert.
+
+    Fehlt er, laufen Fahne und Task weiter, nur der Move entfällt -- ein
+    funktionsfähiger, aber halb wirksamer Zustand, der sonst niemandem auffällt.
+    ``get_or_create_folder`` legt bewusst nichts an: Der Ordner liegt im Postfach des
+    Menschen, und der erstellt ihn dort selbst.
+    """
+    log = logging.getLogger("taskpilot.lifespan")
+    from app.services.email_projection import get_tasks_folder_name
+    from app.services.graph import get_graph_client
+
+    client = get_graph_client()
+    if client is None:
+        return
+    try:
+        async with async_session() as db:
+            folder = await get_tasks_folder_name(db)
+        if not folder:
+            log.info("Task-Mails: kein Ordner konfiguriert -- es wird nur die Fahne gesetzt")
+            return
+        try:
+            await client.get_or_create_folder(folder)
+            log.info("Task-Mails: Ordner 'Posteingang/%s' gefunden", folder)
+        except ValueError:
+            log.warning(
+                "Task-Mails: Ordner '%s' fehlt unter Posteingang. Mails mit offener "
+                "Aufgabe werden nur markiert, nicht verschoben. Ordner in Outlook "
+                "anlegen oder den Namen unter Einstellungen/Triage anpassen.",
+                folder,
+            )
+    except Exception:  # noqa: BLE001 - eine Startpruefung darf den Start nie verhindern
+        log.info("Task-Mails: Ordnerpruefung nicht moeglich (Graph nicht erreichbar)")
+    finally:
+        try:
+            await client.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     async with async_session() as db:
@@ -173,6 +213,7 @@ async def lifespan(app: FastAPI):
         await db.commit()
 
     _check_bexio_token_expiry()
+    await _check_tasks_folder()
 
     _export_template_dir()
     await start_content_converter()

@@ -897,12 +897,14 @@ class TestFinalizeEmailState:
             "from_address": "justin.springer@swissbankers.ch",
         }
         with patch.object(hw, "_build_graph_client", AsyncMock(return_value=client)):
-            grund = await hw._finalize_email_state(meta, "System", None, triage_class="fyi")
+            ergebnis = await hw._finalize_email_state(meta, "System", None, triage_class="fyi")
 
         client.move_to_folder.assert_not_awaited()
         client.set_categories.assert_awaited_once_with("M1", ["System"])
         client.mark_as_unread.assert_awaited_once_with("M1")
-        assert grund == "eigene Korrespondenz mit dieser Adresse"
+        assert ergebnis.move_suppressed == "eigene Korrespondenz mit dieser Adresse"
+        # Ohne Move bleibt das Handle unveraendert -- nichts nachzufuehren.
+        assert ergebnis.message_id == "M1"
 
     @pytest.mark.asyncio
     async def test_correspondence_is_only_checked_when_a_move_is_possible(self):
@@ -938,11 +940,11 @@ class TestFinalizeEmailState:
         client.search_my_replies_to.side_effect = RuntimeError("Graph down")
         meta = {"email_message_id": "M1", "from_address": "wordpress@innosmith.ch"}
         with patch.object(hw, "_build_graph_client", AsyncMock(return_value=client)):
-            grund = await hw._finalize_email_state(meta, "System", None, triage_class="fyi")
+            ergebnis = await hw._finalize_email_state(meta, "System", None, triage_class="fyi")
 
         client.move_to_folder.assert_not_awaited()
         client.mark_as_unread.assert_awaited_once_with("M1")
-        assert grund == "Korrespondenz nicht pruefbar"
+        assert ergebnis.move_suppressed == "Korrespondenz nicht pruefbar"
 
     @pytest.mark.asyncio
     async def test_missing_folder_does_not_stop_finalization(self):

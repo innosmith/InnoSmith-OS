@@ -1,0 +1,30 @@
+# Ziel: /etc/systemd/system/gx10-telemetrie.service
+
+[Unit]
+Description=GX10 Telemetrie-Sampler (GPU, Speicher, Last)
+Documentation=https://github.com/innosmith/TaskPilot
+
+# Bewusst nicht After=multi-user.target: Zusammen mit WantedBy würde der
+# Dienst erst starten, wenn das Target vollständig erreicht ist. Hängt dort
+# ein Dienst (auf dieser Maschine plymouth-quit-wait), startet der Sampler
+# nie -- und ein "systemctl enable --now" wartet endlos mit.
+After=local-fs.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/gx10-telemetrie.sh
+Restart=always
+RestartSec=5
+
+# Der Sampler soll nie mit der Nutzlast konkurrieren.
+Nice=10
+
+# Schreibzugriff ausschliesslich auf die eigene Logdatei.
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/log
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

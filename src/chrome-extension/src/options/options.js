@@ -40,7 +40,7 @@ document.getElementById('btn-save').addEventListener('click', async () => {
     return;
   }
   if (!apiToken.startsWith('tpk_')) {
-    showStatus('API-Key muss mit «tpk_» beginnen. Generiere ihn in TaskPilot unter Einstellungen → Integrationen.', 'error');
+    showStatus('API-Key muss mit «tpk_» beginnen. Generiere ihn in InnoSmith OS unter Einstellungen → Integrationen.', 'error');
     return;
   }
 

@@ -18,7 +18,22 @@ class _FakeDB:
     def __init__(self):
         self.add = MagicMock()
         self.flush = AsyncMock()
-        self.execute = AsyncMock()
+        self.statements: list = []
+        self.execute = AsyncMock(side_effect=self._record)
+        # ``sync_message_id`` prueft vor dem Update auf email_triage, ob das neue
+        # Handle schon belegt ist. ``None`` heisst frei.
+        self.scalar = AsyncMock(return_value=None)
+
+    async def _record(self, statement, *args, **kwargs):
+        self.statements.append(statement)
+        return MagicMock()
+
+    def updated_tables(self) -> set[str]:
+        return {
+            s.table.name
+            for s in self.statements
+            if hasattr(s, "table") and hasattr(s, "is_update") and s.is_update
+        }
 
 
 def _rule(conditions, action, rule_text="Testregel"):
@@ -37,6 +52,7 @@ def _rule(conditions, action, rule_text="Testregel"):
 def _email(address="kunde@example.ch", subject="Newsletter"):
     return {
         "id": "MID-1",
+        "internetMessageId": "<abc@example.ch>",
         "from": {"emailAddress": {"address": address, "name": "Kundin"}},
         "subject": subject,
         "receivedDateTime": "2026-06-24T10:00:00Z",
@@ -50,7 +66,7 @@ async def test_matching_rule_applies_action():
     db = _FakeDB()
     client = MagicMock()
     client.set_categories = AsyncMock()
-    client.move_to_folder = AsyncMock()
+    client.move_to_folder = AsyncMock(return_value={"id": "MID-2"})
     rule = _rule(
         [{"field": "domain", "op": "equals", "value": "example.ch"}],
         {"triage_class": "fyi", "category": "Newsletter", "folder": "Newsletter"},
@@ -64,6 +80,47 @@ async def test_matching_rule_applies_action():
     client.move_to_folder.assert_awaited_once_with("MID-1", "Newsletter")
     # applied_count-Update wird abgesetzt.
     db.execute.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_move_writes_the_new_handle_back():
+    """Nach dem Move muss das neue Graph-Handle in der Datenbank landen.
+
+    Der Move aendert die Graph-ID. Ohne Rueckschreiben zeigten ``tasks`` und
+    ``email_triage`` weiter auf das Handle des Posteingangs -- Outlook-Links liefen
+    ins Leere und die Triage erkannte die Mail beim naechsten Lauf nicht wieder.
+    """
+    db = _FakeDB()
+    client = MagicMock()
+    client.set_categories = AsyncMock()
+    client.move_to_folder = AsyncMock(return_value={"id": "MID-2"})
+    rule = _rule(
+        [{"field": "domain", "op": "equals", "value": "example.ch"}],
+        {"triage_class": "fyi", "category": "Newsletter", "folder": "Newsletter"},
+    )
+
+    await apply_deterministic_rules(db, client, _email(), [rule])
+
+    assert {"tasks", "email_triage"} <= db.updated_tables()
+
+
+@pytest.mark.asyncio
+async def test_no_writeback_without_identity():
+    """Ohne internetMessageId gibt es keinen Anker -- dann wird nichts geraten."""
+    db = _FakeDB()
+    client = MagicMock()
+    client.set_categories = AsyncMock()
+    client.move_to_folder = AsyncMock(return_value={"id": "MID-2"})
+    email = _email()
+    del email["internetMessageId"]
+    rule = _rule(
+        [{"field": "domain", "op": "equals", "value": "example.ch"}],
+        {"triage_class": "fyi", "category": "Newsletter", "folder": "Newsletter"},
+    )
+
+    await apply_deterministic_rules(db, client, email, [rule])
+
+    assert "tasks" not in db.updated_tables()
 
 
 @pytest.mark.asyncio

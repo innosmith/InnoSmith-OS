@@ -11,7 +11,7 @@ except IndexError:
 
 
 class Settings(BaseSettings):
-    app_name: str = "TaskPilot"
+    app_name: str = "InnoSmith OS"
     app_env: str = "prod"
     debug: bool = False
 
@@ -92,7 +92,14 @@ class Settings(BaseSettings):
     # ``TP_TRIAGE_MODEL`` nicht gesetzt ist. Bewusst ein FIXER Tag (kein
     # ``:latest``): gleitende Tags koennen die Triage-Qualitaet ueber Nacht
     # veraendern. qwen3.6:latest bleibt lokal als Rollback-Modell liegen.
-    triage_model: str = "ollama/qwen3.8:27b-bf16"
+    #
+    # Q4_K_M statt Q8_0, seit dem Freeze vom 24.08.2026: Der q8_0-Tag ist dicht
+    # quantisiert (29 GB) und bringt keinen MTP-Head mit, muss also je Token die
+    # vollen Gewichte durch die Speicherschnittstelle ziehen. Auf dem GB10 mit
+    # rund 273 GB/s ergibt das 7.65 t/s unter Dauervolllast -- lang genug, um die
+    # Maschine bis zum Hard-Lock aufzuheizen. Der offizielle 27b-Tag ist Q4_K_M
+    # mit aktivem spekulativem Dekodieren. Hintergrund: docs/gx10-freeze-befund.md
+    triage_model: str = "ollama/qwen3.8:27b"
 
     # Agent-Memory / Lernen (lokale Embeddings via Ollama)
     # Qwen3-Embedding-0.6B: SOTA-Familie (MTEB-Multilingual #1 bei 8B), exzellentes
