@@ -1,0 +1,28 @@
+# Reicht die GPU an das Prod-Backend durch.
+#
+# Die Anonymisierung ist kein deterministischer Code, sondern ein
+# Transformer-Modell (GLiNER in contentConverter). Gemessen auf der GX10 an gut
+# vier Seiten Text: 11,8 Sekunden auf der CPU, 0,28 Sekunden auf der GPU — bei
+# identischen Treffern. Zwanzig Seiten fallen von rund fünfzig Sekunden auf gut
+# eine.
+#
+# Das Image bringt das CUDA-Torch bereits mit. Ihm fehlt nur das Gerät: Ohne
+# Durchreichung meldet torch.cuda.is_available() False, Presidios
+# device_detector wählt still «cpu», und niemand merkt, dass die Maschine eine
+# Blackwell-GPU hat.
+#
+# Zugeschaltet wird die Datei vom Makefile, wenn der Docker-Host die
+# nvidia-Runtime kennt — sonst startet der Stapel wie bisher, nur langsam.
+#
+# `runtime: nvidia` und nicht CDI: Der CDI-Weg (`--device nvidia.com/gpu=all`)
+# bricht auf dieser GX10 beim Container-Start ab.
+#
+# Der Indexer bleibt bewusst aussen vor: Er vektorisiert über Ollama auf dem
+# Host und lädt selbst kein Modell in den Prozess.
+
+services:
+  backend-prod:
+    runtime: nvidia
+    environment:
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility

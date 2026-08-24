@@ -1,0 +1,13 @@
+# Reicht die GPU an das Integrations-Backend durch.
+#
+# Begründung und Messwerte stehen in docker-compose.gpu.prod.yml. Zwei Dateien
+# statt einer, weil die Dienste unterschiedlich heissen (`backend-int` gegen
+# `backend-prod`) und Compose einen unbekannten Dienstnamen nicht ignoriert,
+# sondern als neuen Dienst ohne Image anlegt.
+
+services:
+  backend-int:
+    runtime: nvidia
+    environment:
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility

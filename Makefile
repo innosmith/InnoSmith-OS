@@ -1,9 +1,23 @@
 # TaskPilot Docker Management
 # Verwendung: make <target>
 
+# ── GPU ───────────────────────────────────────────────────
+#
+# Die Anonymisierung (GLiNER in contentConverter) ist ein Transformer-Modell
+# und der mit Abstand langsamste Teil. Gemessen an gut vier Seiten Text: 11,8 s
+# auf der CPU, 0,28 s auf der GPU, gleiche Treffer. Zwanzig Seiten fallen von
+# rund fuenfzig Sekunden auf gut eine.
+#
+# Die GPU wird darum genommen, wenn der Host sie durchreichen kann, und sonst
+# stillschweigend ausgelassen — ein Stapel, der nicht startet, waere schlimmer
+# als einer, der langsam ist.
+GPU_ON       := $(shell docker info 2>/dev/null | grep -E '^ Runtimes:' | grep -qw nvidia && echo yes)
+GPU_INT      := $(if $(GPU_ON),-f docker/docker-compose.gpu.int.yml)
+GPU_PROD     := $(if $(GPU_ON),-f docker/docker-compose.gpu.prod.yml)
+
 COMPOSE_SHARED = docker compose -f docker/docker-compose.yml
-COMPOSE_INT    = $(COMPOSE_SHARED) -f docker/docker-compose.integration.yml --profile clamav
-COMPOSE_PROD   = docker compose -p taskpilot-prod --env-file .env.prod -f docker/docker-compose.prod.yml
+COMPOSE_INT    = $(COMPOSE_SHARED) -f docker/docker-compose.integration.yml $(GPU_INT) --profile clamav
+COMPOSE_PROD   = docker compose -p taskpilot-prod --env-file .env.prod -f docker/docker-compose.prod.yml $(GPU_PROD)
 
 .PHONY: help dev int prod build down logs-int logs-prod logs-indexer status health vendor signa-reader sandbox sandbox-executor test test-smoke test-contract test-e2e test-explore test-all reset-dev schema-int seed-int backup-prod backup-schedule backup-unschedule backup-status
 
@@ -42,7 +56,12 @@ signa-reader: ## Signa-Lesepaket in den Build-Kontext des Frontends kopieren
 
 # ── Integration ──────────────────────────────────────────
 
-int: infra signa-reader ## Integration starten (Full Docker + ClamAV)
+# `vendor` statt `signa-reader`: build.sh erledigt das Signa-Lesepaket mit und
+# kopiert zusaetzlich contentConverter und AI9 in den Build-Kontext. Ohne diesen
+# Schritt baut Docker aus einem alten Vendor-Verzeichnis weiter -- eine
+# Verbesserung an der Anonymisierung kam dann nie im Container an, und zwar
+# lautlos: Der Bau lief durch, das Abbild war nur eben das alte.
+int: infra vendor ## Integration starten (Full Docker + ClamAV)
 	CACHEBUST=$$(date +%s) $(COMPOSE_INT) up -d --build
 
 int-down: ## Integration stoppen (Shared Infra bleibt)
@@ -50,7 +69,7 @@ int-down: ## Integration stoppen (Shared Infra bleibt)
 
 # ── Produktion ───────────────────────────────────────────
 
-prod: signa-reader ## Produktion starten (Standalone, eigene DB + ClamAV)
+prod: vendor ## Produktion starten (Standalone, eigene DB + ClamAV)
 	@docker network inspect taskpilot-shared >/dev/null 2>&1 || docker network create taskpilot-shared
 	CACHEBUST=$$(date +%s) $(COMPOSE_PROD) up -d --build
 
@@ -122,6 +141,10 @@ health: ## Health-Checks ausfuehren
 	@echo "=== Ollama ==="
 	@curl -sf http://localhost:11434/api/tags 2>/dev/null | head -c 100 || echo "  nicht erreichbar"
 	@echo ""
+	@echo "=== GPU im Prod-Backend (Anonymisierung) ==="
+	@docker exec taskpilot-backend-prod python -c \
+		"import torch; print('  ' + (torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'nicht sichtbar — die Anonymisierung rechnet auf der CPU, rund 40x langsamer'))" \
+		2>/dev/null || echo "  Container nicht erreichbar"
 
 # ── Tests ─────────────────────────────────────────────────
 
