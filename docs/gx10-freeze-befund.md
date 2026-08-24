@@ -206,3 +206,16 @@ Qualitätsgewinn, sondern eine thermische Dauerlast.
 
 An Kontextgrösse, Ausgabelänge und Thinking wurde weiterhin nichts geändert —
 diese Hypothesen sind oben widerlegt.
+
+## Nachtrag, 24.08.2026 abends — Worker wieder auf 3.6
+
+Q4_K_M macht 3.8 schneller als q8 (33 t/s Decode statt 7,6), holt 3.6 aber
+nicht ein. 3.8-27B ist dicht und liest je Token die vollen Gewichte; 3.6 ist
+MoE (~3 Mrd. aktiv, gemessen ~72 t/s). Dieselbe Triage: Median **73 s** auf
+3.6 gegen **14 min** auf 3.8, bei vergleichbarer Tokenzahl. Der Prefill eines
+27k-Prompts hält die GPU Minuten bei 96 % / 85 °C — unverhältnismässig für
+typische Posteingangsarbeit.
+
+Deshalb ist `triage_model` / `TP_TRIAGE_MODEL` wieder `ollama/qwen3.6:latest`.
+qwen3.8:27b bleibt lokal, wird aber nur noch bewusst gewählt. Das ist keine
+Rückkehr zu q8.

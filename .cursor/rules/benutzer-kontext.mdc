@@ -22,7 +22,7 @@ alwaysApply: true
 - **Maschine:** ASUS GX10 mit NVIDIA Blackwell GPU, 128 GB Unified Memory
 - **OS:** Linux (Ubuntu-basiert)
 - **Kein Windows** — keine .exe oder Windows-spezifischen Tools
-- **Lokale LLMs:** via Ollama (Qwen 3.8 27B q8_0 als Default; qwen3.6:latest als Rollback)
+- **Lokale LLMs:** via Ollama (qwen3.6:latest als Triage-/Worker-Default, MoE; qwen3.8:27b Q4_K_M lokal für bewusste Auswahl). Nicht `qwen3.8:27b-q8_0` — thermische Dauerlast auf dem GX10, siehe `docs/gx10-freeze-befund.md`.
 - **Cloud LLMs:** Anthropic Claude, Google Gemini, OpenAI GPT
 
 ## Wichtige Treuhand-Kontakte

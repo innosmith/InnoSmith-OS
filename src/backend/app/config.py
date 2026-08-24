@@ -89,17 +89,15 @@ class Settings(BaseSettings):
     litellm_base_url: str = "http://localhost:4000"
     ollama_base_url: str = "http://localhost:11434"
     # Triage-/Worker-Modell (lokal via Ollama). Install-Fallback, wenn
-    # ``TP_TRIAGE_MODEL`` nicht gesetzt ist. Bewusst ein FIXER Tag (kein
-    # ``:latest``): gleitende Tags koennen die Triage-Qualitaet ueber Nacht
-    # veraendern. qwen3.6:latest bleibt lokal als Rollback-Modell liegen.
+    # ``TP_TRIAGE_MODEL`` nicht gesetzt ist.
     #
-    # Q4_K_M statt Q8_0, seit dem Freeze vom 24.08.2026: Der q8_0-Tag ist dicht
-    # quantisiert (29 GB) und bringt keinen MTP-Head mit, muss also je Token die
-    # vollen Gewichte durch die Speicherschnittstelle ziehen. Auf dem GB10 mit
-    # rund 273 GB/s ergibt das 7.65 t/s unter Dauervolllast -- lang genug, um die
-    # Maschine bis zum Hard-Lock aufzuheizen. Der offizielle 27b-Tag ist Q4_K_M
-    # mit aktivem spekulativem Dekodieren. Hintergrund: docs/gx10-freeze-befund.md
-    triage_model: str = "ollama/qwen3.8:27b"
+    # qwen3.6:latest (MoE, ~3 Mrd. aktiv je Token, gemessen ~72 t/s) ist der
+    # Worker-Default: typische Triage ist einfach, Median ~73 s. qwen3.8-27B ist
+    # dicht -- auch Q4_K_M haelt die GPU Minuten bei 96 % / 85 °C (Median ~14 min
+    # bei vergleichbarer Tokenzahl). 3.8 bleibt lokal fuer bewusste Auswahl.
+    # Nicht ``qwen3.8:27b-q8_0``: thermische Dauerlast, siehe
+    # docs/gx10-freeze-befund.md.
+    triage_model: str = "ollama/qwen3.6:latest"
 
     # Agent-Memory / Lernen (lokale Embeddings via Ollama)
     # Qwen3-Embedding-0.6B: SOTA-Familie (MTEB-Multilingual #1 bei 8B), exzellentes

@@ -13,7 +13,7 @@ Das verbindliche Pflichtenheft liegt in [docs/pflichtenheft-taskpilot.md](docs/p
 - **Backend:** FastAPI (Python 3.12) + SQLAlchemy 2.0 (async) + asyncpg + Pydantic v2
 - **Datenbank:** PostgreSQL mit pgvector, Port 5435
 - **Agent-Runtime:** Hermes (`hermes-agent`, Nous Research), in-process Worker (`hermes_worker.py`), Config: `~/.hermes/config.yaml` (zur Laufzeit generiert via `app/services/hermes_config.py`)
-- **LLM-Gateway:** LiteLLM-Proxy, Default-Modell: Qwen 3.8 27B q8_0 (Ollama lokal)
+- **LLM-Gateway:** LiteLLM-Proxy. Worker-Default: `qwen3.6:latest` (MoE, Ollama lokal). qwen3.8:27b bleibt für bewusste Auswahl. Nicht `-q8_0` (siehe `docs/gx10-freeze-befund.md`).
 - **MCP-Server:** `src/mcp-taskpilot/` (DB), `src/mcp-graph/` (Microsoft Graph), `src/mcp-pipedrive/` (Pipedrive CRM), `src/mcp-bexio/` (Buchhaltung), `src/mcp-toggl/` (Zeiterfassung), `src/mcp-signa/` (Strategic Intelligence), `src/mcp-invoiceinsight/` (Kreditoren-Analyse), `src/mcp-scripts/` (Script-Orchestrierung), `src/mcp-sandbox/` (Code-Sandbox)
 - **Graph API:** `src/email-graph/graph_client.py` (Shared Library)
 - **Pipedrive API:** `src/pipedrive/pipedrive_client.py` (Shared Library)
