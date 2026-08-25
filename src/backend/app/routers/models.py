@@ -118,24 +118,36 @@ def _make_entry(model_id: str, friendly_name: str, model_type: str, provider: st
 
 
 async def _fetch_ollama_models(litellm_caps: dict | None = None) -> list[dict]:
-    """Alle lokal verfuegbaren Ollama-Modelle abfragen."""
+    """Alle lokal verfuegbaren Ollama-Modelle abfragen.
+
+    Die Faehigkeiten kommen aus ``ai9.modelle`` -- also von Ollama selbst
+    (``/api/show``) statt aus LiteLLM. LiteLLM kennt ``ollama/qwen3.6:latest``
+    nicht, und die Namensheuristiken in ``_get_capabilities`` decken nur
+    Anthropic und OpenAI ab: Bis zum 25.08.2026 galt darum kein einziges lokales
+    Modell als denkfaehig, obwohl die meisten es sind.
+
+    Einbettungsmodelle fallen aus der Liste. Sie stehen in ``/api/tags`` neben
+    den anderen und beantworten doch keine Frage -- wer eines waehlt, bekommt
+    keinen Hinweis, sondern eine Unterhaltung, die nicht antwortet.
+    """
+    from ai9 import modelle as ai9_modelle
+
     try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            resp = await client.get(f"{get_settings().ollama_base_url}/api/tags")
-            if resp.status_code == 200:
-                data = resp.json()
-                models = []
-                for m in data.get("models", []):
-                    name = m["name"]
-                    model_id = f"ollama/{name}"
-                    size_gb = m.get("size", 0) / (1024 ** 3)
-                    size_label = f" ({size_gb:.0f}GB)" if size_gb > 1 else ""
-                    friendly = name.replace(":", " ").replace("-", " ").title() + size_label
-                    models.append(_make_entry(model_id, friendly, "local", "ollama", litellm_caps))
-                return models
-    except Exception as e:
+        installiert = await ai9_modelle.liste()
+    except Exception as e:  # noqa: BLE001 - Auswahl ist Bequemlichkeit, kein Muss
         logger.warning("Ollama nicht erreichbar: %s", e)
-    return []
+        return []
+
+    models = []
+    for m in installiert:
+        model_id = f"ollama/{m.name}"
+        size_label = f" ({m.groesse_gb:.0f}GB)" if m.groesse_gb > 1 else ""
+        friendly = m.name.replace(":", " ").replace("-", " ").title() + size_label
+        entry = _make_entry(model_id, friendly, "local", "ollama", litellm_caps)
+        if m.denkt and "thinking" not in entry["capabilities"]:
+            entry["capabilities"].append("thinking")
+        models.append(entry)
+    return models
 
 
 async def _fetch_openai_models(litellm_caps: dict | None = None) -> list[dict]:
