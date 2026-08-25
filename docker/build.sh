@@ -33,6 +33,7 @@ rm -rf "$VENDOR_DIR/contentconverter/.git"
 # vendored, damit das Docker-Image ohne Git-Credentials/Registry gebaut werden
 # kann. Dev nutzt stattdessen den Editable-Install (siehe requirements.txt).
 AI9_SRC="${AI9_PATH:-$HOME/dev/github/AI9}"
+AI9_REF="${AI9_REF:-v0.5.0}"
 
 if [ ! -d "$AI9_SRC" ]; then
     echo "FEHLER: AI9-Core nicht gefunden unter $AI9_SRC"
@@ -40,12 +41,42 @@ if [ ! -d "$AI9_SRC" ]; then
     exit 1
 fi
 
-echo "  AI9-Core: $AI9_SRC"
+# Bis zum 25.08.2026 wurde hier ungeprueft kopiert, was gerade dalag. Das
+# Vendor-Verzeichnis stand dadurch auf 0.4.4, waehrend das Backend gegen 0.5.0
+# entwickelt wurde -- ein Abbild aus diesem Stand waere beim ersten Import
+# gescheitert, und zwar erst im Container. Dieselbe Schranke wie im GSW-Cockpit:
+# Ohne Schild kein Abbild.
+if ! git -C "$AI9_SRC" rev-parse --verify --quiet "$AI9_REF" >/dev/null; then
+    echo "FEHLER: Schild $AI9_REF existiert im AI9-Repository nicht." >&2
+    echo "Vorhandene Schilder: $(git -C "$AI9_SRC" tag -l | tr '\n' ' ')" >&2
+    exit 1
+fi
+
+AI9_HEAD="$(git -C "$AI9_SRC" rev-parse HEAD)"
+AI9_TAGGED="$(git -C "$AI9_SRC" rev-parse "${AI9_REF}^{commit}")"
+
+if [ "$AI9_HEAD" != "$AI9_TAGGED" ]; then
+    echo "FEHLER: Die Arbeitskopie von AI9 steht nicht auf $AI9_REF." >&2
+    echo "  HEAD:    $AI9_HEAD" >&2
+    echo "  $AI9_REF: $AI9_TAGGED" >&2
+    echo "Wechsle dorthin oder setze AI9_REF auf die gewuenschte Fassung." >&2
+    exit 1
+fi
+
+if [ -n "$(git -C "$AI9_SRC" status --porcelain)" ]; then
+    echo "FEHLER: Die Arbeitskopie von AI9 hat nicht eingecheckte Aenderungen." >&2
+    echo "Auf dem Schild stuende $AI9_REF, kopiert wuerde etwas anderes." >&2
+    exit 1
+fi
+
+echo "  AI9-Core: $AI9_SRC ($AI9_REF)"
 cp -r "$AI9_SRC" "$VENDOR_DIR/ai9"
 rm -rf "$VENDOR_DIR/ai9/.git" \
        "$VENDOR_DIR/ai9/.venv" \
        "$VENDOR_DIR/ai9/.pytest_cache" \
        "$VENDOR_DIR/ai9/.ruff_cache"
+
+echo "$AI9_REF ($AI9_TAGGED)" > "$VENDOR_DIR/ai9/VENDORED_REF"
 
 echo "==> Vendor-Verzeichnis bereit."
 
