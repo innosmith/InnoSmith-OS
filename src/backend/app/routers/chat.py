@@ -1400,6 +1400,27 @@ async def send_agent_message(
     }
 
 
+def _suchanfrage(args) -> str:
+    """Holt die Suchanfrage aus den Werkzeugargumenten. Leer, wenn nicht lesbar.
+
+    Hermes reicht die Argumente mal als Woerterbuch, mal als JSON-Zeichenkette
+    durch -- je nachdem, ob das Modell sie schon geparst geliefert hat. Beide
+    Formen kommen im Betrieb vor, darum beide hier.
+
+    Faellt nie durch: Ein Fehler beim Lesen der Anfrage darf weder den
+    Suchverlauf noch den Agenten anhalten. Dann steht eben nur der
+    Werkzeugname da.
+    """
+    try:
+        if isinstance(args, dict):
+            return str(args.get("query") or "")
+        if isinstance(args, str) and args.strip().startswith("{"):
+            return str((json.loads(args) or {}).get("query") or "")
+    except Exception:  # noqa: BLE001 - Anzeige darf den Agenten nie stoeren
+        return ""
+    return ""
+
+
 async def _run_agent_background(
     job_id: str,
     conv_id: str,
@@ -1577,8 +1598,20 @@ async def _run_agent_background_impl(
                 skill = None
             if skill:
                 event["skill"] = str(skill)
+        # Bei der Websuche die Anfrage mitzeigen -- im Moment des Geschehens,
+        # nicht erst hinterher im Suchverlauf. «Ich habe im Netz gesucht» ist
+        # keine Auskunft; «ich habe nach *X* gesucht» ist eine, die man pruefen
+        # kann, waehrend sie noch zu aendern waere. Die Anfrage geht dabei
+        # unveraendert hinaus wie sie hinausging -- gezeigt wird, was das Haus
+        # verlassen hat, nicht was sich schoener laese.
+        beschriftung = str(name)
+        if str(name) == "web_search":
+            frage = _suchanfrage(args)
+            if frage:
+                event["query"] = frage
+                beschriftung = f"{name}: «{frage}»"
         _trace_append(event)
-        _emit("tool_start", str(name))
+        _emit("tool_start", beschriftung)
 
     def _web_search_provider() -> str:
         """Tatsächliches Such-Backend der Hermes-nativen Websuche (z. B. ddgs).
@@ -1632,14 +1665,7 @@ async def _run_agent_background_impl(
         # Exakter Abgleich -- ein Substring-Match hatte frueher auch
         # mcp_taskpilot_web_search erfasst und Duplikate erzeugt.
         if str(name) == "web_search":
-            query = ""
-            try:
-                if isinstance(args, dict):
-                    query = str(args.get("query") or "")
-                elif isinstance(args, str) and args.strip().startswith("{"):
-                    query = str((json.loads(args) or {}).get("query") or "")
-            except Exception:  # noqa: BLE001
-                query = ""
+            query = _suchanfrage(args)
             if query:
                 asyncio.run_coroutine_threadsafe(
                     _log_web_search(query, str(result or "")), loop

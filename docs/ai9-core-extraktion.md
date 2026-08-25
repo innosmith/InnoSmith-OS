@@ -18,6 +18,47 @@ diese Richtung geprüft.
 - Scope-Freeze Kunde v1: Chat (alle) + Mail-Assist (1–2). Lokal-first als Default.
 - Name: **AI9** (intern/privat; keine Domain/Registry nötig).
 
+## Zwei Regeln, die bisher nur im Kopf standen
+
+Sie haben mehrfach Entscheide getragen, waren aber nirgends aufgeschrieben — und
+eine ungeschriebene Architekturregel überlebt keine drei Monate.
+
+### Regel der Zwei
+
+> Ein Baustein wandert in den Core, sobald ein **zweiter** Verbraucher ihn
+> braucht. Vorher bleibt er in der App, die ihn erfunden hat.
+
+Der Grund ist nicht Sparsamkeit, sondern Erkenntnis: Beim ersten Verbraucher ist
+noch nicht sichtbar, welcher Teil allgemein und welcher zufällig ist. Erst der
+zweite Fall trennt beides. Wer früher extrahiert, giesst eine Besonderheit in
+Beton und muss sie später mit Sonderfällen aufweichen.
+
+Die Regel hat eine Kehrseite, die genauso verbindlich ist: **Ist der zweite
+Verbraucher da, wird extrahiert — nicht kopiert.** Ein zweites Mal derselbe Code
+in einem anderen Repo ist der teuerste Zustand von allen, weil Fehlerbehebungen
+ab dann doppelt anfallen und trotzdem auseinanderlaufen.
+
+Woher der Code stammt, ist eine getrennte Frage. Hat eine App den Baustein
+bereits erprobt, wird von dort **gehoben**; gibt es ihn nirgends, entsteht er
+gleich im Core.
+
+### Keine Messenger-Kanäle
+
+> Hermes wird ausschliesslich als Bibliothek eingebunden (`AIAgent`), nie als
+> Gateway. In keiner erzeugten `config.yaml` steht ein Kanal.
+
+Hermes bringt Anbindungen für Telegram, Discord, Slack, WhatsApp und E-Mail mit,
+und die Dokumentation legt sie als Weg zum Mehrbenutzerbetrieb nahe
+(`group_sessions_per_user`). Für uns ist das ausgeschlossen: Die Nachrichten
+liefen über fremde Server, und bei Telegram kommt der Standort dazu. Der
+Mehrbenutzerbetrieb läuft bei uns über **Profile** (siehe unten), nicht über
+Kanäle.
+
+Praktisch heisst das: `enabled_toolsets` wird immer **ausdrücklich** übergeben.
+Hermes meldet beim Start zwar `discord`, `feishu_doc` und Verwandtes als
+vorhanden, lädt sie aber nur bei ausdrücklicher Freigabe. Eine Allowlist ist hier
+Pflicht, keine Bequemlichkeit.
+
 ## Phase 0 — Codebase-Audit (Befund)
 
 ### Grösse (gemessen)
@@ -88,6 +129,111 @@ die Call-Sites erneut anzufassen.
   `semantic_search_documents`.
 - **App TaskPilot (`mcp-taskpilot`):** `list_projects`, `list_tasks`, `get_task`,
   `create_task`, `update_task`.
+
+## Der zweite Verbraucher ist da (gsw-cockpit)
+
+Damit greift die Regel der Zwei für fünf Bausteine. Sie werden **AI9 v0.4.0**.
+Woher der Code stammt, entscheidet sich pro Baustein:
+
+| Modul | Herkunft | Warum jetzt |
+|----|----|----|
+| `ai9.hermes` | `services/hermes_config.py` + `build_chat_agent` | Beide Produkte brauchen Hermes; Profile pro Person braucht keines von beiden allein |
+| `ai9.schleuse` | `hermes_worker._schleuse_nach_draussen` | Ein Kunde arbeitet mit öffentlichem Modell — dort entscheidet die Schranke, ob Mandantendaten das Haus verlassen |
+| `ai9.dokumentkontext` | `services/conversation_context.py` + lokaler Teil `context_resolver.py` | Dokumente im Chat will jeder |
+| `ai9.einstellungen` | `core/principal.get_principal_settings`, um die Instanzebene erweitert | «Haus setzt Vorgabe, Person weicht ab» gibt es in TaskPilot nur einstufig |
+| `ai9.laeufe` | `gsw-cockpit/services/laeufe.py` + Protokollidee aus `agent_jobs` | Lange Antworten und Wiederverbindung sind produktunabhängig |
+
+**Bleibt im Produkt:** Routen, Oberfläche, Vokabular, Skills, die konkreten
+Einstellungsschlüssel, Navigationsfreigabe.
+
+### Nachtrag: vier davon sind noch nicht erprobt
+
+Gezählt nach dem Bau (Dateien mit direktem Import):
+
+| Modul | gsw-cockpit | InnoSmith OS | Stand |
+|----|----:|----:|----|
+| `content_converter` | 2 | 5 | **erprobt** |
+| `mapping_store` | 3 | 2 | **erprobt** |
+| `hermes` | 6 | 0 | noch nicht erprobt |
+| `einstellungen` | 2 | 0 | noch nicht erprobt |
+| `laeufe` | 1 | 0 | noch nicht erprobt |
+| `dokumentkontext` | 1 | 0 | noch nicht erprobt |
+| `schleuse` | 0 | 0 | **ohne Verbraucher** |
+
+Die Regel der Zwei ist oben aufgeschrieben und im selben Zug fünfmal nicht
+angewandt worden. Der Anlass war jedesmal plausibel — TaskPilot *wird* Hermes
+brauchen, ein Kunde *wird* ein öffentliches Modell nutzen —, aber «wird» ist
+nicht «tut». `ai9.schleuse` steht bis heute ohne jeden Aufrufer.
+
+**Was das praktisch heisst:** Die Form dieser Module ist geraten, nicht erprobt.
+Beim ersten echten zweiten Verbraucher werden sie sich biegen, und das Biegen
+eines separat versionierten Pakets kostet ungleich mehr als das Biegen einer
+Datei im Produkt. Zwei Beispiele aus dem ersten Tag: Der Schutz `if text:` war in
+TaskPilot vorhanden, ging beim Herausheben verloren und erschien im Cockpit als
+Wort «None» in der Antwort; das stille Datenleck beim einzelnen Restbestand
+musste an drei Stellen behoben werden.
+
+**Folgerung:** Kein weiteres Modul ohne zweiten echten Verbraucher. Wo eine
+Invariante zu wertvoll ist, um sie zu verdoppeln, aber die zweite Umsetzung noch
+fehlt, wird die **Regel** geteilt und nicht der Code — siehe
+`AI9/docs/postfach-disziplin.md`.
+
+### Was gsw-cockpit besser gelöst hat
+
+Beim Werkzeugaufruf schickt `routers/chat.py` nur den **Namen** ans Frontend
+(`_emit("tool_start", str(name))`). Man sieht «web_search», aber nicht, wonach
+gesucht wurde — die Anfrage steht nur im Server-Protokoll `web_searches`. Wer
+nicht sehen kann, was das Haus verlassen hat, kann eine Websuche auch nicht
+verantworten. Die Suchanfrage gehört ins Ereignis; das fliesst zurück.
+
+## Hermes im Mehrbenutzerbetrieb (gemessen, nicht vermutet)
+
+Sonden gegen `hermes-agent==0.18.0` im Abbild `taskpilot-backend:prod`:
+
+| Frage | Befund |
+|----|----|
+| Trennung pro Person | `set_hermes_home_override()` setzt eine **ContextVar**, nicht `os.environ` — ausdrücklich so gebaut. `asyncio.to_thread` trägt sie in den Arbeitsthread. Ein Prozess genügt für alle Mitarbeitenden |
+| Grenze | Ein selbst gestarteter `threading.Thread` erbt sie **nicht** und fällt auf `os.environ["HERMES_HOME"]` zurück |
+| Was das Profil umfasst | `config.yaml`, `SOUL.md`, `memories/`, `skills/`, `sessions/`, `state.db`, `cache/` |
+| Denkmodus | `request_overrides={"reasoning_effort": "none"}` — Ollamas `/v1` beachtet es: 0 Denkzeichen und 0.6s statt 7.8s |
+| Websuche | Toolset `web` liefert `web_search` (ddgs, kein Schlüssel) und `web_extract` (Tavily, Schlüssel nötig). Die Suchanfrage steht im `args` des `tool_start_callback` |
+| Rückgabe | `final_response`, dazu `input_tokens`, `output_tokens`, `api_calls`, `completed`, `interrupted` — genug für ein Laufprotokoll |
+| Agentbau | **24s einmal je Prozess**, danach 0.02s. Also beim Start vorwärmen, wie beim Anonymisierungsmodell |
+| Netzzwang | Keiner. Mit Netz holt Hermes einmalig Modell-Metadaten von OpenRouter (Preise, Kontextlängen) in `cache/`; ohne Netz läuft alles weiter |
+
+**Folgerung für den Aufbau:** Das prozessweite `HERMES_HOME` zeigt auf ein
+**neutrales Basisverzeichnis** mit dem gemeinsamen Skill-Vorrat und ohne
+Gedächtnisdateien. Fällt je ein roher Thread aus dem Kontext, landet er dort —
+und nicht im Profil einer anderen Person.
+
+**Gewählt:** Gedächtnis pro Person, Verfahren gemeinsam. Ein geteiltes
+`MEMORY.md` wäre im Treuhandumfeld ein Berufsgeheimnis-Problem: Was der Agent aus
+dem Mandatsgespräch der einen gelernt hat, könnte im Chat der anderen auftauchen.
+Dazu gehört zwingend eine Stelle in der Oberfläche, an der jede Person ihr
+eigenes Gedächtnis **einsehen und löschen** kann.
+
+### Nachtrag: MCP bricht die Profiltrennung nicht
+
+Aus der Grenze oben — ein roher Thread erbt den Vorrang nicht — war zunächst
+geschlossen worden, MCP sei mit Profilen unvereinbar, weil `tools/mcp_tool.py`
+eine Hintergrund-Ereignisschleife in einem rohen Thread führt. `ai9.hermes`
+schrieb darum kein `mcp_servers`. **Der Schluss war falsch**, und das war der
+Unterschied zwischen «gemessen» und «plausibel»: Gemessen war nur, dass ein
+*beliebiger* roher Thread den Vorrang verliert.
+
+Nachgemessen mit `gsw-cockpit/src/backend/scripts/sonde_mcp_profile.py`:
+
+| Frage | Befund |
+|----|----|
+| Roher Thread | sieht das neutrale Verzeichnis — die allgemeine Aussage stimmt |
+| MCP-Schleife | sieht das **Profil der Person**. `_wrap_with_home_override` trägt den Vorrang ausdrücklich hinüber, und jeder Werkzeugaufruf geht über `_run_on_mcp_loop` dort hindurch |
+| Zwei Personen gleichzeitig | bleiben getrennt; der Vorrang wird je Aufgabe gesetzt und zurückgenommen |
+| Bleibende Grenze | Ein MCP-Server ist ein **Unterprozess** und erbt `os.environ`, nie eine ContextVar. Er sieht das neutrale Verzeichnis. Folgenlos für Fachserver mit eigener Datenquelle; wer einen MCP-Server baut, der Hermes-Dateien liest, muss die Person als Argument bekommen |
+| Freischaltung | Hermes filtert **auch MCP-Werkzeuge** gegen `enabled_toolsets`. Ein Server, der nur in der `config.yaml` steht, startet trotzdem — seine Werkzeuge werden nur nie angeboten. `ai9.hermes` verweigert darum den Start, statt still zu verarmen |
+
+**Folge:** `Umgebung.mcp_server` gibt es seit AI9 v0.4.4, ab Werk leer. Damit
+kann derselbe Kern die Fachwerkzeuge von TaskPilot tragen — und GSW eigene
+bekommen, ohne dass ein zweiter Strang entsteht.
 
 ## Ausgliederung vollzogen: Schwester-Repo `ai9`
 
@@ -187,6 +333,9 @@ vorbestehende DB-Event-Loop- und LLM-Integrationstests (kein Bezug zum Umbau).
       lokalem Arbeitsstand für 100% reproduzierbare Builds.
 - [ ] Phase A/3c: Source-Adapter-Interface für den Index entwerfen (Vorbereitung Phase E)
 - [ ] Phase B: Feature-Set 1 (Chat + Anonymisierung + Sandbox) mehrbenutzerfähig
+      → wird durch AI9 v0.4.0 getragen: `hermes` (Profile pro Person), `laeufe`,
+      `einstellungen`, `schleuse`, `dokumentkontext`. Erster Verbraucher ist
+      gsw-cockpit; TaskPilot zieht danach nach
 - [ ] Phase C: Core in privates Schwester-Repo + Vendoring
 - [ ] Phase D: Credential-/Config-Store pro User + Mail-Agent (M365 App-only + AAP)
 - [ ] Phase E: DMS-Source-Adapter + Index-Scoping
