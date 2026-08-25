@@ -65,6 +65,7 @@ interface Conversation {
   model: string;
   mode?: string;
   temperature?: number;
+  thinking_mode?: ThinkingMode;
   total_tokens: number;
   total_cost_usd: number;
   created_at: string;
@@ -93,12 +94,74 @@ interface ChatMessage {
   elapsed_s?: number | null;
   citations: unknown[] | null;
   attachments?: { name: string; type: string }[];
+  /** Erfundene Namen, die beim Rückbilden stehen geblieben sind. */
+  residuals?: string[] | null;
   created_at: string;
   /** Agent-Job hinter dieser Antwort (Trace/Streaming). */
   job_id?: string | null;
 }
 
 type ChatMode = 'agent' | 'deep_research';
+
+/** Wie stark das Modell vor der Antwort überlegt. */
+type ThinkingMode = 'aus' | 'kurz' | 'lang';
+
+const DENKMODI: { wert: ThinkingMode; kurz: string; titel: string }[] = [
+  { wert: 'aus', kurz: 'Aus', titel: 'Direkt antworten — am schnellsten' },
+  { wert: 'kurz', kurz: 'Kurz', titel: 'Kurz überlegen' },
+  { wert: 'lang', kurz: 'Lang', titel: 'Gründlich überlegen — am langsamsten' },
+];
+
+/**
+ * Was das Tor vor der Cloud gefunden hat, bevor der Text hinausgeht.
+ *
+ * Anders als eine Fehlermeldung ist das eine Frage: Der Text ist maskiert und
+ * ginge so hinaus, aber ein paar Bruchstücke sind stehen geblieben. Wer davor
+ * sitzt, kann das beurteilen — darum wird gefragt statt entschieden.
+ */
+interface AnonPruefung {
+  residuals: string[];
+  preview: string;
+  model: string;
+  erneutSenden: () => void;
+}
+
+/**
+ * Der Denkmodus als Segment-Schalter.
+ *
+ * Drei Stufen statt an/aus, weil «kurz» der Alltagsfall ist: Es kostet ein paar
+ * Sekunden statt einer halben Minute und reicht für fast alles. Ohne die
+ * mittlere Stufe wählt man zwischen zu wenig und zu viel.
+ */
+function DenkmodusWahl({
+  wert, aendern, moeglich,
+}: { wert: ThinkingMode; aendern: (w: ThinkingMode) => void; moeglich: boolean }) {
+  return (
+    <div
+      className={`flex items-center gap-px rounded-md bg-gray-100 p-0.5 dark:bg-gray-700/60 ${moeglich ? '' : 'opacity-40'}`}
+      title={moeglich
+        ? 'Wie gründlich das Modell vor der Antwort überlegt'
+        : 'Dieses Modell bietet keinen Denkmodus an'}
+    >
+      <BrainIcon className="mx-1 h-3 w-3 shrink-0 text-gray-400" />
+      {DENKMODI.map(m => (
+        <button
+          key={m.wert}
+          disabled={!moeglich}
+          onClick={() => aendern(m.wert)}
+          title={m.titel}
+          className={`rounded px-1.5 py-0.5 text-[10px] font-medium transition-colors ${
+            wert === m.wert
+              ? 'bg-white text-violet-700 shadow-sm dark:bg-gray-900 dark:text-violet-300'
+              : 'text-gray-500 hover:text-gray-700 disabled:hover:text-gray-500 dark:text-gray-400 dark:hover:text-gray-200'
+          }`}
+        >
+          {m.kurz}
+        </button>
+      ))}
+    </div>
+  );
+}
 
 /** Angepinntes Kontext-Dokument der Konversation (bleibt über alle Turns sichtbar). */
 interface ContextItem {
@@ -411,6 +474,8 @@ export function ChatPage() {
   const [selectedModel, setSelectedModel] = useState('');
   const [temperature, setTemperature] = useState(0.7);
   const [mode, setMode] = useState<ChatMode>('agent');
+  const [thinkingMode, setThinkingMode] = useState<ThinkingMode>('lang');
+  const [anonPruefung, setAnonPruefung] = useState<AnonPruefung | null>(null);
   const [input, setInput] = useState('');
   // Optionale Standard-Eingabe (stdin) für den Code-Modus.
   const [codeStdin, setCodeStdin] = useState('');
@@ -582,11 +647,12 @@ export function ChatPage() {
     if (!activeId) { setMessages([]); setContextItems([]); return; }
     loadContextItems(activeId);
     if (skipNextFetchRef.current) { skipNextFetchRef.current = false; return; }
-    api.get<{ messages: ChatMessage[]; mode?: string; model?: string; grounding?: { enabled_servers?: string[]; include_memory?: boolean } }>(`/api/chat/conversations/${activeId}`)
+    api.get<{ messages: ChatMessage[]; mode?: string; model?: string; thinking_mode?: ThinkingMode; grounding?: { enabled_servers?: string[]; include_memory?: boolean } }>(`/api/chat/conversations/${activeId}`)
       .then(d => {
         setMessages(d.messages || []);
         // Nur noch zwei Modi: alles ausser Deep Research öffnet als Agent.
         setMode(d.mode === 'deep_research' ? 'deep_research' : 'agent');
+        setThinkingMode(d.thinking_mode || 'lang');
         setEnabledServers(new Set(d.grounding?.enabled_servers || []));
         setIncludeMemory(Boolean(d.grounding?.include_memory));
         // Modell der Konversation wiederherstellen. Legacy-Platzhalter
@@ -1041,6 +1107,18 @@ export function ChatPage() {
             } else if (evt === 'chunk') {
               acc.stream += data.content || '';
               updateAgentState(convId, { streamingContent: acc.stream });
+            } else if (evt === 'chunk_replace' || evt === 'thinking_replace') {
+              // Läuft der Text maskiert, kann er nicht Stück für Stück
+              // zurückgebildet werden — eine Deckadresse fällt leicht über die
+              // Grenze zweier Stücke. Das Backend schickt darum jeweils den
+              // ganzen bisherigen Text, und hier wird ersetzt statt angehängt.
+              if (evt === 'chunk_replace') {
+                acc.stream = data.content || '';
+                updateAgentState(convId, { streamingContent: acc.stream });
+              } else {
+                acc.think = data.content || '';
+                updateAgentState(convId, { thinkingContent: acc.think });
+              }
             } else if (evt === 'thinking') {
               acc.think += data.content || '';
               updateAgentState(convId, { thinkingContent: acc.think });
@@ -1051,8 +1129,9 @@ export function ChatPage() {
                 tool_trace: acc.trace.length > 0 ? [...acc.trace] : null,
                 tools_used: data.tools_used || null,
                 elapsed_s: data.elapsed_s || null,
+                residuals: data.residuals || null,
                 citations: null, created_at: new Date().toISOString(),
-                reasoning_tokens: null, thinking: acc.think || null,
+                reasoning_tokens: null, thinking: data.thinking || acc.think || null,
                 job_id: jobId,
               }]);
               updateAgentState(convId, { isStreaming: false, streamingContent: '', thinkingContent: '', toolTrace: [], jobId: null, status: 'done' });
@@ -1284,43 +1363,66 @@ export function ChatPage() {
     }
 
     if (effMode === 'agent') {
-      try {
-        const resp = await fetch(`/api/chat/conversations/${convId}/agent`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
-          body: JSON.stringify({
-            content,
-            model: selectedModel,
-            temperature,
-            enabled_servers: Array.from(enabledServers),
-            include_memory: includeMemory,
-            context_sources: contextSourcesPayload,
-            attachments: attachmentMeta,
-          }),
-        });
-        if (!resp.ok) {
-          const errorText = await resp.text().catch(() => `HTTP ${resp.status}`);
-          throw new Error(errorText);
-        }
-        const { job_id } = await resp.json();
-        updateAgentState(convId, { jobId: job_id });
-        agentOffsets.current[convId] = 0;
-        agentAccumulators.current[convId] = { stream: '', think: '', trace: [] };
-        persistAgentJob(convId, job_id, 0);
-        if (contextSourcesPayload.length > 0) loadContextItems(convId);
+      const cid = convId;
+      /**
+       * Ein Sendeversuch. ``freigegeben`` ist die Antwort auf eine
+       * vorangegangene Rückfrage des Tors vor der Cloud — beim ersten Versuch
+       * immer false, denn niemand kann etwas freigeben, das er nicht gesehen hat.
+       */
+      const versuche = async (freigegeben: boolean) => {
+        try {
+          const resp = await fetch(`/api/chat/conversations/${cid}/agent`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+            body: JSON.stringify({
+              content,
+              model: selectedModel,
+              temperature,
+              thinking_mode: thinkingMode,
+              enabled_servers: Array.from(enabledServers),
+              include_memory: includeMemory,
+              context_sources: contextSourcesPayload,
+              attachments: attachmentMeta,
+              anon_ack: freigegeben,
+            }),
+          });
+          if (resp.status === 409) {
+            const { detail } = await resp.json();
+            if (detail?.code === 'anon_review') {
+              setAnonPruefung({
+                residuals: detail.residuals || [],
+                preview: detail.preview || '',
+                model: detail.model || selectedModel,
+                erneutSenden: () => { setAnonPruefung(null); void versuche(true); },
+              });
+              updateAgentState(cid, { isStreaming: false, thinkingContent: '', status: 'idle' });
+              return;
+            }
+          }
+          if (!resp.ok) {
+            const errorText = await resp.text().catch(() => `HTTP ${resp.status}`);
+            throw new Error(errorText);
+          }
+          const { job_id } = await resp.json();
+          updateAgentState(cid, { isStreaming: true, jobId: job_id, status: 'running' });
+          agentOffsets.current[cid] = 0;
+          agentAccumulators.current[cid] = { stream: '', think: '', trace: [] };
+          persistAgentJob(cid, job_id, 0);
+          if (contextSourcesPayload.length > 0) loadContextItems(cid);
 
-        connectAgentStream(convId, job_id, 0);
-      } catch (err) {
-        updateAgentState(convId, { isStreaming: false, streamingContent: '', thinkingContent: '', status: 'error' });
-        setMessages(prev => [...prev, {
-          id: uuid(), role: 'assistant',
-          content: `Fehler: ${(err as Error).message}`,
-          tokens: null, cost_usd: null, citations: null, created_at: new Date().toISOString(),
-        }]);
-        loadConversations();
-      } finally {
-        loadConversations();
-      }
+          connectAgentStream(cid, job_id, 0);
+        } catch (err) {
+          updateAgentState(cid, { isStreaming: false, streamingContent: '', thinkingContent: '', status: 'error' });
+          setMessages(prev => [...prev, {
+            id: uuid(), role: 'assistant',
+            content: `Fehler: ${(err as Error).message}`,
+            tokens: null, cost_usd: null, citations: null, created_at: new Date().toISOString(),
+          }]);
+        } finally {
+          loadConversations();
+        }
+      };
+      await versuche(false);
     } else {
       abortControllerRef.current?.abort();
       const controller = new AbortController();
@@ -1493,6 +1595,11 @@ export function ChatPage() {
   };
 
   const selectedModelInfo = modelInfo(selectedModel);
+
+  // Ob das gewählte Modell überhaupt einen Denkmodus kennt. Ist die Modellliste
+  // noch nicht da, wird der Schalter nicht vorsorglich gesperrt — ein kurz
+  // ausgegrautes Bedienelement sieht kaputt aus.
+  const kannDenken = !selectedModelInfo || selectedModelInfo.capabilities.includes('thinking');
 
   // Der /code-Shortcut blendet das optionale stdin-Feld ein (nur im Agent-Modus).
   const showCodeStdin = mode === 'agent' && input.trimStart().startsWith('/code');
@@ -1831,6 +1938,7 @@ export function ChatPage() {
                           </div>
                         )}
                       </div>
+                      <DenkmodusWahl wert={thinkingMode} aendern={setThinkingMode} moeglich={kannDenken} />
                       <div className="relative">
                         <button onClick={() => setTempOpen(!tempOpen)} className="rounded-md px-1.5 py-1 text-[11px] font-medium text-gray-500 transition-colors hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-700">T&nbsp;{temperature.toFixed(1)}</button>
                         {tempOpen && (
@@ -2009,6 +2117,17 @@ export function ChatPage() {
                             {msg.reasoning_tokens.toLocaleString('de-CH')}
                           </span>
                         ) : null}
+                        {msg.residuals && msg.residuals.length > 0 ? (
+                          // Der stillste aller Fehler: Diese Namen sehen echt
+                          // aus und sind erfunden. Sie hier zu zeigen, ist der
+                          // Preis dafür, dass die Maskierung lesbaren Text macht.
+                          <span
+                            className="flex items-center gap-1 rounded bg-rose-100 px-1.5 py-px font-medium text-rose-700 dark:bg-rose-900/40 dark:text-rose-300"
+                            title={`Erfundene Namen im Text: ${msg.residuals.join(', ')}`}
+                          >
+                            ⚠ {msg.residuals.length} erfundene {msg.residuals.length === 1 ? 'Angabe' : 'Angaben'}
+                          </span>
+                        ) : null}
                         {msg.cost_usd ? (
                           <span className="flex items-center gap-1" title="Kosten">
                             <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M12 6v12m-3-2.818.879.659c1.171.879 3.07.879 4.242 0 1.172-.879 1.172-2.303 0-3.182C13.536 12.219 12.768 12 12 12c-.725 0-1.45-.22-2.003-.659-1.106-.879-1.106-2.303 0-3.182s2.9-.879 4.006 0l.415.33M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" /></svg>
@@ -2118,6 +2237,49 @@ export function ChatPage() {
                           )}
                         </div>
                       </details>
+                    )}
+                    {/* Das Tor vor der Cloud: Bruchstücke gefunden, der Mensch entscheidet */}
+                    {anonPruefung && (
+                      <div className="mb-3 rounded-lg border border-rose-300 bg-rose-50 p-3 dark:border-rose-800 dark:bg-rose-950/30">
+                        <p className="flex items-center gap-1.5 text-sm font-medium text-rose-900 dark:text-rose-200">
+                          <CloudIcon className="h-4 w-4 shrink-0" />
+                          Vor dem Versand an {modelLabel(anonPruefung.model)}
+                        </p>
+                        <p className="mt-1 text-xs text-rose-800/90 dark:text-rose-300/90">
+                          Die Anonymisierung hat {anonPruefung.residuals.length === 1 ? 'eine Stelle' : `${anonPruefung.residuals.length} Stellen`} nicht ersetzt.
+                          Der übrige Text ist maskiert.
+                        </p>
+                        <div className="mt-2 flex flex-wrap gap-1">
+                          {anonPruefung.residuals.slice(0, 12).map((r, i) => (
+                            <code key={i} className="rounded bg-rose-100 px-1.5 py-0.5 text-[11px] text-rose-900 dark:bg-rose-900/50 dark:text-rose-100">{r}</code>
+                          ))}
+                        </div>
+                        <details className="mt-2">
+                          <summary className="cursor-pointer text-[11px] text-rose-700 hover:underline dark:text-rose-300">
+                            Zeigen, was hinausginge
+                          </summary>
+                          <pre className="mt-1.5 max-h-48 overflow-auto whitespace-pre-wrap rounded bg-white/70 p-2 text-[11px] leading-relaxed text-gray-700 dark:bg-gray-900/60 dark:text-gray-300">
+                            {anonPruefung.preview}
+                          </pre>
+                        </details>
+                        <div className="mt-3 flex flex-wrap items-center gap-2">
+                          <button
+                            onClick={anonPruefung.erneutSenden}
+                            className="rounded-md bg-rose-600 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-rose-700"
+                          >
+                            Trotzdem senden
+                          </button>
+                          <button
+                            onClick={() => setAnonPruefung(null)}
+                            className="rounded-md border border-gray-300 px-3 py-1.5 text-xs font-medium text-gray-600 transition-colors hover:bg-gray-100 dark:border-gray-600 dark:text-gray-300 dark:hover:bg-gray-700"
+                          >
+                            Abbrechen
+                          </button>
+                          <span className="text-[11px] text-gray-500 dark:text-gray-400">
+                            Oder ein lokales Modell wählen — dann bleibt alles im Haus.
+                          </span>
+                        </div>
+                      </div>
                     )}
                     {/* HITL: strukturierte Rückfrage des Agenten (clarify) */}
                     {clarifyRequest && activeId && (
@@ -2303,6 +2465,8 @@ export function ChatPage() {
                         </div>
                       )}
                     </div>
+
+                    <DenkmodusWahl wert={thinkingMode} aendern={setThinkingMode} moeglich={kannDenken} />
 
                     <div className="relative">
                       <button onClick={() => setTempOpen(!tempOpen)} className="rounded-md px-1.5 py-1 text-[11px] font-medium text-gray-500 transition-colors hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-700">

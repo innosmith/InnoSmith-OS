@@ -39,6 +39,13 @@ _SANDBOX_EXEC_TOOL = "mcp_sandbox_execute_code"
 _EXEC_MARKER_RE = re.compile(r"<!--tp-exec:([A-Za-z0-9_-]+):([^>]*)-->")
 
 
+# Trenner zwischen den Teilen eines Gesprächs, das als **ein** Text maskiert
+# wird. Getrennte Maskierungsläufe vergäben pro Turn andere Deckadressen, und
+# dann hiesse dieselbe Person in Runde drei anders als in Runde eins -- für das
+# Modell zwei Menschen.
+_TRENNER = "\u241e"
+
+
 def _artifacts_marker(scope: str | None, names: list[str] | None) -> str:
     """Frontend-Marker fuer erzeugte Sandbox-Artefakte (gleiches Format wie
     code_execute._artifacts_marker). Das ChatPage parst ihn und rendert die
@@ -308,6 +315,7 @@ async def create_conversation(
         "model": conv.model,
         "mode": conv.mode,
         "temperature": conv.temperature,
+        "thinking_mode": conv.thinking_mode,
         "grounding": conv.grounding or {},
         "total_tokens": conv.total_tokens,
         "total_cost_usd": float(conv.total_cost_usd),
@@ -351,6 +359,7 @@ async def get_conversation(
         "model": conv.model,
         "mode": conv.mode,
         "temperature": conv.temperature,
+        "thinking_mode": conv.thinking_mode,
         "grounding": conv.grounding or {},
         "total_tokens": conv.total_tokens,
         "total_cost_usd": float(conv.total_cost_usd),
@@ -367,6 +376,8 @@ async def get_conversation(
                 "cost_usd": float(msg.cost_usd) if msg.cost_usd else None,
                 "attachments": msg.attachments,
                 "citations": msg.citations,
+                "thinking": msg.thinking,
+                "residuals": msg.residuals or [],
                 "created_at": msg.created_at.isoformat(),
             }
             for msg in conv.messages
@@ -414,6 +425,10 @@ async def update_conversation(
         conv.temperature = body["temperature"]
     if "mode" in body:
         conv.mode = body["mode"]
+    if "thinking_mode" in body:
+        from app.services import denkstufen
+
+        conv.thinking_mode = denkstufen.normalisiere(body["thinking_mode"])
     if "grounding" in body:
         conv.grounding = body["grounding"] or {}
 
@@ -424,6 +439,7 @@ async def update_conversation(
         "model": conv.model,
         "mode": conv.mode,
         "temperature": conv.temperature,
+        "thinking_mode": conv.thinking_mode,
         "grounding": conv.grounding or {},
     }
 
@@ -1227,6 +1243,129 @@ async def get_agent_tools(user: User = Depends(require_role("owner"))):
     return {"servers": result}
 
 
+class _TorGeschlossen(HTTPException):
+    """Der Text darf so nicht hinaus -- und es gibt nichts zu entscheiden."""
+
+    def __init__(self, grund: str):
+        super().__init__(status_code=503, detail=grund)
+
+
+class _TorBrauchtFreigabe(HTTPException):
+    """Restbestände gefunden. Der Mensch sitzt davor, also entscheidet er.
+
+    409 statt 400: Der Zustand der Anfrage ist nicht falsch, er ist noch nicht
+    freigegeben. Dieselbe Anfrage mit ``anon_ack: true`` geht durch.
+    """
+
+    def __init__(self, restbestaende: list[str], vorschau: str, modell: str):
+        super().__init__(
+            status_code=409,
+            detail={
+                "code": "anon_review",
+                "model": modell,
+                "residuals": restbestaende,
+                "preview": vorschau[:4000],
+                "message": (
+                    "Im maskierten Text stehen noch Bruchstücke echter Werte. "
+                    "Bitte prüfen, bevor der Text das Haus verlässt."
+                ),
+            },
+        )
+
+
+async def _protokolliere_ausgang(
+    *, user_id: uuid.UUID, modell: str, restbestaende: list[str], freigegeben: bool
+) -> None:
+    """Hält fest, **dass** Text hinausging -- nie, welcher.
+
+    Der Umstand ist die prüfbare Tatsache: welches Modell, maskiert, wie viele
+    Bruchstücke gemeldet, ob ein Mensch sie freigegeben hat. Der Text selbst
+    gehört nicht in ein Protokoll, dessen ganzer Zweck es ist, aufbewahrt zu
+    werden.
+    """
+    try:
+        from app.models.models import AuditLog
+
+        async with async_session() as adb:
+            adb.add(AuditLog(
+                user_id=user_id,
+                action="chat.cloud_ausgang",
+                resource="llm_conversation",
+                details={
+                    "model": modell,
+                    "anonymized": True,
+                    "residual_count": len(restbestaende),
+                    "human_approved": freigegeben,
+                },
+            ))
+            await adb.commit()
+    except Exception:  # noqa: BLE001 - ein Protokollfehler darf nichts anhalten
+        logger.warning("Audit-Eintrag für den Cloud-Ausgang fehlgeschlagen")
+
+
+async def _tor_nach_draussen(
+    *,
+    modell: str,
+    prompt: str,
+    verlauf: list[dict],
+    freigegeben: bool,
+) -> tuple[str, list[dict], str | None, list[str]]:
+    """Das Tor vor der Cloud. Liefert ``(prompt, verlauf, sitzung, restbestaende)``.
+
+    Bei einem lokalen Modell reicht es alles unverändert durch -- das Modell
+    rechnet auf derselben Maschine, die Maskierung wäre Aufwand ohne Schutz.
+
+    Bei einem auswärtigen Modell geht **alles** durch die Maskierung: Frage,
+    Verlauf und angeheftete Dokumente. Sie stehen im Verlauf, und wer nur die
+    Frage maskiert, schickt das Dossier trotzdem hinaus.
+
+    ``freigegeben`` ist die Antwort des Menschen auf eine vorangegangene
+    Rückfrage. Die zweite Maskierung erzeugt eine neue Sitzung statt die alte
+    fortzuschreiben -- die Erkennung ist deterministisch, der Befund also
+    derselbe, und ein Freigabe-Token mit eigener Lebensdauer wäre eine zweite
+    Ablaufmechanik neben der des Mapping-Stores.
+    """
+    from app.services import schleuse
+
+    if schleuse.ist_lokal(modell):
+        return prompt, verlauf, None, []
+
+    teile = [prompt, *[str(m.get("content") or "") for m in verlauf]]
+    durchlass = await schleuse.pruefe_ausgang(
+        text=_TRENNER.join(teile), modell=modell, bei_restbestaenden="melden"
+    )
+
+    if durchlass.lokal:
+        # Kein Weg nach draussen. Zeigen kann man nur, was es gibt -- hier gibt
+        # es keinen maskierten Text, also auch nichts zu entscheiden.
+        raise _TorGeschlossen(
+            durchlass.grund or "Die Anonymisierung ist nicht verfügbar."
+        )
+
+    maskierte_teile = durchlass.text.split(_TRENNER)
+    if len(maskierte_teile) != len(teile):
+        # Die Maskierung hat den Trenner verschluckt. Welcher Abschnitt jetzt
+        # welcher ist, wäre geraten -- und ein falsch zugeordneter Verlauf ist
+        # schlimmer als eine abgelehnte Anfrage.
+        logger.error(
+            "Maskierung hat die Gesprächsstruktur zerlegt (%d statt %d Teile)",
+            len(maskierte_teile), len(teile),
+        )
+        raise _TorGeschlossen(
+            "Die Maskierung hat die Gesprächsstruktur zerlegt -- der Text bleibt im Haus."
+        )
+
+    reste = list(durchlass.restbestaende)
+    if reste and not freigegeben:
+        raise _TorBrauchtFreigabe(reste, maskierte_teile[0], modell)
+
+    neuer_verlauf = [
+        {**m, "content": text}
+        for m, text in zip(verlauf, maskierte_teile[1:], strict=True)
+    ]
+    return maskierte_teile[0], neuer_verlauf, durchlass.sitzung, reste
+
+
 @router.post("/conversations/{conversation_id}/agent")
 async def send_agent_message(
     conversation_id: uuid.UUID,
@@ -1257,6 +1396,11 @@ async def send_agent_message(
     selected_model = body.get("model", "hermes")
     context_sources = body.get("context_sources", [])
     logger.info("[agent] Nachricht (%.80s…), conv=%s", user_content, conversation_id)
+
+    from app.services import denkstufen
+
+    denkmodus = denkstufen.normalisiere(body.get("thinking_mode") or conv.thinking_mode)
+    conv.thinking_mode = denkmodus
 
     # Grounding-Politik: Lokale Modelle = voller Zugriff. Cloud-Modelle =
     # Default-Deny; nur explizit freigegebene MCP-Server + optional Memory.
@@ -1290,6 +1434,54 @@ async def send_agent_message(
     # damit die UI es beim Wiederoeffnen/Reload korrekt wiederherstellen kann.
     conv.model = selected_model
 
+    # Dokumente an die Konversation pinnen (einmalige Extraktion) und den
+    # gesamten angepinnten Korpus laden — identische Kontext-Pipeline wie im
+    # Plain-Chat: Dokumente bleiben über die ganze Konversation sichtbar.
+    from app.services.conversation_context import (
+        build_conversation_history,
+        build_pinned_context_block,
+        load_pinned_items,
+        persist_context_sources,
+    )
+
+    await persist_context_sources(db, conv.id, context_sources)
+    pinned_items = await load_pinned_items(db, conv.id)
+    pinned_block = build_pinned_context_block(pinned_items)
+
+    # Der Verlauf enthält die neue Frage noch nicht — sie steht als '## Anfrage'
+    # im Prompt. Er geht als echtes Message-Array an die Hermes-Runtime
+    # (conversation_history) statt als gekürzter Textblock.
+    sorted_messages = sorted(conv.messages, key=lambda m: m.created_at)
+    conversation_history = build_conversation_history(sorted_messages)
+    if pinned_block:
+        conversation_history = [{
+            "role": "user",
+            "content": (
+                "Folgende Dokumente sind in dieser Konversation angepinnt und "
+                "bleiben dauerhaft verfügbar. Nutze ihren Inhalt direkt:\n\n"
+                + pinned_block
+            ),
+        }, *conversation_history]
+
+    full_prompt = await _build_agent_prompt(user_content, task_id=conv.task_id)
+
+    # Das Tor vor der Cloud — **vor** dem Speichern der Nachricht. Andernfalls
+    # stünde bei einer Rückfrage oder Absage eine Frage ohne Antwort im Verlauf,
+    # und der Nutzer müsste sie von Hand aufräumen, um es erneut zu versuchen.
+    full_prompt, conversation_history, anon_sitzung, restbestaende = await _tor_nach_draussen(
+        modell=selected_model,
+        prompt=full_prompt,
+        verlauf=conversation_history,
+        freigegeben=bool(body.get("anon_ack")),
+    )
+    if anon_sitzung:
+        await _protokolliere_ausgang(
+            user_id=user.id,
+            modell=selected_model,
+            restbestaende=restbestaende,
+            freigegeben=bool(body.get("anon_ack")),
+        )
+
     user_msg = LlmMessage(
         conversation_id=conv.id,
         role="user",
@@ -1312,40 +1504,6 @@ async def send_agent_message(
     if not conv.title and len(conv.messages) <= 1:
         conv.title = user_content[:80] + ("..." if len(user_content) > 80 else "")
 
-    # Dokumente an die Konversation pinnen (einmalige Extraktion) und den
-    # gesamten angepinnten Korpus laden — identische Kontext-Pipeline wie im
-    # Plain-Chat: Dokumente bleiben über die ganze Konversation sichtbar.
-    from app.services.conversation_context import (
-        build_conversation_history,
-        build_pinned_context_block,
-        load_pinned_items,
-        persist_context_sources,
-    )
-
-    await persist_context_sources(db, conv.id, context_sources)
-    pinned_items = await load_pinned_items(db, conv.id)
-    pinned_block = build_pinned_context_block(pinned_items)
-
-    # Verlauf ohne die soeben gespeicherte User-Nachricht — sie steht bereits
-    # als '## Anfrage' im Prompt. Der Verlauf geht als echtes Message-Array an
-    # die Hermes-Runtime (conversation_history) statt als gekürzter Textblock.
-    sorted_messages = sorted(
-        (m for m in conv.messages if m.id != user_msg.id),
-        key=lambda m: m.created_at,
-    )
-    conversation_history = build_conversation_history(sorted_messages)
-    if pinned_block:
-        conversation_history = [{
-            "role": "user",
-            "content": (
-                "Folgende Dokumente sind in dieser Konversation angepinnt und "
-                "bleiben dauerhaft verfügbar. Nutze ihren Inhalt direkt:\n\n"
-                + pinned_block
-            ),
-        }, *conversation_history]
-
-    full_prompt = await _build_agent_prompt(user_content, task_id=conv.task_id)
-
     agent_job = AgentJob(
         user_id=user.id,
         job_type="chat_agent",
@@ -1354,6 +1512,8 @@ async def send_agent_message(
         metadata_json={
             "conversation_id": str(conv.id),
             "prompt_preview": user_content[:200],
+            "anonymized": bool(anon_sitzung),
+            "thinking_mode": denkmodus,
         },
         started_at=datetime.now(tz.utc),
     )
@@ -1390,6 +1550,8 @@ async def send_agent_message(
             enabled_servers=grounding["enabled_servers"],
             include_memory=grounding["include_memory"],
             conversation_history=conversation_history,
+            denkmodus=denkmodus,
+            anon_sitzung=anon_sitzung,
         )
     )
 
@@ -1397,6 +1559,8 @@ async def send_agent_message(
         "job_id": job_id_str,
         "conversation_id": conv_id_str,
         "status": "running",
+        "anonymized": bool(anon_sitzung),
+        "residuals": restbestaende,
     }
 
 
@@ -1430,6 +1594,8 @@ async def _run_agent_background(
     enabled_servers: list[str] | None = None,
     include_memory: bool = False,
     conversation_history: list[dict] | None = None,
+    denkmodus: str = "lang",
+    anon_sitzung: str | None = None,
 ):
     """Wrapper um den eigentlichen Lauf: Parallelitaets-Begrenzung + robuster Cleanup.
 
@@ -1461,6 +1627,8 @@ async def _run_agent_background(
                 enabled_servers=enabled_servers,
                 include_memory=include_memory,
                 conversation_history=conversation_history,
+                denkmodus=denkmodus,
+                anon_sitzung=anon_sitzung,
             )
         except asyncio.CancelledError:
             logger.info("[agent-bg] Background-Task abgebrochen, job=%s", job_id)
@@ -1486,6 +1654,8 @@ async def _run_agent_background_impl(
     enabled_servers: list[str] | None = None,
     include_memory: bool = False,
     conversation_history: list[dict] | None = None,
+    denkmodus: str = "lang",
+    anon_sitzung: str | None = None,
 ):
     """Führt den Hermes-Agent (InnoPilot) als Background-Task aus.
 
@@ -1560,10 +1730,18 @@ async def _run_agent_background_impl(
         if len(_trace) < _MAX_TRACE:
             _trace.append(event)
 
+    # Der Gedankengang als Ganzes -- der Trace hält ihn nur in Stücken zu je
+    # 2000 Zeichen und deckelt bei 200 Ereignissen. Für die Anzeige nach einem
+    # Neuladen braucht es den ungekürzten Text.
+    _denken: list[str] = []
+    _DENKEN_GRENZE = 200_000
+
     def on_reasoning(text: str):
         _check_cancel()
         if text:
             _trace_append({"type": "thinking", "text": str(text)[:2000]})
+            if sum(len(t) for t in _denken) < _DENKEN_GRENZE:
+                _denken.append(str(text))
             _emit("thinking", text)
 
     _tools_used: list[str] = []
@@ -1731,6 +1909,20 @@ async def _run_agent_background_impl(
         asyncio.create_task(_cleanup_agent_events(job_id))
         return
 
+    # Denkmodus: Hermes bekommt die anbieterrichtigen Parameter. Die Abbildung
+    # steht in app/services/denkstufen.py, damit die Oberfläche drei Stufen
+    # kennen darf und nichts über Ollama, Anthropic oder OpenAI wissen muss.
+    try:
+        from app.services import denkstufen
+
+        overrides = denkstufen.request_overrides(denkmodus, model)
+        if overrides:
+            bestand = dict(getattr(agent, "request_overrides", None) or {})
+            bestand.update(overrides)
+            agent.request_overrides = bestand
+    except Exception:  # noqa: BLE001 - ein Denkschalter darf keinen Lauf verhindern
+        logger.warning("Denkmodus %s liess sich nicht setzen", denkmodus)
+
     active_model = getattr(agent, "model", "?")
     await _push_agent_event(job_id, {"event": "status", "data": json.dumps(
         {"content": f"InnoPilot bereit (Modell: {active_model}) — Aufgabe wird verarbeitet..."})})
@@ -1751,10 +1943,41 @@ async def _run_agent_background_impl(
     # damit kein "Task exception was never retrieved" geloggt wird.
     bot_task.add_done_callback(lambda t: None if t.cancelled() else t.exception())
 
+    # Läuft der Text maskiert, kann er nicht Bruchstück für Bruchstück
+    # zurückgebildet werden: Eine Deckadresse fällt leicht über die Grenze
+    # zweier Chunks, und die Rückbildung fände sie dann nie. Gesendet wird
+    # darum periodisch der **ganze** zurückgebildete Text (``chunk_replace``
+    # statt anhängendem ``chunk``) -- so, wie es das GSW-Cockpit macht.
+    _maskiert = bool(anon_sitzung)
+    _roh = {"antwort": "", "denken": ""}
+    _letzte_rueckbildung = {"antwort": 0.0, "denken": 0.0}
+    _RUECKBILDUNG_TAKT = 0.8
+
+    async def _zeige_zurueckgebildet(feld: str, ereignis: str, erzwinge: bool = False):
+        jetzt = time.monotonic()
+        if not erzwinge and jetzt - _letzte_rueckbildung[feld] < _RUECKBILDUNG_TAKT:
+            return
+        _letzte_rueckbildung[feld] = jetzt
+        try:
+            from app.services import anon_politik
+
+            klar, _reste = await anon_politik.bilde_zurueck(_roh[feld], anon_sitzung or "")
+        except Exception:  # noqa: BLE001 - Zwischenstand, der Endstand zählt
+            return
+        await _push_agent_event(job_id, {"event": ereignis, "data": json.dumps({"content": klar})})
+
     async def _drain(evt_type: str, evt_data):
         if evt_type == "chunk":
+            if _maskiert:
+                _roh["antwort"] += str(evt_data)
+                await _zeige_zurueckgebildet("antwort", "chunk_replace")
+                return
             await _push_agent_event(job_id, {"event": "chunk", "data": json.dumps({"content": evt_data})})
         elif evt_type == "thinking":
+            if _maskiert:
+                _roh["denken"] += str(evt_data)
+                await _zeige_zurueckgebildet("denken", "thinking_replace")
+                return
             await _push_agent_event(job_id, {"event": "thinking", "data": json.dumps({"content": evt_data})})
         elif evt_type == "tool_start":
             await _push_agent_event(job_id, {"event": "tool_start", "data": json.dumps({"tools": evt_data})})
@@ -1813,6 +2036,17 @@ async def _run_agent_background_impl(
             await _drain(evt_type, evt_data)
 
         content = bot_task.result()
+        rueckstaende: list[str] = []
+        if _maskiert:
+            # Der Endstand, nicht der Zwischenstand: Hier zählt die
+            # Rückstandsliste, weil ein stehengebliebener Ersatzname genauso
+            # plausibel aussieht wie ein echter und niemand Anlass zu zweifeln hat.
+            from app.services import anon_politik
+
+            content, rueckstaende = await anon_politik.bilde_zurueck(
+                content, anon_sitzung or ""
+            )
+            await _zeige_zurueckgebildet("denken", "thinking_replace", erzwinge=True)
         # Erzeugte Sandbox-Artefakte inline verfuegbar machen: Marker anhaengen,
         # damit das Frontend den ArtifactViewer (Bilder/HTML spielbar, Vollbild)
         # rendert — sowohl live (done-Event) als auch nach Reload (gespeicherter
@@ -1837,6 +2071,12 @@ async def _run_agent_background_impl(
     # (alle Iterationen inkl. Tool-Turns) auf dem frisch gebauten Agenten.
     total_tokens_used = int(getattr(agent, "session_total_tokens", 0) or 0)
 
+    gedankengang = "".join(_denken).strip()
+    if _maskiert and gedankengang:
+        from app.services import anon_politik
+
+        gedankengang, _ = await anon_politik.bilde_zurueck(gedankengang, anon_sitzung or "")
+
     async with async_session() as save_db:
         assistant_msg = LlmMessage(
             conversation_id=uuid.UUID(conv_id),
@@ -1844,6 +2084,8 @@ async def _run_agent_background_impl(
             content=content,
             model=model if model not in ("hermes", "nanobot", "") else None,
             tokens=total_tokens_used or None,
+            thinking=gedankengang or None,
+            residuals=rueckstaende,
         )
         save_db.add(assistant_msg)
         if total_tokens_used:
@@ -1861,6 +2103,9 @@ async def _run_agent_background_impl(
         "message_id": str(assistant_msg.id),
         "tokens": total_tokens_used,
         "content": content,
+        "thinking": gedankengang or None,
+        "residuals": rueckstaende,
+        "anonymized": _maskiert,
         "tools_used": tools_used,
         "elapsed_s": round(time.time() - t_start, 1),
     })})

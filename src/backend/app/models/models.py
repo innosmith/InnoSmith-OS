@@ -480,6 +480,13 @@ class LlmConversation(Base):
     model: Mapped[str] = mapped_column(Text, nullable=False)
     mode: Mapped[str] = mapped_column(Text, server_default="agent")
     temperature: Mapped[float] = mapped_column(Float, server_default="0.7")
+    thinking_mode: Mapped[str] = mapped_column(Text, server_default="lang")
+    """Denkmodus dieser Unterhaltung: ``aus`` | ``kurz`` | ``lang``.
+
+    Vorgabe ``lang``, weil sichtbares Denken bisher das Verhalten war und ein
+    stiller Wechsel beim Deploy niemandem hilft. Abbildung auf Anbieter-
+    Parameter in ``app/services/denkstufen.py``.
+    """
     grounding: Mapped[dict] = mapped_column(JSONB, server_default="{}")
     total_tokens: Mapped[int] = mapped_column(Integer, server_default="0")
     total_cost_usd: Mapped[float] = mapped_column(Numeric(10, 4), server_default="0")
@@ -502,6 +509,19 @@ class LlmMessage(Base):
     cost_usd: Mapped[float | None] = mapped_column(Numeric(10, 6))
     attachments: Mapped[dict] = mapped_column(JSONB, server_default="[]")
     citations: Mapped[dict] = mapped_column(JSONB, server_default="[]")
+    thinking: Mapped[str | None] = mapped_column(Text)
+    """Der Gedankengang zu dieser Antwort.
+
+    Bis 25.08.2026 lebte er nur im SSE-Strom: Die Oberfläche zeigte ihn, und beim
+    Neuladen war er fort. Wer nachvollziehen will, wie eine Antwort zustande kam,
+    kann das dann genau so lange, wie er den Tab nicht schliesst.
+    """
+    residuals: Mapped[dict] = mapped_column(JSONB, server_default="[]")
+    """Erfundene Namen, die die Rückbildung überlebt haben.
+
+    Der stillste aller Fehler: Sie sehen echt aus und sind es nicht. Sie gehören
+    an die Nachricht geheftet und nicht in ein Protokoll, das niemand liest.
+    """
     created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=func.now())
 
     conversation: Mapped["LlmConversation"] = relationship(back_populates="messages")

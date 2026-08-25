@@ -21,6 +21,7 @@ sieht, bevor er wirkt** (siehe ``app/services/anon_politik``): Der Agent-Job
 bricht ab und laeuft lokal, die Finanzanalyse warnt in der Vorschau.
 """
 
+from contextlib import contextmanager
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -223,13 +224,22 @@ _LOKAL = object()
 _CLOUD = object()
 
 
-def _schleuse_umgebung(**extra):
-    return patch.multiple(
+@contextmanager
+def _schleuse_umgebung(maskieren):
+    """Die Umgebung eines Worker-Jobs mit Cloud-Override.
+
+    Gepatcht wird ``anon_politik.maskiere`` und nicht mehr ein Helfer im Worker:
+    Seit dem 25.08.2026 entscheidet ``app.services.schleuse`` -- dieselbe Stelle,
+    die der Chat befragt --, und der Worker sagt ihr nur noch, dass sein Weg
+    unbeaufsichtigt ist. Bliebe der Test am alten Helfer, prueefte er eine
+    Abzweigung, die niemand mehr nimmt.
+    """
+    with patch.multiple(
         "app.services.hermes_worker",
         _is_local_model=lambda m: m.startswith("ollama/"),
         _build_cloud_job_agent=lambda m: _CLOUD,
-        **extra,
-    )
+    ), patch("app.services.anon_politik.maskiere", maskieren):
+        yield
 
 
 @pytest.mark.asyncio
@@ -243,9 +253,7 @@ async def test_meeting_mit_cloud_override_geht_maskiert_hinaus():
     werden muss, ist keine Regel.
     """
     meta = {"llm_override": "anthropic/opus", "meeting_transcript_id": "M1"}
-    with _schleuse_umgebung(
-        _anonymize_for_cloud=AsyncMock(return_value=("MASKIERT", "S1"))
-    ):
+    with _schleuse_umgebung(AsyncMock(return_value=("MASKIERT", "S1", [], []))):
         agent, prompt, session = await _schleuse_nach_draussen(
             _LOKAL, "Transkript mit Gabriel Brunner", meta, "job1"
         )
@@ -264,8 +272,27 @@ async def test_gescheiterte_maskierung_haelt_den_job_im_haus():
     waere ein zweiter Fehler.
     """
     meta = {"llm_override": "anthropic/opus"}
+    with _schleuse_umgebung(AsyncMock(side_effect=RuntimeError("Modell weg"))):
+        agent, prompt, session = await _schleuse_nach_draussen(
+            _LOKAL, "Transkript mit Gabriel Brunner", meta, "job1"
+        )
+
+    assert agent is _LOKAL
+    assert prompt == "Transkript mit Gabriel Brunner"
+    assert session is None
+
+
+@pytest.mark.asyncio
+async def test_restbestaende_halten_den_job_im_haus():
+    """Unbeaufsichtigt heisst: Bruchstuecke sind ein Abbruch, keine Warnung.
+
+    Der Job laeuft, waehrend niemand hinsieht. Eine Warnung, die erst danach
+    jemand liest, aendert nichts mehr -- anders als im Chat, wo derselbe Befund
+    dem Menschen vorgelegt wird, weil er davor sitzt.
+    """
+    meta = {"llm_override": "anthropic/opus"}
     with _schleuse_umgebung(
-        _anonymize_for_cloud=AsyncMock(side_effect=RuntimeError("Bruchstuecke"))
+        AsyncMock(return_value=("Fast maskiert", "S1", [], ["Brunner"]))
     ):
         agent, prompt, session = await _schleuse_nach_draussen(
             _LOKAL, "Transkript mit Gabriel Brunner", meta, "job1"
@@ -281,7 +308,7 @@ async def test_lokaler_override_wird_nicht_maskiert():
     """Im Haus bleibt der Klartext -- Maskierung kostet dort nur Kontext."""
     maskieren = AsyncMock()
     meta = {"llm_override": "ollama/qwen3.6:latest"}
-    with _schleuse_umgebung(_anonymize_for_cloud=maskieren):
+    with _schleuse_umgebung(maskieren):
         agent, prompt, session = await _schleuse_nach_draussen(
             _LOKAL, "Klartext", meta, "job1"
         )
@@ -293,7 +320,7 @@ async def test_lokaler_override_wird_nicht_maskiert():
 @pytest.mark.asyncio
 async def test_ohne_override_passiert_nichts():
     maskieren = AsyncMock()
-    with _schleuse_umgebung(_anonymize_for_cloud=maskieren):
+    with _schleuse_umgebung(maskieren):
         agent, prompt, session = await _schleuse_nach_draussen(_LOKAL, "Klartext", {}, "j")
 
     assert (agent, prompt, session) == (_LOKAL, "Klartext", None)

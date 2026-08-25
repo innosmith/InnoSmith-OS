@@ -5214,11 +5214,19 @@ async def _schleuse_nach_draussen(agent, prompt: str, meta: dict, job_id):
     **Fail-closed:** Scheitert die Maskierung oder meldet sie Restbestaende,
     laeuft der Job lokal weiter. Ein langsameres Modell ist der guenstigere
     Fehler; einmal versandte Daten kommen nicht zurueck.
+
+    Die Entscheidung selbst faellt in ``app.services.schleuse`` -- derselben
+    Stelle, die der Chat befragt. Hier steht nur noch, was ein Worker-Job daraus
+    macht: Er ist unbeaufsichtigt, also gilt ``abbrechen``.
     """
+    from app.services import schleuse
+
     override_model = (meta.get("llm_override") or "").strip()
     if not override_model or _is_local_model(override_model):
         return agent, prompt, None
 
+    # Der Agent zuerst: Scheitert er, waere die Maskierung Arbeit fuer nichts und
+    # liesse eine Sitzung im Mapping-Store zurueck.
     try:
         cloud_agent = await asyncio.to_thread(_build_cloud_job_agent, override_model)
     except Exception:
@@ -5227,20 +5235,18 @@ async def _schleuse_nach_draussen(agent, prompt: str, meta: dict, job_id):
         )
         return agent, prompt, None
 
-    try:
-        maskiert, session_id = await _anonymize_for_cloud(prompt)
-    except Exception as exc:  # noqa: BLE001 - fail-closed
-        logger.warning(
-            "Job %s: Maskierung fuer die Cloud fehlgeschlagen (%s) -- laeuft lokal",
-            job_id, exc,
-        )
+    durchlass = await schleuse.pruefe_ausgang(
+        text=prompt, modell=override_model, bei_restbestaenden="abbrechen"
+    )
+    if durchlass.lokal:
+        logger.warning("Job %s: %s -- laeuft lokal", job_id, durchlass.grund)
         return agent, prompt, None
 
     logger.info(
         "Job %s: Cloud-LLM-Override -> %s (maskiert, Default-Deny-Toolset)",
         job_id, override_model,
     )
-    return cloud_agent, maskiert, session_id
+    return cloud_agent, durchlass.text, durchlass.sitzung
 
 
 # ── Worker-Loop ──────────────────────────────────────────

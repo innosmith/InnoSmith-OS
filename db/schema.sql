@@ -292,6 +292,9 @@ CREATE TABLE llm_conversations (
     model           TEXT NOT NULL,
     mode            TEXT DEFAULT 'agent' CHECK (mode IN ('agent', 'deep_research')),
     temperature     REAL DEFAULT 0.7,
+    -- Denkmodus der Unterhaltung; Abbildung auf Anbieter-Parameter in
+    -- app/services/denkstufen.py. Vorgabe 'lang' = bisheriges Verhalten.
+    thinking_mode   TEXT NOT NULL DEFAULT 'lang' CHECK (thinking_mode IN ('aus', 'kurz', 'lang')),
     grounding       JSONB DEFAULT '{}'::jsonb,
     total_tokens    INT DEFAULT 0,
     total_cost_usd  NUMERIC(10,4) DEFAULT 0,
@@ -309,6 +312,12 @@ CREATE TABLE llm_messages (
     cost_usd        NUMERIC(10,6),
     attachments     JSONB DEFAULT '[]'::jsonb,
     citations       JSONB DEFAULT '[]'::jsonb,
+    -- Gedankengang zur Antwort; ohne Spalte lebte er nur im SSE-Strom und war
+    -- beim Neuladen fort.
+    thinking        TEXT,
+    -- Erfundene Namen, die die Rueckbildung ueberlebt haben. Sie sehen echt aus
+    -- und sind es nicht -- darum an der Nachricht und nicht im Log.
+    residuals       JSONB NOT NULL DEFAULT '[]'::jsonb,
     created_at      TIMESTAMPTZ DEFAULT now()
 );
 
