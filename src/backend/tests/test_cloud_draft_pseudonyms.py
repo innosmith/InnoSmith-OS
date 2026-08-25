@@ -96,6 +96,21 @@ async def test_maskieren_meldet_restbestaende():
 
 
 @pytest.mark.asyncio
+async def test_ein_einzelner_restbestand_bleibt_ein_name():
+    """MCP liefert bei genau einem Fund eine Zeichenkette statt einer Liste.
+
+    Die Form des Ergebnisses hing damit an der Anzahl der Funde. Ein
+    ``[str(r) for r in reste]`` zerlegte «Eglis» dann in fuenf Buchstaben --
+    gemeldet wurde etwas, das niemand als den uebersehenen Namen erkennt, und
+    der Abbruch stuetzte sich auf fuenf Scheinfunde statt auf einen echten.
+    """
+    ergebnis = {"anonymized_text": "Wir prüfen Eglis Antrag.", "mapping_keys": _KEYS}
+    with _cc(anonymize_content=ergebnis, find_residual_originals="Eglis"):
+        _text, _sid, _diff, reste = await anon_politik.maskiere("...")
+    assert reste == ["Eglis"]
+
+
+@pytest.mark.asyncio
 async def test_nicht_pruefbar_gilt_als_fund():
     """Ein nicht geprueter Text ist kein sauberer Text.
 
@@ -158,6 +173,22 @@ async def test_verkuerzter_ersatzname_wird_gemeldet():
     """
     with _store(_KEYS), _cc(
         deanonymize_content="Hoi Senad, besten Dank", find_residual_fakes=["Senad"]
+    ):
+        _text, rueckstaende = await _deanonymize_from_cloud("...", "s1")
+    assert rueckstaende == ["Senad"]
+
+
+@pytest.mark.asyncio
+async def test_ein_einzelner_rueckstand_bleibt_ein_name():
+    """Dieselbe Falle wie bei den Restbestaenden, in der stummeren Richtung.
+
+    MCP liefert bei genau einem Fund eine Zeichenkette statt einer Liste. Ein
+    ``[str(r) for r in rueckstaende]`` machte daraus fuenf Buchstaben. Hier
+    stuende am Ende ein erfundener, voellig plausibler Name in einem Schreiben
+    an den Mandanten, und die Warnung davor waere unlesbar.
+    """
+    with _store(_KEYS), _cc(
+        deanonymize_content="Hoi Senad, besten Dank", find_residual_fakes="Senad"
     ):
         _text, rueckstaende = await _deanonymize_from_cloud("...", "s1")
     assert rueckstaende == ["Senad"]

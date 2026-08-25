@@ -91,7 +91,11 @@ async def maskiere(text: str) -> tuple[str, str, list[dict], list[str]]:
     schluessel = ergebnis.get("mapping_keys", {})
 
     try:
-        reste = await cc.call_tool(
+        # call_tool_liste und nicht call_tool: Bei genau einem Fund liefert die
+        # MCP-Bruecke eine Zeichenkette statt einer Liste. Ein str(r) je Element
+        # zerlegte «Mueller» dann in sechs Buchstaben -- gemeldet wuerde etwas,
+        # das niemand als den uebersehenen Namen erkennt.
+        reste = await cc.call_tool_liste(
             "find_residual_originals", text=maskiert, mapping_keys=schluessel
         )
     except Exception as exc:  # noqa: BLE001 - fail-closed
@@ -101,7 +105,7 @@ async def maskiere(text: str) -> tuple[str, str, list[dict], list[str]]:
         reste = ["(Pruefung fehlgeschlagen)"]
 
     session_id, diff = mapping_store.store_mapping(schluessel)
-    return maskiert, session_id, diff, [str(r) for r in (reste or [])]
+    return maskiert, session_id, diff, reste
 
 
 async def bilde_zurueck(text: str, session_id: str) -> tuple[str, list[str]]:
@@ -134,11 +138,11 @@ async def bilde_zurueck(text: str, session_id: str) -> tuple[str, list[str]]:
         return text, ["(Rueckbildung fehlgeschlagen)"]
 
     try:
-        rueckstaende = await cc.call_tool(
+        rueckstaende = await cc.call_tool_liste(
             "find_residual_fakes", text=klar, mapping_keys=schluessel
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning("Rueckstandspruefung fehlgeschlagen (%s) -- gilt als Fund", exc)
         rueckstaende = ["(Pruefung fehlgeschlagen)"]
 
-    return klar, [str(r) for r in (rueckstaende or [])]
+    return klar, rueckstaende
