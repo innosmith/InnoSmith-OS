@@ -1279,14 +1279,20 @@ export function SettingsPage() {
                       <label className="block text-sm font-semibold text-gray-900 dark:text-white">Follow-up-Erkennung</label>
                       <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
                         Gesendete E-Mails ohne Antwort werden nach der Wartezeit als
-                        Nachfass-Vorschlag im Cockpit angezeigt (mit Follow-up-Badge).
+                        Nachfass-Vorschlag im Cockpit angezeigt (mit Follow-up-Badge)
+                        und im Tagesbriefing genannt.
+                      </p>
+                      <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                        Vorerst abgeschaltet: die Projektübersicht zeigt ohnehin, wo
+                        etwas offen ist — die zusätzlichen Vorschläge waren mehr
+                        Rauschen als Nutzen.
                       </p>
                     </div>
                     <button
-                      onClick={() => updateSetting('followup_enabled', !(settings.followup_enabled ?? true))}
-                      className={`relative h-6 w-11 shrink-0 rounded-full transition-colors ${(settings.followup_enabled ?? true) ? 'bg-indigo-600' : 'bg-gray-300 dark:bg-gray-600'}`}
+                      onClick={() => updateSetting('followup_enabled', !(settings.followup_enabled ?? false))}
+                      className={`relative h-6 w-11 shrink-0 rounded-full transition-colors ${(settings.followup_enabled ?? false) ? 'bg-indigo-600' : 'bg-gray-300 dark:bg-gray-600'}`}
                     >
-                      <span className={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform ${(settings.followup_enabled ?? true) ? 'left-[22px]' : 'left-0.5'}`} />
+                      <span className={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform ${(settings.followup_enabled ?? false) ? 'left-[22px]' : 'left-0.5'}`} />
                     </button>
                   </div>
                   <div className="mt-3 flex items-center gap-2">
@@ -1297,7 +1303,7 @@ export function SettingsPage() {
                       max={30}
                       value={settings.followup_wait_days ?? 5}
                       onChange={(e) => updateSetting('followup_wait_days', Number(e.target.value) || 5)}
-                      disabled={!(settings.followup_enabled ?? true)}
+                      disabled={!(settings.followup_enabled ?? false)}
                       className="w-20 rounded-lg border border-gray-300 bg-white px-2 py-1.5 text-sm text-gray-900 focus:border-indigo-500 focus:outline-none disabled:opacity-40 dark:border-gray-600 dark:bg-gray-700 dark:text-white"
                     />
                     <span className="text-sm text-gray-500 dark:text-gray-400">Arbeitstage</span>

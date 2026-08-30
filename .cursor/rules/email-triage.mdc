@@ -42,7 +42,9 @@ Mail. Nur klassifizieren, wenn die Klasse wirklich passt.
 - **Wichtig:** Echte Mensch-zu-Mensch Kommunikation, BFH-E-Mails
 - **Offerten/Verträge:** Formelle Dokumente → `task` (reply_expected: true)
 - **Networking/Leads:** LinkedIn-Einladungen, Erstkontakte → `task` (reply_expected: true)
-- **Finanzen:** QR-Rechnungen, Mahnungen, Treuhand → `task` (reply_expected: false)
+- **Finanzen:** QR-Rechnungen, Mahnungen, Kreditoren, Buchhaltung, MWST → `task`
+  (reply_expected: false). Am Thema entschieden, nie am Absender — die Treuhand
+  ist gleichzeitig Kunde, ihre Projektmails sind `Wichtig`.
 - **Kalender:** Termineinladungen → Kalender prüfen, dann `auto_reply` oder `task`
 - **System:** Auto-generierte Mails → `fyi`
 - **Newsletter:** Marketing → `fyi`

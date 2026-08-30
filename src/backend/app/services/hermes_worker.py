@@ -38,7 +38,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import NamedTuple
 
-from sqlalchemy import cast, func, select, update
+from sqlalchemy import cast, func, or_, select, update
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import selectinload
 
@@ -1916,7 +1916,8 @@ _BRIEFING_INSTRUCTIONS: dict[str, str] = {
         "Auftrag: die Randnotizen sichtbar machen, die zwischen den Terminen "
         "verschwinden.\n\n"
         "Schreibe eine kurze Liste. Pro Punkt EIN Satz mit der konkreten Handlung "
-        "(«Bei X nachfassen», «Protokoll zu Y erstellen»). Ordne nach Dringlichkeit: "
+        "(«Protokoll zu X erstellen», «Zeiterfassung für Donnerstag nachtragen»). "
+        "Ordne nach Dringlichkeit: "
         "was heute passieren muss, steht oben.\n\n"
         "Wenn die Datenlage keine Auffälligkeiten enthält, schreibe genau einen Satz: "
         "dass nichts liegt. Erfinde keine Sektionen, um Länge zu erzeugen."
@@ -3053,15 +3054,26 @@ async def _create_email_task(
                 .values(
                     triage_class="fyi",
                     reply_expected=False,
-                    suggested_action={
-                        "label": "Verworfen",
-                        "triage_class": "fyi",
-                        "suppressed_by_dismissal": True,
-                        "rationale": (
-                            "Praktisch identischer Task-Vorschlag wurde kürzlich "
-                            "verworfen -- kein erneuter Vorschlag."
-                        ),
-                    },
+                    # Zusammenführen statt überschreiben: Das Label des Modells steht
+                    # zu diesem Zeitpunkt schon in der Zeile, und es bleibt richtig --
+                    # unterdrückt wurde der Task, nicht die Kategorie. Vorher stand
+                    # hier ein vollständiges Ersetzen mit ``label = Verworfen``, was
+                    # zweierlei anrichtete: die echte Kategorie war weg, und
+                    # "Verworfen" tauchte als Kategorie in der Statistik auf, obwohl es
+                    # keine ist. Die Tatsache trägt ``suppressed_by_dismissal``.
+                    suggested_action=EmailTriage.suggested_action.op("||")(
+                        cast(
+                            {
+                                "triage_class": "fyi",
+                                "suppressed_by_dismissal": True,
+                                "rationale": (
+                                    "Praktisch identischer Task-Vorschlag wurde "
+                                    "kürzlich verworfen -- kein erneuter Vorschlag."
+                                ),
+                            },
+                            JSONB,
+                        )
+                    ),
                     status="acted",
                 )
             )
@@ -3081,16 +3093,24 @@ async def _create_email_task(
                 .values(
                     triage_class="fyi",
                     reply_expected=False,
-                    suggested_action={
-                        "label": "Duplikat",
-                        "triage_class": "fyi",
-                        "deduplicated": True,
-                        "duplicate_of": str(dup.id),
-                        "rationale": (
-                            f"Bereits als offene Aufgabe erfasst ('{(dup.title or '')[:60]}'). "
-                            "Als weitere Meldung angedockt -- kein neuer Task."
-                        ),
-                    },
+                    # Wie oben: Das Label bleibt, ``deduplicated`` trägt die Tatsache.
+                    # "Duplikat" als Kategorie war doppelt falsch -- es überschrieb
+                    # die echte und behauptete eine, die es nicht gibt.
+                    suggested_action=EmailTriage.suggested_action.op("||")(
+                        cast(
+                            {
+                                "triage_class": "fyi",
+                                "deduplicated": True,
+                                "duplicate_of": str(dup.id),
+                                "rationale": (
+                                    f"Bereits als offene Aufgabe erfasst "
+                                    f"('{(dup.title or '')[:60]}'). Als weitere "
+                                    "Meldung angedockt -- kein neuer Task."
+                                ),
+                            },
+                            JSONB,
+                        )
+                    ),
                     status="acted",
                 )
             )
@@ -5124,15 +5144,51 @@ async def _reap_stale_jobs() -> int:
     return len(reaped_ids)
 
 
+def _meta_from_triage(triage: EmailTriage) -> dict:
+    """Job-Metadata allein aus der Triage-Zeile, ohne Job als Quelle.
+
+    Nötig für Zeilen, deren Job gelöscht wurde: Die Zeile selbst traegt Handle,
+    Identitaet, Betreff und Absender -- genug fuer einen neuen Lauf. Was fehlt
+    (``conversation_id``, ``body_preview``, ``recipient_type``), holt der Agent im
+    Pflicht-Kontext ohnehin selbst ueber ``get_email``.
+    """
+    return {
+        "email_message_id": triage.message_id,
+        "internet_message_id": triage.internet_message_id or "",
+        "subject": triage.subject or "",
+        "from_address": triage.from_address or "",
+        "from_name": triage.from_name or "",
+        "inference_classification": triage.inference_class or "",
+        "body_preview": "",
+        "conversation_id": "",
+    }
+
+
 async def _resweep_unclassified_triages(limit: int = 20) -> int:
     """Holt still durchgefallene Triages zurueck in die Queue (Selbstheilung).
 
-    E-Mails, deren Agent-Job abgeschlossen/fehlgeschlagen ist, deren
-    ``email_triage`` aber ohne Klasse auf ``pending`` haengt (z. B. aus der Zeit
-    vor dem robusten Parser, oder weil der LLM keinen Block lieferte), werden mit
-    geklonter Metadata neu eingereiht. Ein ``resweep_count`` deckelt die
-    Wiederholungen (``MAX_RESWEEP``), damit dauerhaft problematische Mails nicht
-    endlos zirkulieren.
+    Aufgegriffen wird jede Zeile, die einen **nicht-terminalen** Status traegt
+    (``pending`` oder ``processing``), obwohl ihr Job fertig, gescheitert oder gar
+    nicht mehr vorhanden ist. Ein ``resweep_count`` deckelt die Wiederholungen
+    (``MAX_RESWEEP``), damit dauerhaft problematische Mails nicht endlos zirkulieren.
+
+    Drei Luecken hatte diese Funktion bis zum 30.08.2026, und alle drei fuehrten zu
+    Mails, die nie triagiert wurden -- ohne Fehlermeldung, ohne Eintrag im Cockpit:
+
+    1. **INNER JOIN auf ``agent_job_id``.** Loescht ein Mensch gescheiterte Jobs im
+       Cockpit, nullt der Loeschpfad diesen Fremdschluessel. Damit fiel die Zeile aus
+       dem Join und war unsichtbar, waehrend die Dedup-Pruefung die Mail weiter kannte.
+       Gemessen betraf das 10 Zeilen, sieben davon vom 19.08.2026. Jetzt LEFT OUTER
+       JOIN, und die Metadata kommt notfalls aus der Zeile selbst.
+    2. **Nur ``status == 'pending'``.** 23 Zeilen hingen auf ``processing`` fest, weil
+       der Job mitten im Schreib-Pass starb. ``processing`` ohne laufenden Job ist ein
+       Widerspruch, kein Zustand.
+    3. **Zusaetzlich ``triage_class IS NULL``.** Das war ein Stellvertreter fuer «nie
+       fertig geworden» und schloss genau die ``processing``-Zeilen aus, die schon eine
+       Klasse trugen. Der Status sagt dasselbe direkt.
+
+    Die Altersgrenze ``RESWEEP_MAX_AGE_DAYS`` bleibt: aeltere Mails 404en ohnehin
+    haeufig und erzeugen nur Churn.
     """
     requeued = 0
     dismissed = 0
@@ -5140,11 +5196,15 @@ async def _resweep_unclassified_triages(limit: int = 20) -> int:
     async with async_session() as db:
         rows = await db.execute(
             select(EmailTriage, AgentJob)
-            .join(AgentJob, EmailTriage.agent_job_id == AgentJob.id)
+            .outerjoin(AgentJob, EmailTriage.agent_job_id == AgentJob.id)
             .where(
-                EmailTriage.triage_class.is_(None),
-                EmailTriage.status == "pending",
-                AgentJob.status.in_(["completed", "failed"]),
+                EmailTriage.status.in_(["pending", "processing"]),
+                or_(
+                    # Job geloescht -- die Zeile traegt sich selbst.
+                    AgentJob.id.is_(None),
+                    # Job fertig oder gescheitert, Zeile aber unfertig.
+                    AgentJob.status.in_(["completed", "failed"]),
+                ),
                 # Nur frische Mails -- aeltere 404en ohnehin und erzeugen nur Churn.
                 EmailTriage.created_at >= cutoff,
             )
@@ -5152,13 +5212,19 @@ async def _resweep_unclassified_triages(limit: int = 20) -> int:
             .limit(limit)
         )
         for triage, job in rows.all():
-            meta = dict(job.metadata_json or {})
+            meta = dict(job.metadata_json or {}) if job is not None else _meta_from_triage(triage)
+            message_id = meta.get("email_message_id")
             # Ohne Message-ID ist ein Re-Run sinnlos (get_email schluege fehl).
-            if not meta.get("email_message_id"):
+            # ``replay_``-Kennungen sind synthetisch (Replay aus dem Cockpit) und
+            # zeigen auf keine echte Mail.
+            if not message_id or str(message_id).startswith("replay_"):
                 triage.status = "dismissed"
                 dismissed += 1
                 continue
-            resweep_count = int(meta.get("resweep_count") or 0)
+            # Ohne Job ist der Zaehler verloren. Bei 1 statt 0 anzusetzen begrenzt die
+            # Kette auch dann, wenn jemand wiederholt Jobs loescht -- der neue Job
+            # traegt den Zaehler weiter, und beim naechsten Fehlschlag ist Schluss.
+            resweep_count = int(meta.get("resweep_count") or (0 if job is not None else 1))
             if resweep_count >= MAX_RESWEEP:
                 # Erschoepfte Wiederholungen: endgueltig schliessen, statt jeden
                 # Zyklus erneut zu selektieren (kein Dauer-Churn).
@@ -5170,13 +5236,13 @@ async def _resweep_unclassified_triages(limit: int = 20) -> int:
                 if k not in ("trace", "tools_used", "self_grade")
             }
             new_meta["resweep_count"] = resweep_count + 1
-            new_meta["resweep_of"] = str(job.id)
+            new_meta["resweep_of"] = str(job.id) if job is not None else "verwaist"
             new_job = AgentJob(
-                user_id=job.user_id,
+                user_id=job.user_id if job is not None else triage.user_id,
                 task_id=None,
                 job_type="email_triage",
                 status="queued",
-                llm_model=job.llm_model,
+                llm_model=job.llm_model if job is not None else None,
                 metadata_json=new_meta,
             )
             db.add(new_job)

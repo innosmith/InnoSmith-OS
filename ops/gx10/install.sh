@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 #
-# Installiert Watchdog, Telemetrie-Sampler und verdichtete sar-Messung auf der
-# GX10. Aufruf: sudo ./install.sh
+# Richtet auf der GX10 die Massnahmen gegen die Freezes ein und die Messung,
+# mit der ein erneuter Freeze aufzuklären wäre. Aufruf: sudo ./install.sh
+#
+# Die Reihenfolge folgt der Wirkung: zuerst die Ursache (Flash Attention),
+# dann die Rettungskette (Panic -> Neustart, Watchdog), dann die Beobachtung.
 #
 # Das Skript ist idempotent -- ein zweiter Lauf richtet keinen Schaden an.
 # Zur Rücknahme siehe README.md in diesem Verzeichnis.
@@ -18,24 +21,47 @@ SICHERUNG="/var/backups/gx10-setup-$(date '+%Y%m%d-%H%M%S')"
 
 schritt() { printf '\n>>> %s\n' "$1"; }
 
+# Legt die Sicherung unter dem vollen Pfad ab. Sonst überschrieben sich
+# override.conf und watchdog.conf gegenseitig -- beide heissen nur "*.conf".
+sichern() {
+    local datei="$1"
+    [[ -f "$datei" ]] || return 0
+    cp -a "$datei" "$SICHERUNG/$(printf '%s' "${datei#/}" | tr '/' '_')"
+    printf '     gesichert: %s\n' "$datei"
+}
+
 mkdir -p "$SICHERUNG"
 
-schritt "1/5  Vorhandene Konfiguration sichern nach $SICHERUNG"
-for datei in /etc/cron.d/sysstat /etc/systemd/system.conf.d/watchdog.conf; do
-    if [[ -f "$datei" ]]; then
-        cp -a "$datei" "$SICHERUNG/"
-        printf '     gesichert: %s\n' "$datei"
-    fi
-done
+schritt "1/7  Vorhandene Konfiguration sichern nach $SICHERUNG"
+sichern /etc/systemd/system/ollama.service.d/override.conf
+sichern /etc/sysctl.d/60-gx10-panic.conf
+sichern /etc/systemd/system.conf.d/watchdog.conf
+sichern /etc/cron.d/sysstat
 
-schritt '2/5  Hardware-Watchdog konfigurieren'
+schritt '2/7  Ollama: Flash Attention abschalten'
+# Der eigentliche Eingriff. Begründung in ollama-override.conf und in
+# docs/gx10-freeze-befund.md.
+install -d -m 0755 /etc/systemd/system/ollama.service.d
+install -m 0644 "$QUELLE/ollama-override.conf" \
+    /etc/systemd/system/ollama.service.d/override.conf
+systemctl daemon-reload
+if ! timeout 60 systemctl restart ollama; then
+    printf 'WARNUNG: Ollama liess sich nicht neu starten.\n'
+    printf '         Pruefen mit: systemctl status ollama\n'
+fi
+
+schritt '3/7  Kernel-Panic soll neu starten statt stehenzubleiben'
+install -m 0644 "$QUELLE/panic-reboot.conf" /etc/sysctl.d/60-gx10-panic.conf
+sysctl -p /etc/sysctl.d/60-gx10-panic.conf
+
+schritt '4/7  Hardware-Watchdog konfigurieren'
 install -d -m 0755 /etc/systemd/system.conf.d
 install -m 0644 "$QUELLE/watchdog.conf" /etc/systemd/system.conf.d/watchdog.conf
 # daemon-reexec startet den systemd-Manager neu und übernimmt dabei die
 # Watchdog-Einstellung. Laufende Dienste bleiben unberührt.
 systemctl daemon-reexec
 
-schritt '3/5  Telemetrie-Sampler einrichten'
+schritt '5/7  Telemetrie-Sampler einrichten'
 install -m 0755 "$QUELLE/gx10-telemetrie.sh"    /usr/local/bin/gx10-telemetrie.sh
 install -m 0755 "$QUELLE/gx10-freeze-report.sh" /usr/local/bin/gx10-freeze-report.sh
 install -m 0644 "$QUELLE/gx10-telemetrie.service" /etc/systemd/system/gx10-telemetrie.service
@@ -55,7 +81,7 @@ if ! timeout 30 systemctl restart gx10-telemetrie.service; then
     printf '         Und mit:     systemctl list-jobs\n'
 fi
 
-schritt '4/5  sar auf Minutentakt verdichten'
+schritt '6/7  sar auf Minutentakt verdichten'
 # Gesammelt wird über sysstat-collect.timer, nicht über cron: In
 # /etc/default/sysstat steht ENABLED="false", der cron-Aufruf von debian-sa1
 # bleibt damit folgenlos. Die cron-Datei wird nur auf die Debian-Vorgabe
@@ -69,7 +95,20 @@ if ! timeout 20 systemctl restart sysstat-collect.timer; then
     printf 'WARNUNG: sysstat-collect.timer liess sich nicht neu starten.\n'
 fi
 
-schritt '5/5  Ergebnis pruefen'
+schritt '7/7  Ergebnis pruefen'
+printf '\n--- Ollama ---\n'
+printf 'Dienst: %s\n' "$(systemctl is-active ollama)"
+if systemctl show ollama -p Environment --value | grep -q 'OLLAMA_FLASH_ATTENTION=0'; then
+    printf 'OLLAMA_FLASH_ATTENTION=0 ist aktiv.\n'
+else
+    printf 'WARNUNG: Flash Attention ist NICHT abgeschaltet. Das ist der Kern der Massnahme.\n'
+    systemctl show ollama -p Environment --value | tr ' ' '\n' | grep OLLAMA || true
+fi
+
+printf '\n--- Kernel-Panic ---\n'
+printf 'kernel.panic=%s  kernel.panic_on_oops=%s\n' \
+    "$(sysctl -n kernel.panic)" "$(sysctl -n kernel.panic_on_oops)"
+
 printf '\n--- Watchdog ---\n'
 printf 'systemd RuntimeWatchdog: %s\n' \
     "$(systemctl show -p RuntimeWatchdogUSec --value)"
@@ -94,5 +133,7 @@ timeout 10 systemctl list-timers --all --no-pager 2>/dev/null \
     || printf 'WARNUNG: sysstat-collect.timer nicht gelistet.\n'
 
 printf '\nFertig. Sicherung der Vorgaengerdateien: %s\n' "$SICHERUNG"
-printf 'Der Watchdog muss state=active und ein Timeout nahe 120s zeigen.\n'
-printf 'Weicht das Timeout ab, hat der Treiber den Wert gekappt -- siehe README.md.\n'
+printf 'Letzter Nachweis, erst nach der naechsten Modellanfrage moeglich:\n'
+printf '  journalctl -u ollama -o cat | grep -o -- "--flash-attn [a-z]*" | tail -n 1\n'
+printf 'Dort muss "--flash-attn off" stehen. Fehlt der Schalter ganz, ist ein\n'
+printf 'alter Runner noch geladen -- dann "ollama stop <modell>" und neu anfragen.\n'

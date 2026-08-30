@@ -17,9 +17,10 @@ LOG="${GX10_TELEMETRIE_LOG:-/var/log/gx10-telemetrie.log}"
 INTERVALL="${GX10_TELEMETRIE_INTERVALL:-5}"
 NVIDIA_TIMEOUT="${GX10_NVIDIA_TIMEOUT:-4}"
 
-# Beim Freeze vom 24.08.2026 stieg die Temperatur über acht Minuten von 76 auf
-# 88 Grad; ab etwa 85 Grad drosselte die GPU (Flag 0x20, SW Thermal Slowdown).
-# Die Warnung soll den Anstieg sichtbar machen, bevor es kritisch wird.
+# Ab etwa 85 Grad drosselt die GPU (Flag 0x20, SW Thermal Slowdown). Die Warnung
+# macht das im Journal sichtbar -- sie ist eine Beobachtung, keine Schutzmassnahme:
+# Die Freezes vom August 2026 hatten keine thermische Ursache, die Maschine lief
+# stundenlang bei 84 Grad und stürzte umgekehrt schon bei 78 Grad ab.
 WARN_TEMP="${GX10_WARN_TEMP:-84}"
 WARN_PAUSE="${GX10_WARN_PAUSE:-60}"
 

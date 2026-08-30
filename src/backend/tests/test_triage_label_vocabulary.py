@@ -79,6 +79,44 @@ def test_skill_json_schema_lists_exactly_the_agent_labels():
     assert tuple(block.group(1).split("|")) == AGENT_LABELS
 
 
+def test_finanzen_is_decided_by_topic_not_by_sender_domain():
+    """Die Domain-Klausel fuer ``Finanzen`` darf nicht zurueckkommen.
+
+    Bis zum 30.08.2026 stand in Stufe 2: «ODER der Absender gehoert zur
+    Treuhand-Domain ``t-r.ch`` (JEDE Person dort)». Gemessen erzeugte die Klausel mehr
+    falsche als richtige Treffer, weil T+R gleichzeitig Kunde ist: «Anfrage fuer
+    Unterstuetzung im DMS Projekt», «Beschaffung und Setup eigene KI-Hardware» und der
+    TaxFlash-Newsletter landeten als Finanzmails in der Inbox, waehrend echte
+    Lieferantenrechnungen von ``invoice@metanet.ch`` als ``System`` aus der Inbox
+    verschwanden.
+
+    Die Herkunft entscheidet nur dort, wo sie das Thema garantiert -- bei
+    Funktionspostfaechern wie ``Rechnungswesen@t-r.ch``, und das ist eine
+    deterministische Regel in ``learned_rules``, kein Satz im Prompt.
+    """
+    texts = _skill_texts()
+    if "triage-rules.md" not in texts:
+        pytest.skip("Triage-Referenzen nicht ausgerollt")
+    text = texts["triage-rules.md"]
+
+    # Die Klausel selbst: "ODER der Absender gehört zur ... Domain".
+    klausel = re.compile(
+        r"ODER\s+der\s+Absender\s+geh(ö|oe)rt\s+zur[^.\n]{0,40}Domain", re.IGNORECASE
+    )
+    treffer = [
+        f"Zeile {i}: {line.strip()[:110]}"
+        for i, line in enumerate(text.splitlines(), start=1)
+        if klausel.search(line)
+    ]
+    assert not treffer, (
+        "Finanzen haengt wieder an einer Absender-Domain:\n" + "\n".join(treffer)
+    )
+    assert "am Inhalt, nie am Absender" in text, (
+        "Stufe 2 muss den Grundsatz ausdruecklich nennen -- eine geloeschte Klausel "
+        "ohne Begruendung kommt zurueck."
+    )
+
+
 def test_skill_move_rules_name_the_backend_correspondence_check():
     """Der Skill muss den Korrespondenz-Nachweis des Backends erwaehnen.
 

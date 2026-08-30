@@ -447,12 +447,26 @@ async def update_agent_job(
     # email_triage-Zeile bei Parser-Fehlschlägen auf (class=NULL, status=pending)
     # hängen -- der Resweep reihte die Mail dann erneut ein und die bereits
     # bestätigte/abgelehnte Freigabe tauchte im Cockpit wieder auf.
+    #
+    # Die Bedingung lautet «noch nicht terminal», nicht «pending oder ohne Klasse».
+    # Der Unterschied betraf genau den Freigabefall: Ein ``auto_reply``-Eintrag steht
+    # absichtlich auf ``processing`` mit gesetzter Klasse und erfüllte damit KEINE der
+    # beiden alten Bedingungen. Lehnte der Mensch den Entwurf ab, blieb die Zeile für
+    # immer auf ``processing`` -- gemessen 22 Einträge, 14 davon ohne Job. Geschlossen
+    # wurden solche Zeilen bis dahin nur auf einem Umweg: die
+    # Sent-Items-Reconciliation setzt ``acted``, wenn sie den Versand in Outlook
+    # erkennt. Für einen ABGELEHNTEN Entwurf gibt es keinen Versand und darum auch
+    # keinen Weg heraus.
+    #
+    # Der Entscheid gehört hierher und nicht in die Selbstheilung: Wer einen Entwurf
+    # ablehnt, hat entschieden. Eine erneute Triage derselben Mail würde denselben
+    # Entwurf wieder vorlegen.
     if (
         old_status == "awaiting_approval"
         and body.status in ("completed", "failed")
         and job.job_type in ("send_email", "email_triage")
     ):
-        from sqlalchemy import or_, update as sa_update
+        from sqlalchemy import update as sa_update
 
         from app.models import EmailTriage
 
@@ -460,7 +474,7 @@ async def update_agent_job(
             sa_update(EmailTriage)
             .where(
                 EmailTriage.agent_job_id == job.id,
-                or_(EmailTriage.status == "pending", EmailTriage.triage_class.is_(None)),
+                EmailTriage.status.in_(["pending", "processing"]),
             )
             .values(status="acted" if body.status == "completed" else "dismissed")
         )
@@ -505,6 +519,54 @@ async def submit_job_feedback(
 
 
 _DELETABLE_STATUSES = {"completed", "failed", "awaiting_approval", "planned", "blocked"}
+
+
+async def _detach_triage_from_jobs(db: AsyncSession, job_ids: list[uuid.UUID]) -> None:
+    """Entkoppelt Triage-Einträge von Jobs, die gelöscht werden.
+
+    Der Fremdschlüssel muss weg, sonst schlägt das Löschen mit einem IntegrityError
+    fehl. Entscheidend ist aber, was mit einem Eintrag passiert, der noch **nicht**
+    fertig triagiert war: Der wird zuerst auf ``pending`` zurückgesetzt.
+
+    Vorfall 19.08.2026: Sieben E-Mails wurden nie triagiert und konnten es auch nie
+    mehr werden. Die Kette war: Job scheitert an einem Neustart -> die gescheiterten
+    Jobs werden im Cockpit gelöscht -> hier wurde nur ``agent_job_id`` genullt -> die
+    Selbstheilung ``_resweep_unclassified_triages`` jointe über genau dieses Feld und
+    sah die Zeilen nicht mehr -> die Dedup-Prüfung ``_get_known_message_ids`` kannte
+    die Mail dagegen weiterhin und holte sie nie wieder. Darunter waren Kundenmails
+    («WG: Dr. Tax - API», «Erläuterung div. fachliche Fragen aus Spezifikation»).
+
+    ``processing`` ohne Job ist ein Widerspruch -- es verarbeitet ja niemand mehr.
+    Deshalb normalisiert diese Funktion auf ``pending``: das ist der Zustand, den die
+    Selbstheilung aufgreifen darf. Bewusst **nicht** ``dismissed``: das wäre wieder
+    eine stille Schliessung, nur mit anderem Namen.
+    """
+    if not job_ids:
+        return
+
+    offen = await db.execute(
+        update(EmailTriage)
+        .where(
+            EmailTriage.agent_job_id.in_(job_ids),
+            EmailTriage.status.in_(["pending", "processing"]),
+        )
+        .values(status="pending")
+        .returning(EmailTriage.id)
+    )
+    zurueckgestellt = offen.scalars().all()
+    if zurueckgestellt:
+        logger.info(
+            "Job-Löschung: %d unfertige Triage(s) auf 'pending' zurückgestellt -- "
+            "die Selbstheilung reiht sie neu ein",
+            len(zurueckgestellt),
+        )
+
+    for modell in (EmailTriage, ChatTriage):
+        await db.execute(
+            update(modell)
+            .where(modell.agent_job_id.in_(job_ids))
+            .values(agent_job_id=None)
+        )
 
 
 class BulkDeleteResult(BaseModel):
@@ -572,17 +634,7 @@ async def bulk_delete_agent_jobs(
             select(AgentJob.id).where(and_(*conditions))
         )
         job_ids = [row[0] for row in job_ids_result.all()]
-        if job_ids:
-            await db.execute(
-                update(EmailTriage)
-                .where(EmailTriage.agent_job_id.in_(job_ids))
-                .values(agent_job_id=None)
-            )
-            await db.execute(
-                update(ChatTriage)
-                .where(ChatTriage.agent_job_id.in_(job_ids))
-                .values(agent_job_id=None)
-            )
+        await _detach_triage_from_jobs(db, job_ids)
         await db.execute(delete(AgentJob).where(and_(*conditions)))
 
     return BulkDeleteResult(deleted=count)
@@ -600,16 +652,7 @@ async def delete_agent_job(
     if job is None:
         raise HTTPException(status_code=404, detail="Agent job not found")
     if job.status in _DELETABLE_STATUSES:
-        await db.execute(
-            update(EmailTriage)
-            .where(EmailTriage.agent_job_id == job_id)
-            .values(agent_job_id=None)
-        )
-        await db.execute(
-            update(ChatTriage)
-            .where(ChatTriage.agent_job_id == job_id)
-            .values(agent_job_id=None)
-        )
+        await _detach_triage_from_jobs(db, [job_id])
         await db.delete(job)
     elif job.status in ("running", "queued"):
         job.status = "failed"

@@ -945,7 +945,14 @@ async def _create_task_from_flag(db: AsyncSession, mail: dict) -> Task | None:
         reply_expected=False,
         confidence=1.0,
         suggested_action={
-            "label": "Aufgabe",
+            # Bewusst OHNE ``label``. Der Fahnen-Aufgriff weiss, dass Arbeit ansteht,
+            # aber nicht, um was es thematisch geht -- er ruft kein Modell. Ein Wort
+            # wie "Aufgabe" hineinzuschreiben wäre eine Behauptung über das Thema und
+            # gleichzeitig kein gültiges Label: "Aufgabe" steht nicht in
+            # ``TRIAGE_LABELS`` und existiert in Outlook nicht. Gemessen war es
+            # dadurch die häufigste Kategorie der Statistik, ohne je eine zu sein.
+            # Die Tatsache steht in ``deterministic_override``, wo sie hingehört; im
+            # Cockpit bleibt die Label-Auswahl leer und der Mensch kann eine setzen.
             "triage_class": "task",
             "deterministic_override": "manual_flag",
             "rationale": (

@@ -3,17 +3,22 @@
 Abgedeckt (rein deterministisch, ohne DB/Netz):
 - Briefing-Scheduler: Soll-Zeitpunkt-Berechnung (Daily/Weekly/Monthly)
 - Meeting-Pipeline: VTT-Parser, Chunking, Anonymisierung (Regex + Pseudonyme)
-- Follow-up-Erkennung: Arbeitstage, Antwort-Erkennung, Empfänger-Extraktion
+- Follow-up-Erkennung: Arbeitstage, Antwort-Erkennung, Empfänger-Extraktion, Schalter
 """
 
 from datetime import datetime, date, timezone
+from unittest.mock import AsyncMock, patch
 from zoneinfo import ZoneInfo
+
+import pytest
 
 from app.services.briefing import _parse_time, _scheduled_for
 from app.services.followup import (
+    FOLLOWUP_DEFAULT_ENABLED,
     _first_recipient,
     _has_reply,
     _workdays_since,
+    is_followup_enabled,
 )
 from app.services.meetings import (
     _letter_label,
@@ -383,3 +388,53 @@ class TestKeinAdressmusterFilter:
         from app.services import followup
 
         assert not hasattr(followup, "_NOREPLY_RE")
+
+
+def _with_settings(settings: dict):
+    """Ersetzt die Principal-Auflösung — Schaltertest ohne DB."""
+    import app.core.principal as principal
+
+    return patch.multiple(
+        principal,
+        system_principal_id=AsyncMock(return_value="owner"),
+        get_principal_settings=AsyncMock(return_value=settings),
+    )
+
+
+class TestFollowupSchalter:
+    """Die Nachfass-Erkennung ist vorerst abgeschaltet — und der Default ist aus.
+
+    Der Schalter existierte schon, wurde aber nur als ``is False`` geprüft: ein
+    fehlender Wert bedeutete «eingeschaltet», und die Briefing-Sektion sowie der
+    Inbox-Zähler fragten ihn gar nicht. Deshalb liegt die Auslegung jetzt in
+    ``is_followup_enabled`` — ein Rückbau auf Default-an fällt hier auf.
+    """
+
+    @pytest.mark.asyncio
+    async def test_default_ist_aus(self):
+        with _with_settings({}):
+            assert await is_followup_enabled(None) is False
+
+    @pytest.mark.asyncio
+    async def test_explizit_eingeschaltet(self):
+        with _with_settings({"followup_enabled": True}):
+            assert await is_followup_enabled(None) is True
+
+    @pytest.mark.asyncio
+    async def test_explizit_abgeschaltet(self):
+        with _with_settings({"followup_enabled": False}):
+            assert await is_followup_enabled(None) is False
+
+    def test_tagesbriefing_prompt_nennt_kein_nachfassen(self):
+        """Solange die Erkennung aus ist, darf der Prompt nicht dazu anregen.
+
+        Der Prompt führte «Bei X nachfassen» als Beispielformulierung — bei
+        abgeschalteter Erkennung liefert die Datenlage dazu nichts, das Modell
+        hätte die Zeile also erfinden müssen.
+        """
+        if FOLLOWUP_DEFAULT_ENABLED:
+            pytest.skip("Erkennung wieder aktiv — Beispiel im Prompt ist dann legitim")
+
+        from app.services.hermes_worker import _BRIEFING_INSTRUCTIONS
+
+        assert "nachfass" not in _BRIEFING_INSTRUCTIONS["daily_briefing"].lower()

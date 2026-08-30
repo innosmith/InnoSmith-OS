@@ -92,16 +92,21 @@ async def triage_stats(
     )
     by_class = {row[0] or "unclassified": row[1] for row in result2.all()}
 
-    # Fällige Follow-ups: Vorschläge, deren needs_review-Task noch offen ist
+    # Fällige Follow-ups: Vorschläge, deren needs_review-Task noch offen ist.
+    # Ist die Erkennung abgeschaltet, wird nicht gezählt — der Zähler in der Inbox
+    # würde sonst Altbestand melden, zu dem nichts mehr nachkommt.
     from app.models import FollowupSuggestion, Task
+    from app.services.followup import is_followup_enabled
 
-    followups_due = (
-        await db.execute(
-            select(func.count(Task.id))
-            .join(FollowupSuggestion, FollowupSuggestion.task_id == Task.id)
-            .where(Task.needs_review == True)  # noqa: E712
-        )
-    ).scalar_one()
+    followups_due = 0
+    if await is_followup_enabled(db):
+        followups_due = (
+            await db.execute(
+                select(func.count(Task.id))
+                .join(FollowupSuggestion, FollowupSuggestion.task_id == Task.id)
+                .where(Task.needs_review == True)  # noqa: E712
+            )
+        ).scalar_one()
 
     return {
         "by_status": by_status,

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 #
 # Fasst nach einem unerwarteten Neustart die letzten Minuten vor dem Abriss
-# zusammen: Watchdog-Status, Telemetrie, sar-Kennzahlen und Ollama-Journal.
+# zusammen: Ollama-Konfiguration, Rettungskette, Telemetrie, sar-Kennzahlen
+# und Journal.
 #
 # Aufruf: gx10-freeze-report.sh [anzahl_telemetriezeilen]
 # Vorgabe sind 72 Zeilen, bei 5 Sekunden Takt also die letzten sechs Minuten.
@@ -32,34 +33,61 @@ oder_hinweis() {
     fi
 }
 
+# Alle Telemetriezeilen in zeitlicher Reihenfolge, rotierte Dateien inbegriffen.
+# Ohne das endete der Bericht ausgerechnet bei einem Freeze kurz nach
+# Mitternacht leer: logrotate hatte die entscheidenden Minuten nach .1 verschoben.
+telemetrie_zeilen() {
+    local datei
+    # Höhere Nummer heisst älter, also absteigend sortiert zuerst ausgeben.
+    while IFS= read -r datei; do
+        zcat -- "$datei" 2>/dev/null
+    done < <(ls -1 "$LOG".*.gz 2>/dev/null | sort -rV)
+    [[ -r "$LOG.1" ]] && cat -- "$LOG.1"
+    [[ -r "$LOG" ]] && cat -- "$LOG"
+    return 0
+}
+
 printf 'GX10 Freeze-Bericht\n'
 printf 'Aktueller Boot: %s\n' "$boot_zeit"
 
-trenner 'Watchdog'
+trenner 'Ollama: war Flash Attention aktiv?'
+# Steht am Anfang, weil dieser eine Wert die Ursache der Freezes vom August 2026
+# war. Siehe docs/gx10-freeze-befund.md.
+runner=$(journalctl -b -1 -u ollama --no-pager -o cat 2>/dev/null \
+    | grep -o -- '--flash-attn [a-z]*' | tail -n 1)
+printf 'Runner im vorherigen Boot: %s\n' "${runner:-kein Runner-Start im Journal}"
+printf 'Aktuell konfiguriert:      %s\n' \
+    "$(systemctl show ollama -p Environment --value 2>/dev/null \
+        | tr ' ' '\n' | grep OLLAMA_FLASH_ATTENTION || echo 'nicht gesetzt (Vorgabe: aus)')"
+
+trenner 'Rettungskette'
 if [[ -r /sys/class/watchdog/watchdog0/bootstatus ]]; then
     bootstatus=$(cat /sys/class/watchdog/watchdog0/bootstatus)
     state=$(cat /sys/class/watchdog/watchdog0/state 2>/dev/null || echo '?')
     timeout=$(cat /sys/class/watchdog/watchdog0/timeout 2>/dev/null || echo '?')
-    printf 'state=%s timeout=%ss bootstatus=%s\n' "$state" "$timeout" "$bootstatus"
+    printf 'Watchdog: state=%s timeout=%ss bootstatus=%s\n' "$state" "$timeout" "$bootstatus"
     if [[ "$bootstatus" != "0" ]]; then
         printf 'Hinweis: bootstatus ungleich 0 -- der letzte Neustart ging vermutlich vom Watchdog aus.\n'
     fi
 else
     printf 'Kein Watchdog-Geraet lesbar.\n'
 fi
+printf 'Panic-Aktion: kernel.panic=%s kernel.panic_on_oops=%s\n' \
+    "$(sysctl -n kernel.panic 2>/dev/null || echo '?')" \
+    "$(sysctl -n kernel.panic_on_oops 2>/dev/null || echo '?')"
+if [[ "$(sysctl -n kernel.panic 2>/dev/null || echo 0)" == "0" ]]; then
+    printf 'WARNUNG: kernel.panic=0 -- ein Panic bliebe stehen statt neu zu starten.\n'
+fi
 
 trenner "Telemetrie: letzte $ZEILEN Zeilen vor dem Abriss"
-if [[ -r "$LOG" ]]; then
-    head -n 1 "$LOG"
-    # Nur Zeilen, die zeitlich vor dem aktuellen Boot liegen -- das ist der
-    # Zustand unmittelbar vor dem Freeze.
-    awk -F, -v grenze="$boot_iso" \
-        'NR > 1 && substr($1, 1, 19) < grenze' "$LOG" \
-        | tail -n "$ZEILEN" \
-        | oder_hinweis 'Keine Messwerte aus der Zeit vor diesem Boot.'
-else
-    printf 'Keine Telemetriedatei unter %s.\n' "$LOG"
-fi
+# Kopfzeile aus der aktuellen Datei, danach nur echte Messzeilen: über mehrere
+# rotierte Dateien hinweg taugt "NR > 1" nicht mehr zum Aussortieren.
+head -n 1 "$LOG" 2>/dev/null || printf 'Keine Telemetriedatei unter %s.\n' "$LOG"
+telemetrie_zeilen \
+    | awk -F, -v grenze="$boot_iso" \
+        '$1 ~ /^20[0-9][0-9]-/ && substr($1, 1, 19) < grenze' \
+    | tail -n "$ZEILEN" \
+    | oder_hinweis 'Keine Messwerte aus der Zeit vor diesem Boot.'
 
 sa_datei="/var/log/sysstat/sa$(date -d "$boot_zeit" '+%d')"
 start=$(date -d "@$((boot_epoch - 1800))" '+%H:%M:%S')
@@ -81,6 +109,6 @@ trenner 'Kernel: Auffaelligkeiten im vorherigen Boot'
 # Bewusst eng gefasst: ein blosses "thermal" faengt die Registrierung des
 # Governors beim Systemstart ein und uebertoent die echten Befunde.
 journalctl -b -1 -k --no-pager -o short-iso 2>/dev/null \
-    | grep -iE 'xid [0-9]|nvrm:|out of memory|oom-kill|hung task|soft lockup|hard lockup|critical temperature|thermal shutdown|throttl' \
-    | tail -n 20 \
-    | oder_hinweis 'Nichts gefunden.'
+    | grep -iE 'xid [0-9]|nvrm:|out of memory|oom-kill|hung task|soft lockup|hard lockup|critical temperature|thermal shutdown|throttl|kernel panic|unhandled context fault|illegal memory access|smmu' \
+    | tail -n 30 \
+    | oder_hinweis 'Nichts gefunden. Bei einem Hard-Lock ist genau das der Normalfall -- der Kernel kam nicht mehr zum Schreiben.'

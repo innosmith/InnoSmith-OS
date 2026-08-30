@@ -29,7 +29,9 @@ legt bewusst keine Ordner an; ein halber Zustand ist schlimmer als ein bekannter
 """
 
 import logging
+from typing import NamedTuple
 
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.principal import get_owner_settings
@@ -131,7 +133,10 @@ async def _project(
                 new_message_id=moved,
             )
     except Exception:  # noqa: BLE001 - darf den Request nie sprengen
-        logger.warning("Projektion fehlgeschlagen (task=%s)", task.id)
+        # Mit Stacktrace, nicht als blosser Satz: Dieser Block fängt alles, auch
+        # Programmierfehler. Ein Text ohne Ausnahme sagt "irgendwas ging schief" und
+        # ist damit von "Graph nicht erreichbar" nicht zu unterscheiden.
+        logger.exception("Projektion fehlgeschlagen (task=%s)", task.id)
     finally:
         try:
             await client.close()
@@ -181,14 +186,14 @@ async def reconcile_tasks_folder(db: AsyncSession) -> int:
         )
         mails = data.get("value", [])
 
-        by_identity, open_identities = await _task_index(db)
+        index = await _task_index(db)
 
         repaired = 0
         for mail in mails:
             identity = mail.get("internetMessageId")
-            if not identity:
-                continue
-            task = by_identity.get(identity)
+            task = index.by_identity.get(identity) if identity else None
+            if task is None:
+                task = index.by_handle.get(mail.get("id"))
             if task is None:
                 logger.info(
                     "Abgleich: Mail im Ordner '%s' ohne Task -- bleibt liegen (%s)",
@@ -201,7 +206,7 @@ async def reconcile_tasks_folder(db: AsyncSession) -> int:
             repaired += 1
 
         in_folder = {m.get("internetMessageId") for m in mails}
-        verirrt = [i for i in open_identities if i not in in_folder]
+        verirrt = [i for i in index.open_identities if i not in in_folder]
         if verirrt:
             logger.info(
                 "Abgleich: %d offene Task-Mail(s) liegen nicht im Ordner '%s' -- "
@@ -210,7 +215,12 @@ async def reconcile_tasks_folder(db: AsyncSession) -> int:
             )
         return repaired
     except Exception:  # noqa: BLE001 - darf den Poll-Loop nie stoppen
-        logger.warning("Abgleich des Tasks-Ordners fehlgeschlagen")
+        # Vorfall 30.08.2026: Hier stand ``logger.warning`` ohne Stacktrace. Dahinter
+        # verbarg sich ein fehlender ``select``-Import, also ein ``NameError`` bei
+        # jedem Lauf -- rund 90 Mal am Tag, wochenlang, und aus dem Logtext nicht von
+        # einem Graph-Ausfall zu unterscheiden. Der Abgleich hat in Produktion nie
+        # eine einzige Mail archiviert.
+        logger.exception("Abgleich des Tasks-Ordners fehlgeschlagen")
         return 0
     finally:
         try:
@@ -219,8 +229,21 @@ async def reconcile_tasks_folder(db: AsyncSession) -> int:
             pass
 
 
-async def _task_index(db: AsyncSession) -> tuple[dict[str, Task], list[str]]:
-    """Alle Tasks mit Mail-Identität, plus die Identitäten der offenen darunter.
+class _TaskIndex(NamedTuple):
+    """Zwei Nachschlagewege auf dieselben Tasks, plus die offenen Identitäten.
+
+    ``by_identity`` ist der richtige Weg: die RFC-5322-Identität überlebt jeden Move.
+    ``by_handle`` ist die Rückfallebene für Altbestand ohne Identität -- ein Handle
+    ist unzuverlässig, aber ein unzuverlässiger Treffer ist mehr als keiner.
+    """
+
+    by_identity: dict[str, Task]
+    by_handle: dict[str, Task]
+    open_identities: list[str]
+
+
+async def _task_index(db: AsyncSession) -> _TaskIndex:
+    """Alle Tasks mit Mail-Bezug, auf zwei Wege nachschlagbar.
 
     Erledigte Tasks gehören dazu, denn genau sie sind der Reparaturfall.
 
@@ -228,21 +251,39 @@ async def _task_index(db: AsyncSession) -> tuple[dict[str, Task], list[str]]:
     **offene** -- solange noch etwas aussteht, darf die Mail nicht ins Archiv wandern.
     Ohne diese Regel würde die Reihenfolge der Datenbankzeilen entscheiden, und das
     ist keine Regel, sondern ein Zufall.
+
+    Der Handle-Index kam am 30.08.2026 dazu: 87 von 100 Mail-Aufgaben trugen keine
+    Identität, weil ``backfill_identities`` sie bewusst nur für **offene** Aufgaben
+    nachholt -- der Reparaturfall hier sind aber die **erledigten**. Über die
+    Identität allein hätte der Abgleich den Altbestand nie gesehen.
     """
     rows = (
         await db.execute(
-            select(Task).where(Task.internet_message_id.is_not(None))
+            select(Task).where(
+                or_(
+                    Task.internet_message_id.is_not(None),
+                    Task.email_message_id.is_not(None),
+                )
+            )
         )
     ).scalars().all()
-    by_identity: dict[str, Task] = {}
-    for task in rows:
-        vorhanden = by_identity.get(task.internet_message_id)
+
+    def _eintragen(index: dict[str, Task], schluessel: str | None, task: Task) -> None:
+        if not schluessel:
+            return
+        vorhanden = index.get(schluessel)
         if vorhanden is None or (vorhanden.is_completed and not task.is_completed):
-            by_identity[task.internet_message_id] = task
+            index[schluessel] = task
+
+    by_identity: dict[str, Task] = {}
+    by_handle: dict[str, Task] = {}
+    for task in rows:
+        _eintragen(by_identity, task.internet_message_id, task)
+        _eintragen(by_handle, task.email_message_id, task)
     open_identities = [
         identity for identity, t in by_identity.items() if not t.is_completed
     ]
-    return by_identity, open_identities
+    return _TaskIndex(by_identity, by_handle, open_identities)
 
 
 async def _usable_handle(client, task: Task) -> str | None:

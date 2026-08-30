@@ -289,10 +289,15 @@ async def _sec_events_needing_prep(owner: User) -> str:
 async def _sec_followups_due(owner: User) -> str:
     """Fällige Follow-ups: gesendete Mails ohne Antwort (Erkennung: followup.py).
 
-    Läuft täglich, war aber in keinem Briefing sichtbar. Nur Vorschläge, deren
-    Task noch offen ist — erledigte oder verworfene fallen heraus.
+    Nur Vorschläge, deren Task noch offen ist — erledigte oder verworfene fallen
+    heraus. Ist die Erkennung abgeschaltet, bleibt die Sektion leer und wird von
+    ``_render`` weggelassen; sonst zeigte das Briefing weiterhin Altbestand.
     """
+    from app.services.followup import is_followup_enabled
+
     async with async_session() as db:
+        if not await is_followup_enabled(db):
+            return ""
         rows = (
             await db.execute(
                 select(FollowupSuggestion, Task)

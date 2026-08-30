@@ -67,10 +67,12 @@ Abbildungen setzt bzw. löst **ausschliesslich** `app/services/email_projection.
 | Outlook-Fahne | «dazu gibt es offene Arbeit» — reist mit der Mail, in Outlook auf jedem Gerät durchsuchbar | `mark_open_work()` | `release_open_work()` |
 | Ordner `Posteingang/Tasks` | Ordnung — hält den Posteingang leer (Name via Owner-Setting `tasks_mail_folder`) | `mark_open_work()` | `release_open_work()` |
 
-**Zwei Aufrufstellen, nicht mehr:** `confirm_review_task` bzw. `POST /api/tasks` mit
-`email_message_id` (Menschenentscheidung) setzen, der `is_completed`-Übergang im
-PATCH-Pfad löst auf. Franst das aus, bedeutet «Fahne gesetzt» zwei Dinge und das
-Merkmal wird wertlos. Darum steht `Tasks` auch **nicht** in der Allowlist von
+**Gesetzt wird an zwei Stellen, aufgelöst an zwei:** `confirm_review_task` bzw.
+`POST /api/tasks` mit `email_message_id` (beides Menschenentscheidungen) setzen; der
+`is_completed`-Übergang im PATCH-Pfad und `delete_task` lösen auf. Der Löschpfad gilt
+nur für bestätigte, noch offene Mail-Aufgaben — bei `needs_review` wurde nie eine
+Projektion gesetzt, bei einer erledigten hat der PATCH sie schon aufgelöst. Franst das
+aus, bedeutet «Fahne gesetzt» zwei Dinge und das Merkmal wird wertlos. Darum steht `Tasks` auch **nicht** in der Allowlist von
 `move_email_to_folder`, und es gibt kein `set_flag`-Tool für den Agenten.
 
 **Die tragende Regel:** *TaskPilot verschiebt nur vorwärts, Richtung Archiv.

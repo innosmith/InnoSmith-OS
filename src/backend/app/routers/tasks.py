@@ -882,6 +882,20 @@ async def delete_task(
     except Exception:  # noqa: BLE001 - best-effort, darf Löschen nie blockieren
         logger.warning("task_deleted-Signal konnte nicht erfasst werden")
 
+    # Das Gegenstück zu ``mark_open_work`` beim Bestätigen. Ohne es blieb die Mail für
+    # immer markiert im Tasks-Ordner liegen, ohne Aufgabe dahinter -- und weil der
+    # Abgleich solche Mails bewusst liegen lässt, räumte sie auch niemand nachträglich
+    # weg. Gilt nur für bestätigte Aufgaben: bei ``needs_review`` wurde nie eine
+    # Projektion gesetzt (das ist der Weg über ``dismiss_review_task``), und bei einer
+    # schon erledigten hat der ``is_completed``-Übergang im PATCH-Pfad sie bereits
+    # aufgelöst -- ein zweiter Aufruf wäre eine Graph-Anfrage für nichts.
+    #
+    # Fahne weg und ins Archiv, also dasselbe wie beim Erledigen: Wer eine bestätigte
+    # Aufgabe löscht, hat entschieden, dass sie nicht mehr ansteht. Das folgt der
+    # tragenden Regel «TaskPilot verschiebt nur vorwärts, Richtung Archiv».
+    if task.email_message_id and not task.needs_review and not task.is_completed:
+        await release_open_work(db, task)
+
     await db.delete(task)
 
 

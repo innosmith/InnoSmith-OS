@@ -1,4 +1,7 @@
-"""Follow-up-Erkennung: unbeantwortete gesendete E-Mails erkennen (deterministisch).
+"""Follow-up-Erkennung: unbeantwortete gesendete E-Mails erkennen.
+
+**Vorerst abgeschaltet** (``FOLLOWUP_DEFAULT_ENABLED = False``). Der Code bleibt
+erhalten, damit die Funktion später feingranularer neu aufgebaut werden kann.
 
 Täglicher Check (via Briefing-Scheduler-Loop angestossen): gesendete E-Mails,
 auf die nach X Arbeitstagen (Default 5) keine Antwort eines anderen Absenders
@@ -36,6 +39,26 @@ DEFAULT_WAIT_WORKDAYS = 5
 MAX_AGE_DAYS = 30          # ältere Sent-Mails nicht mehr aufgreifen
 MAX_SENT_SCAN = 150        # Sicherheitsdeckel pro Lauf
 MAX_NEW_SUGGESTIONS = 10   # pro Lauf höchstens N neue Vorschläge
+
+# Die Erkennung ist vorerst abgeschaltet: sie funktionierte technisch, erzeugte aber
+# Task-Vorschläge und Briefing-Zeilen zu Vorgängen, die die Projektübersicht ohnehin
+# zeigt. Der Code bleibt vollständig erhalten — Wiedereinschalten ist ein Klick in
+# den Einstellungen (Owner-Setting ``followup_enabled``).
+FOLLOWUP_DEFAULT_ENABLED = False
+
+
+async def is_followup_enabled(db) -> bool:
+    """Einzige Auslegung des Schalters ``followup_enabled`` (Default aus).
+
+    Alle Lese- und Schreibflächen der Follow-up-Erkennung (Scan, Briefing-Sektion,
+    Inbox-Zähler) fragen hier — sonst bedeutet «abgeschaltet» an jeder Stelle etwas
+    anderes und Altbestand bleibt sichtbar.
+    """
+    from app.core.principal import get_principal_settings, system_principal_id
+
+    settings = await get_principal_settings(db, await system_principal_id(db))
+    val = settings.get("followup_enabled")
+    return FOLLOWUP_DEFAULT_ENABLED if val is None else bool(val)
 
 # Hier stand ein Adressmuster (noreply/donotreply/newsletter/notification), das
 # Nachfass-Vorschlaege an Automaten verhindern sollte. Gemessen an 199 tatsaechlich
@@ -168,19 +191,20 @@ async def _expects_reply_llm(subject: str, body_preview: str, recipient: str) ->
 
 async def check_followups_due() -> int:
     """Ein Follow-up-Lauf. Gibt die Anzahl neu erstellter Vorschläge zurück."""
+    async with async_session() as db:
+        if not await is_followup_enabled(db):
+            return 0
+        owner = await get_owner(db)
+        settings = dict((owner.settings if owner else None) or {})
+    # Hintergrund-Lauf ohne Request-Kontext -> System-Principal (heute == Owner).
+    principal_id = owner.id if owner else None
+
     cfg = get_settings()
     client = _get_graph_client()
     if client is None:
         return 0
     own_email = cfg.graph_user_email.strip().lower()
 
-    async with async_session() as db:
-        owner = await get_owner(db)
-        settings = dict((owner.settings if owner else None) or {})
-    # Hintergrund-Lauf ohne Request-Kontext -> System-Principal (heute == Owner).
-    principal_id = owner.id if owner else None
-    if settings.get("followup_enabled") is False:
-        return 0
     try:
         wait_days = int(settings.get("followup_wait_days") or DEFAULT_WAIT_WORKDAYS)
     except (TypeError, ValueError):

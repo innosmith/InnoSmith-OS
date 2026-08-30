@@ -77,6 +77,31 @@ def _task(*, completed=False, handle="handle-posteingang", identity=IDENTITY):
     )
 
 
+class _FakeDb:
+    """Nur so viel Datenbank, wie ``_task_index`` anfasst -- und nicht weniger.
+
+    Der Punkt ist, dass ``select(Task).where(...)`` hier **wirklich gebaut** wird.
+    Vorher war ``_task_index`` in allen Abgleich-Tests weggemockt, und deshalb blieb
+    ein fehlender ``select``-Import wochenlang unentdeckt: Der Test prüfte den Mock,
+    nicht das Bauteil. Wer diesen Fake wieder durch ein Mock ersetzt, nimmt genau
+    diese Warnung heraus.
+    """
+
+    def __init__(self, tasks):
+        self._tasks = tasks
+        self.statements = []
+
+    async def execute(self, statement):
+        self.statements.append(statement)
+        tasks = self._tasks
+
+        class _Result:
+            def scalars(self):
+                return SimpleNamespace(all=lambda: tasks)
+
+        return _Result()
+
+
 @pytest.fixture
 def graph(monkeypatch):
     fake = _FakeGraph()
@@ -207,49 +232,111 @@ class TestReleaseOpenWork:
         assert task.email_message_id == "handle-posteingang"
 
 
+class TestTaskIndex:
+    """Der Index entscheidet, welche Mail zu welcher Aufgabe gehoert."""
+
+    @pytest.mark.asyncio
+    async def test_index_is_built_at_all(self):
+        """Regression: ``select`` fehlte im Modul -- ``NameError`` bei jedem Lauf.
+
+        Der breite ``except`` in ``reconcile_tasks_folder`` fing ihn und schrieb nur
+        einen Satz ohne Stacktrace. Ergebnis: Der Abgleich lief rund 90 Mal am Tag,
+        wochenlang, und archivierte nie eine einzige Mail. Dieser Test ist die
+        billigste Versicherung dagegen -- er ruft das Bauteil einfach auf.
+        """
+        task = _task(handle="h-A", identity="A")
+        index = await ep._task_index(_FakeDb([task]))
+        assert index.by_identity == {"A": task}
+        assert index.by_handle == {"h-A": task}
+        assert index.open_identities == ["A"]
+
+    @pytest.mark.asyncio
+    async def test_open_task_wins_over_completed_for_the_same_mail(self):
+        """Solange etwas aussteht, darf die Mail nicht ins Archiv wandern.
+
+        Ohne diese Regel entschiede die Reihenfolge der Datenbankzeilen -- und das
+        ist keine Regel, sondern ein Zufall.
+        """
+        erledigt = _task(completed=True, handle="h-1", identity="A")
+        offen = _task(completed=False, handle="h-2", identity="A")
+        for reihenfolge in ([erledigt, offen], [offen, erledigt]):
+            index = await ep._task_index(_FakeDb(reihenfolge))
+            assert index.by_identity["A"] is offen
+
+    @pytest.mark.asyncio
+    async def test_task_without_identity_is_findable_by_handle(self):
+        """Der Altbestand: 87 von 100 Mail-Aufgaben trugen keine Identitaet.
+
+        ``backfill_identities`` holt sie bewusst nur fuer **offene** Aufgaben nach --
+        der Reparaturfall des Abgleichs sind aber genau die **erledigten**. Ueber die
+        Identitaet allein bliebe dieser Bestand fuer immer unsichtbar.
+        """
+        task = _task(completed=True, handle="h-alt", identity=None)
+        index = await ep._task_index(_FakeDb([task]))
+        assert index.by_identity == {}
+        assert index.by_handle == {"h-alt": task}
+
+    @pytest.mark.asyncio
+    async def test_completed_tasks_are_not_filtered_out(self):
+        """Erledigte Aufgaben gehoeren in den Index -- sie sind der Reparaturfall."""
+        index = await ep._task_index(_FakeDb([_task(completed=True, identity="A")]))
+        assert "A" in index.by_identity
+        assert index.open_identities == []
+
+
 class TestReconciler:
     """Der Abgleich darf ausschliesslich vorwaerts wirken."""
 
     @staticmethod
-    def _mail(identity, subject="Betreff"):
-        return {"id": f"handle-{identity}", "internetMessageId": identity, "subject": subject}
+    def _mail(identity, subject="Betreff", handle=None):
+        return {
+            "id": handle or f"handle-{identity}",
+            "internetMessageId": identity,
+            "subject": subject,
+        }
 
     @pytest.mark.asyncio
-    async def test_completed_task_gets_its_mail_archived(self, graph, monkeypatch):
+    async def test_completed_task_gets_its_mail_archived(self, graph):
         """Der eigentliche Reparaturfall: das Aufloesen beim Erledigen war ausgefallen."""
         task = _task(completed=True, handle="handle-A", identity="A")
         graph.folder_contents = [self._mail("A")]
-        monkeypatch.setattr(ep, "_task_index", _index({"A": task}))
 
-        repariert = await ep.reconcile_tasks_folder(None)
+        repariert = await ep.reconcile_tasks_folder(_FakeDb([task]))
         assert repariert == 1
         assert graph.archived == ["handle-A"]
         assert graph.flags == [("handle-A", False)]
 
     @pytest.mark.asyncio
-    async def test_open_task_is_left_alone(self, graph, monkeypatch):
+    async def test_completed_task_is_found_by_handle_without_identity(self, graph):
+        """Ohne Handle-Rueckfall bliebe der gesamte Altbestand im Ordner liegen."""
+        task = _task(completed=True, handle="handle-A", identity=None)
+        graph.folder_contents = [self._mail(None, handle="handle-A")]
+
+        assert await ep.reconcile_tasks_folder(_FakeDb([task])) == 1
+        assert graph.archived == ["handle-A"]
+
+    @pytest.mark.asyncio
+    async def test_open_task_is_left_alone(self, graph):
         task = _task(completed=False, handle="handle-A", identity="A")
         graph.folder_contents = [self._mail("A")]
-        monkeypatch.setattr(ep, "_task_index", _index({"A": task}))
 
-        assert await ep.reconcile_tasks_folder(None) == 0
+        assert await ep.reconcile_tasks_folder(_FakeDb([task])) == 0
         assert graph.archived == [] and graph.flags == []
 
     @pytest.mark.asyncio
-    async def test_mail_without_task_stays_where_the_human_put_it(self, graph, monkeypatch):
+    async def test_mail_without_task_stays_where_the_human_put_it(self, graph):
         """Wer eine Mail selbst in den Ordner zieht, hat eine Absicht.
 
         Ein System, das sie eine Viertelstunde spaeter wegraeumt, ist genau die
         Unberechenbarkeit, die dieser Ordner vermeiden soll.
         """
         graph.folder_contents = [self._mail("unbekannt")]
-        monkeypatch.setattr(ep, "_task_index", _index({}))
 
-        assert await ep.reconcile_tasks_folder(None) == 0
+        assert await ep.reconcile_tasks_folder(_FakeDb([])) == 0
         assert graph.archived == [] and graph.flags == []
 
     @pytest.mark.asyncio
-    async def test_mail_outside_the_folder_is_never_pulled_back(self, graph, monkeypatch):
+    async def test_mail_outside_the_folder_is_never_pulled_back(self, graph):
         """Der Verzicht auf das Zurueckholen ist die Sicherheitsgarantie.
 
         Die Fahne reist mit der Mail -- der Ordner darf unscharf werden, ohne dass
@@ -257,9 +344,8 @@ class TestReconciler:
         """
         task = _task(completed=False, handle="handle-A", identity="A")
         graph.folder_contents = []
-        monkeypatch.setattr(ep, "_task_index", _index({"A": task}))
 
-        assert await ep.reconcile_tasks_folder(None) == 0
+        assert await ep.reconcile_tasks_folder(_FakeDb([task])) == 0
         assert graph.moves == [] and graph.flags == []
 
     @pytest.mark.asyncio
@@ -268,15 +354,26 @@ class TestReconciler:
         monkeypatch.setattr(ep, "get_graph_client", lambda: fake)
         monkeypatch.setattr(ep, "get_tasks_folder_name", _folder_name("Tasks"))
 
-        assert await ep.reconcile_tasks_folder(None) == 0
+        assert await ep.reconcile_tasks_folder(_FakeDb([])) == 0
         assert fake.archived == []
 
+    @pytest.mark.asyncio
+    async def test_failure_is_logged_with_stacktrace(self, graph, monkeypatch, caplog):
+        """Ein Logsatz ohne Ausnahme ist von einem Graph-Ausfall nicht zu unterscheiden.
 
-def _index(mapping):
-    async def _get(db):
-        offen = [i for i, t in mapping.items() if not t.is_completed]
-        return mapping, offen
-    return _get
+        Genau daran lag der Defekt monatelang unbemerkt: ``logger.warning`` ohne
+        ``exc_info`` verschwieg einen ``NameError``. Der Abgleich darf weiterhin nicht
+        werfen -- aber er muss sagen, woran es lag.
+        """
+        async def kaputt(db):
+            raise RuntimeError("irgendwas im Index")
+
+        monkeypatch.setattr(ep, "_task_index", kaputt)
+        with caplog.at_level("ERROR", logger="taskpilot.email_projection"):
+            assert await ep.reconcile_tasks_folder(_FakeDb([])) == 0
+        fehler = [r for r in caplog.records if r.levelname == "ERROR"]
+        assert fehler, "Fehlschlag muss auf ERROR protokolliert werden"
+        assert fehler[0].exc_info is not None, "ohne Stacktrace ist der Log nutzlos"
 
 
 class TestSetFlagKeepsReadState:

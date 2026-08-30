@@ -1,10 +1,14 @@
-# GX10: Selbstheilung und Messung
+# GX10: Freeze-Behebung, Selbstheilung und Messung
 
 Host-Konfiguration für die GX10 (ASUS Ascent, GB10). Zweck ist **nicht**, die
-Maschine zu beschränken, sondern sie einen Freeze überleben zu lassen und beim
-nächsten Mal auswertbare Spuren zu hinterlassen.
+Maschine zu beschränken, sondern die Ursache der Freezes vom August 2026
+abzustellen, einen erneuten Freeze überlebbar zu machen und auswertbare Spuren
+zu hinterlassen.
 
-Der Hintergrund und die verworfenen Hypothesen stehen in
+Der eigentliche Eingriff ist eine einzige Zeile: `OLLAMA_FLASH_ATTENTION=0`.
+Alles andere hier ist Rettungskette und Beobachtung.
+
+Hintergrund, Belege und die widerlegten Hypothesen stehen in
 [docs/gx10-freeze-befund.md](../../docs/gx10-freeze-befund.md).
 
 ## Installation
@@ -21,6 +25,8 @@ Das Skript ist idempotent und sichert die ersetzten Dateien nach
 
 | Datei | Ziel | Zweck |
 |---|---|---|
+| `ollama-override.conf` | `/etc/systemd/system/ollama.service.d/override.conf` | **Flash Attention aus** — die Behebung |
+| `panic-reboot.conf` | `/etc/sysctl.d/60-gx10-panic.conf` | Kernel-Panic führt zu Neustart statt Stillstand |
 | `watchdog.conf` | `/etc/systemd/system.conf.d/` | Hardware-Watchdog, 120 s |
 | `gx10-telemetrie.sh` | `/usr/local/bin/` | Sampler, 5 s Takt |
 | `gx10-telemetrie.service` | `/etc/systemd/system/` | Dienst für den Sampler |
