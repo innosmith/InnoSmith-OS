@@ -75,14 +75,25 @@ def test_ahv_und_uid_werden_maskiert():
     assert "UID" in anon_politik.ENTITAETEN
 
 
-def test_schwelle_liegt_unter_der_vorgabe():
-    """Nach draussen wird grosszuegiger maskiert als im Haus.
+def test_schwelle_ueberlaesst_die_vorgabe_dem_paket():
+    """Hier stand einmal ``SCHWELLE < 0.4`` -- und der Test schuetzte eine Illusion.
 
-    Ein zu viel maskiertes Sachwort ist sichtbar und kostet Kontext; ein
-    uebersehener Name ist ein Abfluss, den niemand bemerkt. Die Fehlerarten sind
-    nicht gleichwertig, also darf die Schwelle nicht neutral sein.
+    Der Gedanke war richtig: Ein zu viel maskiertes Sachwort ist sichtbar, ein
+    uebersehener Name ist ein stiller Abfluss, die Fehlerarten sind nicht
+    gleichwertig. Nur bewirkte die Zahl 0.25 nichts. Sie ist ein **Nachfilter**
+    und kann nur nach oben wirken; das Erkennungsmodell schneidet bei 0.5 ab und
+    gibt darunter nichts aus. Gemessen an der Eval-Menge von contentConverter
+    ergab 0.25 zeichengleich dasselbe wie 0.4 -- der Regler war tot, und dieser
+    Test bestaetigte ihm jeden Tag, dass er lebt.
+
+    Unentdeckt blieb es, weil beide Seiten fuer sich stimmten: Die Zahl war
+    kleiner als die Vorgabe, und die Anonymisierung funktionierte. Gemessen wurde
+    nie, ob die Zahl einen Unterschied macht.
+
+    ``None`` heisst jetzt: Die Vorgabe kommt aus dem Paket. Wer hier wieder eine
+    Zahl eintraegt, belegt sie mit einem Lauf von ``run_eval.py``.
     """
-    assert anon_politik.SCHWELLE < 0.4
+    assert anon_politik.SCHWELLE is None
 
 
 # ── Hinaus: Restbestaende ────────────────────────────────────────────────────

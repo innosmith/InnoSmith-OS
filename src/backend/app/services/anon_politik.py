@@ -42,13 +42,28 @@ sie abzuwaehlen, und eine durchgerutschte AHV-Nummer bei einem Cloud-Anbieter is
 die eindeutige Kennung eines Menschen.
 """
 
-SCHWELLE = 0.25
-"""Erkennungsschwelle fuer den Weg nach draussen.
+SCHWELLE = None
+"""Erkennungsschwelle fuer den Weg nach draussen: die Vorgabe von contentConverter.
 
-Tiefer als die Vorgabe (0.4), weil die Fehlerarten nicht gleichwertig sind: Ein
-zu viel maskiertes Sachwort kostet das Modell etwas Kontext und ist in der
-Vorschau sichtbar; ein uebersehener Name ist ein Datenabfluss, den niemand
-bemerkt. Derselbe Grund, aus dem das GSW-Cockpit auf dem Profil ``recall`` steht.
+Hier stand 0.25, mit der Begruendung, die Fehlerarten seien nicht gleichwertig --
+ein zu viel maskiertes Sachwort kostet Kontext und ist in der Vorschau sichtbar,
+ein uebersehener Name ist ein stiller Datenabfluss. Die Begruendung stimmt. Die
+Zahl bewirkte nur nichts.
+
+Der Wert ist ein **Nachfilter** und kann nur nach oben wirken. Das Modell schneidet
+bei 0.5 ab und gibt darunter nichts aus; ein Nachfilter von 0.25 hatte also nie
+etwas zu filtern. Gemessen an der Eval-Menge von contentConverter ergibt 0.25
+Zeichen fuer Zeichen dasselbe Ergebnis wie 0.4.
+
+Der Versuch, die Modellschwelle stattdessen zu senken, wurde ebenfalls gemessen
+und verworfen: Es kam kein Fund dazu, dafuer stiegen die Fehlalarme. Recall
+sichern hier die deterministischen Erkenner und der Nachlauf, der jede weitere
+Nennung eines erkannten Werts mitnimmt -- nicht diese Zahl.
+
+Steht bewusst auf ``None`` und nicht auf 0.4: So gilt die Vorgabe des Pakets, und
+eine kuenftige Aenderung dort kommt hier an, statt von einer abgeschriebenen Zahl
+uebergangen zu werden. Das ist derselbe Grund, aus dem :data:`ENTITAETEN` an einer
+Stelle steht.
 """
 
 
