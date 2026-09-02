@@ -1167,21 +1167,27 @@ export function SettingsPage() {
                   <div className="space-y-3">
                     {/* Daily */}
                     <div className="flex flex-wrap items-center gap-3 rounded-lg border border-gray-200 bg-white p-3 dark:border-gray-700 dark:bg-gray-800/60">
+                      {/* Der Default ist aus — er muss hier dieselbe Antwort geben wie
+                          _DEFAULTS in briefing.py, sonst zeigt der Schalter «an», während
+                          der Scheduler nichts erzeugt. */}
                       <button
-                        onClick={() => updateSetting('briefing_daily_enabled', !(settings.briefing_daily_enabled ?? true))}
-                        className={`relative h-6 w-11 shrink-0 rounded-full transition-colors ${(settings.briefing_daily_enabled ?? true) ? 'bg-indigo-600' : 'bg-gray-300 dark:bg-gray-600'}`}
+                        onClick={() => updateSetting('briefing_daily_enabled', !(settings.briefing_daily_enabled ?? false))}
+                        className={`relative h-6 w-11 shrink-0 rounded-full transition-colors ${(settings.briefing_daily_enabled ?? false) ? 'bg-indigo-600' : 'bg-gray-300 dark:bg-gray-600'}`}
                       >
-                        <span className={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform ${(settings.briefing_daily_enabled ?? true) ? 'left-[22px]' : 'left-0.5'}`} />
+                        <span className={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform ${(settings.briefing_daily_enabled ?? false) ? 'left-[22px]' : 'left-0.5'}`} />
                       </button>
                       <div className="min-w-0 flex-1">
                         <p className="text-sm font-medium text-gray-900 dark:text-white">Tagesbriefing</p>
-                        <p className="text-xs text-gray-500 dark:text-gray-400">Werktags — Termine, fällige Tasks, Triage seit gestern</p>
+                        <p className="text-xs text-gray-500 dark:text-gray-400">
+                          Abgeschaltet: Was täglich gilt, steht im Kalender, in der Agenda und in den
+                          Freigaben — ein Briefing darüber wiederholt nur oder vermutet.
+                        </p>
                       </div>
                       <input
                         type="time"
                         value={settings.briefing_daily_time ?? '06:30'}
                         onChange={(e) => updateSetting('briefing_daily_time', e.target.value || null)}
-                        disabled={!(settings.briefing_daily_enabled ?? true)}
+                        disabled={!(settings.briefing_daily_enabled ?? false)}
                         className="rounded-lg border border-gray-300 bg-white px-2 py-1.5 text-sm text-gray-900 focus:border-indigo-500 focus:outline-none disabled:opacity-40 dark:border-gray-600 dark:bg-gray-700 dark:text-white"
                       />
                       <button
@@ -1202,7 +1208,7 @@ export function SettingsPage() {
                       </button>
                       <div className="min-w-0 flex-1">
                         <p className="text-sm font-medium text-gray-900 dark:text-white">Wochenbriefing</p>
-                        <p className="text-xs text-gray-500 dark:text-gray-400">Projekte, Kapazität, Plan vs. Ist, kommende Woche</p>
+                        <p className="text-xs text-gray-500 dark:text-gray-400">Überbuchung, Planungslücken, Plan gegen Ist, Vorlauf</p>
                       </div>
                       <select
                         value={settings.briefing_weekly_day ?? 6}
@@ -1239,7 +1245,7 @@ export function SettingsPage() {
                       </button>
                       <div className="min-w-0 flex-1">
                         <p className="text-sm font-medium text-gray-900 dark:text-white">Monatsbriefing</p>
-                        <p className="text-xs text-gray-500 dark:text-gray-400">Am letzten Kalendertag — Rückblick, Forecast, nächste zwei Monate</p>
+                        <p className="text-xs text-gray-500 dark:text-gray-400">Am letzten Arbeitstag — Planungsbedarf, verfügbare Zeit, Stillstand</p>
                       </div>
                       <input
                         type="time"

@@ -13,25 +13,11 @@ import { TracePanel } from '../components/TracePanel';
 import { AgentRationale } from '../components/agent/AgentRationale';
 import { ConfidenceBadge } from '../components/agent/ConfidenceBadge';
 import { BriefingCard } from '../components/BriefingCard';
+import { SignalbriefingCard } from '../components/SignalbriefingCard';
+import { SignalstreifenCard } from '../components/SignalstreifenCard';
 import { useSSE } from '../hooks/useSSE';
 import { parseExcludeVendors, isExcludedVendor } from './creditors/creditors-helpers';
 import type { AgentJob, TaskCard, PipelineData } from '../types';
-
-interface SignaSignal {
-  id: number;
-  title: string;
-  source_name: string;
-  url: string | null;
-  type: string | null;
-  description: string | null;
-  ai_reason: string | null;
-  full_content: string | null;
-  has_full_content: boolean;
-  thumbnail_url: string | null;
-  published_at: string | null;
-  total_score: number;
-  topic_name: string | null;
-}
 
 interface DraftPreview {
   draft_id: string;
@@ -109,20 +95,6 @@ function formatTime(iso: string | null): string {
   return d.toLocaleTimeString('de-CH', { hour: '2-digit', minute: '2-digit' });
 }
 
-function relativeDate(iso: string | null): string {
-  if (!iso) return '';
-  const d = new Date(iso);
-  const now = new Date();
-  const diffMs = now.getTime() - d.getTime();
-  const diffMin = Math.floor(diffMs / 60000);
-  if (diffMin < 1) return 'Gerade eben';
-  if (diffMin < 60) return `Vor ${diffMin} Min.`;
-  const diffH = Math.floor(diffMin / 60);
-  if (diffH < 24) return `Vor ${diffH} Std.`;
-  const diffD = Math.floor(diffH / 24);
-  return `Vor ${diffD} Tag${diffD > 1 ? 'en' : ''}`;
-}
-
 export function CockpitPage() {
   const navigate = useNavigate();
   const [loading, setLoading] = useState(true);
@@ -154,13 +126,6 @@ export function CockpitPage() {
   const [senderAvatars, setSenderAvatars] = useState<Record<string, { pic_url: string | null; person_id: number | null; name: string | null }>>({});
   const lookedUpEmails = useRef<Set<string>>(new Set());
 
-  const [signaSignals, setSignaSignals] = useState<SignaSignal[]>([]);
-  const [signaHasMore, setSignaHasMore] = useState(true);
-  const [signaLoading, setSignaLoading] = useState(false);
-  const signaOffsetRef = useRef(0);
-  const signaObserverRef = useRef<HTMLDivElement | null>(null);
-  const [signaModalSignal, setSignaModalSignal] = useState<SignaSignal | null>(null);
-  const [signaModalLoading, setSignaModalLoading] = useState(false);
   const [weekCapacity, setWeekCapacity] = useState<{ total_hours: number; booked_hours: number; meeting_hours: number; blocker_hours: number; free_hours: number; work_days: number } | null>(null);
   const [monthCapacity, setMonthCapacity] = useState<{ total_hours: number; booked_hours: number; meeting_hours: number; blocker_hours: number; free_hours: number; work_days: number } | null>(null);
   const [aiStats, setAiStats] = useState<{ pending_decisions: number; completed_week: number; completed_month: number; breakdown_week: { triage: number; drafts: number; suggestions: number; other: number } } | null>(null);
@@ -172,25 +137,6 @@ export function CockpitPage() {
       return !v;
     });
   };
-  const loadSignaSignals = useCallback(async (reset = false) => {
-    if (signaLoading) return;
-    setSignaLoading(true);
-    const offset = reset ? 0 : signaOffsetRef.current;
-    try {
-      const data = await api.get<{ signals: SignaSignal[]; total: number }>(
-        `/api/signa/signals?min_score=8.0&since=2weeks&status=relevant&limit=10&offset=${offset}`
-      );
-      if (reset) {
-        setSignaSignals(data.signals);
-      } else {
-        setSignaSignals(prev => [...prev, ...data.signals]);
-      }
-      signaOffsetRef.current = offset + data.signals.length;
-      setSignaHasMore(signaOffsetRef.current < data.total);
-    } catch { /* ignore */ }
-    setSignaLoading(false);
-  }, [signaLoading]);
-
   const fetchPipedriveData = useCallback(async () => {
     try {
       const acts = await api.get<PipedriveActivitySummary[]>('/api/pipedrive/activities?done=false&limit=8');
@@ -256,8 +202,6 @@ export function CockpitPage() {
     } catch { /* */ }
     finally { setLoading(false); }
 
-    loadSignaSignals(true);
-
     // Kapazität und AI-Stats vom Backend laden
     api.get<{ week: { total_hours: number; booked_hours: number; meeting_hours: number; blocker_hours: number; free_hours: number; work_days: number }; month: { total_hours: number; booked_hours: number; meeting_hours: number; blocker_hours: number; free_hours: number; work_days: number } }>('/api/calendar/capacity')
       .then(data => {
@@ -272,34 +216,6 @@ export function CockpitPage() {
   }, []);
 
   useEffect(() => { fetchAppData(); fetchPipedriveData(); }, [fetchAppData, fetchPipedriveData]);
-
-  useEffect(() => {
-    const el = signaObserverRef.current;
-    if (!el) return;
-    const observer = new IntersectionObserver(
-      entries => { if (entries[0]?.isIntersecting && signaHasMore && !signaLoading) loadSignaSignals(); },
-      { threshold: 0.1 }
-    );
-    observer.observe(el);
-    return () => observer.disconnect();
-  }, [signaHasMore, signaLoading, loadSignaSignals]);
-
-  const openSignalModal = useCallback(async (signal: SignaSignal) => {
-    if (signal.has_full_content && !signal.full_content) {
-      setSignaModalLoading(true);
-      setSignaModalSignal(signal);
-      try {
-        const detail = await api.get<SignaSignal>(`/api/signa/signals/${signal.id}`);
-        setSignaModalSignal(detail);
-      } catch {
-        setSignaModalSignal(signal);
-      } finally {
-        setSignaModalLoading(false);
-      }
-    } else {
-      setSignaModalSignal(signal);
-    }
-  }, []);
 
   useSSE((event) => {
     if (['agent_jobs_changed', 'tasks_changed', 'email_triage_changed'].includes(event)) {
@@ -502,9 +418,32 @@ export function CockpitPage() {
         </div>
       </div>
 
-      {/* Inhalt */}
+      {/* Inhalt
+
+          Zwei Spalten ab 1800 px: links das Eigene (Briefing, Agenda, Freigaben,
+          Kennzahlen), rechts die Weltlage (Signalbriefing und Signalstreifen).
+          Darunter stapelt es -- die Signale rutschen unter die Hauptspalte statt zu
+          verschwinden. Auf dem Telefon sind sie der Grund, überhaupt ins Cockpit zu
+          sehen; sie dort auszublenden wäre die falsche Sparsamkeit.
+
+          **Die Hauptspalte ist fest, der Überschuss gehört den Signalen.** Sie steht
+          auf 72 rem -- genau der Breite, die sie einspaltig auch hat. Der freie Platz
+          eines breiten Schirms geht vollständig in die Schiene, statt die Agenda und
+          die Zahlungsliste in die Länge zu ziehen: Eine auf 1700 px gestreckte
+          Aufgabenzeile ist nicht besser lesbar, nur breiter.
+
+          Die Schiene darf bis 56 rem wachsen und nicht weiter, weil der Leser seine
+          Liste selbst bei 860 px deckelt (`.sg-shell` in `@signa/reader`). Darüber
+          hinaus entstünde wieder Rand, nur innerhalb der Kachel. Nach unten sind es
+          20 rem, sonst bricht die Filterzeile.
+
+          Die Schwelle 1800 px ist gerechnet, nicht geraten: 72 rem Hauptspalte, 24 px
+          Spalt, 20 rem Mindestschiene, 48 px Polster und 256 px Seitenleiste ergeben
+          genau 1800. Wer schmaler ist, bekommt die Signale darunter -- und dort die
+          ganze Breite. */}
       <div className="relative z-10 flex-1 overflow-y-auto overflow-x-hidden overscroll-x-none p-4 sm:p-6">
-        <div className="mx-auto max-w-6xl space-y-4 lg:space-y-6">
+        <div className="mx-auto grid w-full max-w-6xl grid-cols-1 items-start gap-4 lg:gap-6 min-[1800px]:max-w-none min-[1800px]:grid-cols-[72rem_minmax(20rem,56rem)] min-[1800px]:justify-center">
+          <div className="min-w-0 space-y-4 lg:space-y-6">
 
           {/* ── Zone 1: Briefing (zuoberst) ── */}
           <BriefingCard
@@ -1134,52 +1073,6 @@ export function CockpitPage() {
           {/* ── Fällige Kreditoren-Zahlungen ── */}
           <UpcomingPaymentsCard cardClass={cardClass} textSecondary={textSecondary} textMuted={textMuted} excludeVendors={creditorsExcludeVendors} />
 
-          {/* ── SIGNA-Signale ── */}
-          {signaSignals.length > 0 && (
-            <section className={`rounded-xl border p-4 ${cardClass}`}>
-              <div className="mb-3 flex items-center justify-between">
-                <h2 className={`text-sm font-semibold uppercase tracking-wider ${textSecondary}`}>
-                  Signale
-                </h2>
-                <button
-                  onClick={() => navigate('/signale')}
-                  className={`text-xs font-medium ${hasBg ? 'text-white/60 hover:text-white' : 'text-indigo-600 hover:text-indigo-800 dark:text-indigo-400'}`}
-                >
-                  Alle Signale →
-                </button>
-              </div>
-              <div className="max-h-96 overflow-y-auto space-y-1.5">
-                {signaSignals.map(signal => (
-                  <div
-                    key={signal.id}
-                    className={`flex items-start gap-2.5 rounded-lg px-2.5 py-2 cursor-pointer transition-colors ${hasBg ? 'hover:bg-white/10' : 'hover:bg-gray-50 dark:hover:bg-gray-800'}`}
-                    onClick={() => openSignalModal(signal)}
-                  >
-                    <span className="mt-0.5 shrink-0 text-sm">
-                      {signal.type === 'youtube' ? '🎬' : signal.type === 'rss' ? '📰' : '🌐'}
-                    </span>
-                    <div className="min-w-0 flex-1">
-                      <div className={`text-sm font-medium truncate ${textPrimary}`}>{signal.title}</div>
-                      <div className={`text-[11px] ${textMuted} flex items-center gap-2 mt-0.5`}>
-                        <span>{signal.source_name}</span>
-                        {signal.topic_name && <span>· {signal.topic_name}</span>}
-                        {signal.published_at && <span>· {relativeDate(signal.published_at)}</span>}
-                        <span className="ml-auto shrink-0 rounded-full bg-emerald-100 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400">
-                          {signal.total_score.toFixed(1)}
-                        </span>
-                      </div>
-                    </div>
-                  </div>
-                ))}
-                {signaHasMore && (
-                  <div ref={signaObserverRef} className="flex justify-center py-2">
-                    {signaLoading && <div className="h-4 w-4 animate-spin rounded-full border-2 border-indigo-500 border-t-transparent" />}
-                  </div>
-                )}
-              </div>
-            </section>
-          )}
-
           {/* Alles erledigt */}
           {pendingDecisions === 0 && focusTasks.length === 0 && calendarEvents.length === 0 && (
             <div className={`flex flex-col items-center justify-center rounded-xl border p-12 ${cardClass}`}>
@@ -1190,6 +1083,35 @@ export function CockpitPage() {
               </p>
             </div>
           )}
+          </div>{/* Ende Hauptspalte */}
+
+          {/* ── Rechte Schiene: die Weltlage ──
+
+              Ab 1800 px steht sie neben der Hauptspalte und bleibt beim Scrollen stehen
+              (`sticky`), damit die Signale nicht weglaufen, während man links durch die
+              Freigaben geht. Die Höhe ist knapp unter der Fensterhöhe gewählt: lieber
+              ein Rand unten als ein abgeschnittener Leser.
+
+              Darunter ist sie eine gewöhnliche Kachel am Ende der Seite und bringt ihre
+              eigene Höhe mit -- der Leser scrollt innen, die Seite aussen. */}
+          <aside className="flex min-w-0 flex-col gap-4 lg:gap-6 min-[1800px]:sticky min-[1800px]:top-0 min-[1800px]:h-[calc(100dvh-9.5rem)]">
+            {/* Das Signalbriefing steht über dem Streifen: Es wird morgens um sieben
+                gehört, während die Signale den Tag über gelesen werden. */}
+            <SignalbriefingCard
+              cardClass={cardClass}
+              textPrimary={textPrimary}
+              textSecondary={textSecondary}
+              textMuted={textMuted}
+              hasBg={hasBg}
+            />
+
+            <SignalstreifenCard
+              cardClass={cardClass}
+              textSecondary={textSecondary}
+              hasBg={hasBg}
+              className="h-[70dvh] min-h-[26rem] min-[1800px]:h-auto min-[1800px]:min-h-0 min-[1800px]:flex-1"
+            />
+          </aside>
         </div>
       </div>
 
@@ -1214,83 +1136,6 @@ export function CockpitPage() {
         onSelect={(url) => { handleBgSelect(url); setBgPickerOpen(false); }}
       />
 
-      {/* SIGNA Signal Detail Modal */}
-      {signaModalSignal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 modal-safe" onClick={() => setSignaModalSignal(null)}>
-          <div className="fixed inset-0 bg-black/50 backdrop-blur-sm" />
-          <div
-            className="relative z-10 max-h-full w-full max-w-2xl lg:max-h-[80vh] overflow-y-auto rounded-2xl border bg-white p-6 shadow-xl dark:border-gray-700 dark:bg-gray-900"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <button
-              onClick={() => setSignaModalSignal(null)}
-              className="absolute right-4 top-4 rounded-lg p-1.5 text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-800 dark:hover:text-gray-300"
-            >
-              <XMarkIcon className="h-5 w-5" />
-            </button>
-            <div className="mb-4">
-              <div className="flex items-center gap-2 mb-2">
-                <span className="text-lg">
-                  {signaModalSignal.type === 'youtube' ? '🎬' : signaModalSignal.type === 'rss' ? '📰' : '🌐'}
-                </span>
-                <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-semibold text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400">
-                  Score: {signaModalSignal.total_score.toFixed(1)}
-                </span>
-              </div>
-              <h3 className="text-lg font-semibold text-gray-900 dark:text-white">{signaModalSignal.title}</h3>
-              <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
-                <span>{signaModalSignal.source_name}</span>
-                {signaModalSignal.topic_name && <span>· {signaModalSignal.topic_name}</span>}
-                {signaModalSignal.published_at && <span>· {new Date(signaModalSignal.published_at).toLocaleDateString('de-CH', { day: 'numeric', month: 'long', year: 'numeric' })}</span>}
-              </div>
-            </div>
-
-            {signaModalLoading ? (
-              <div className="flex h-24 items-center justify-center">
-                <div className="h-6 w-6 animate-spin rounded-full border-2 border-indigo-500 border-t-transparent" />
-              </div>
-            ) : (
-              <div className="space-y-4">
-                {signaModalSignal.type === 'youtube' && signaModalSignal.url && (
-                  <div className="aspect-video w-full overflow-hidden rounded-lg">
-                    <iframe
-                      className="h-full w-full"
-                      src={`https://www.youtube.com/embed/${new URL(signaModalSignal.url).searchParams.get('v') || signaModalSignal.url.split('/').pop()}`}
-                      allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
-                      allowFullScreen
-                    />
-                  </div>
-                )}
-
-                {signaModalSignal.ai_reason && (
-                  <p className="text-sm text-gray-700 dark:text-gray-300">{signaModalSignal.ai_reason}</p>
-                )}
-
-                {signaModalSignal.full_content && signaModalSignal.type !== 'youtube' && (
-                  <div className="max-h-80 overflow-y-auto rounded-lg border border-gray-200 bg-gray-50 p-4 text-sm text-gray-700 dark:border-gray-700 dark:bg-gray-800/40 dark:text-gray-300">
-                    {/<[a-z][\s\S]*>/i.test(signaModalSignal.full_content) ? (
-                      <div className="prose prose-sm max-w-none dark:prose-invert" dangerouslySetInnerHTML={{ __html: signaModalSignal.full_content }} />
-                    ) : (
-                      <p className="whitespace-pre-wrap">{signaModalSignal.full_content}</p>
-                    )}
-                  </div>
-                )}
-
-                {signaModalSignal.url && signaModalSignal.type !== 'youtube' && (
-                  <a
-                    href={signaModalSignal.url}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="inline-flex items-center gap-1.5 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 transition-colors"
-                  >
-                    Artikel lesen ↗
-                  </a>
-                )}
-              </div>
-            )}
-          </div>
-        </div>
-      )}
     </div>
   );
 }
@@ -1528,14 +1373,6 @@ function ChevronUpIcon({ className }: { className?: string }) {
   return (
     <svg className={className} fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
       <path strokeLinecap="round" strokeLinejoin="round" d="m4.5 15.75 7.5-7.5 7.5 7.5" />
-    </svg>
-  );
-}
-
-function XMarkIcon({ className }: { className?: string }) {
-  return (
-    <svg className={className} fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
-      <path strokeLinecap="round" strokeLinejoin="round" d="M6 18 18 6M6 6l12 12" />
     </svg>
   );
 }

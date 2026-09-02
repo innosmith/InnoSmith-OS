@@ -35,6 +35,17 @@ logger = logging.getLogger("taskpilot.signa2")
 #
 # `v1/takt` und `v1/jetzt-holen` steuern, wie oft Signa von selbst holt. Aus demselben
 # Grund wie die Quellen: Wer liest, muss einstellen koennen, wie oft nachgeschaut wird.
+#
+# `v1/interpretations` ist das taegliche Signalbriefing -- lesend fuer die Cockpit-Kachel,
+# schreibend fuer den Knopf «jetzt schreiben». Das Schreiben kostet Rappen und dauert eine
+# Minute; es steht in `LANGSAM`, weil es sonst am Proxy abbricht, waehrend Signa noch
+# arbeitet. Der Pfad schliesst die Unterpfade der Folge ein: Ton abholen, sprechen lassen,
+# Hoerstand melden.
+#
+# Unter `v1/settings` stehen zwei Dinge nebeneinander: die Podcast-Einstellungen, die zum
+# Produkt gehoeren, und die Zugangsdaten, die es nicht tun. Deshalb sind hier die beiden
+# Unterpfade einzeln aufgefuehrt und nicht `v1/settings` als Ganzes -- sonst reichte die
+# Signale-Seite bis an die API-Schluessel.
 ERLAUBT = (
     "v1/reading-list",
     "v1/radars",
@@ -45,6 +56,9 @@ ERLAUBT = (
     "v1/takt",
     "v1/jetzt-holen",
     "v1/profile",
+    "v1/interpretations",
+    "v1/settings/podcast",
+    "v1/settings/voices",
 )
 
 # Der Vorschlagslauf befragt ein Sprachmodell und prueft anschliessend jede genannte
@@ -52,11 +66,35 @@ ERLAUBT = (
 # braeche der Proxy ab, waehrend Signa noch arbeitet.
 ZEITGRENZE = httpx.Timeout(30.0, connect=5.0)
 ZEITGRENZE_LANG = httpx.Timeout(180.0, connect=5.0)
-LANGSAM = ("v1/sources/suggest", "v1/sources/discover", "v1/sources/probe")
+LANGSAM = (
+    "v1/sources/suggest",
+    "v1/sources/discover",
+    "v1/sources/probe",
+    "v1/interpretations",
+)
+
+# Die Vertonung braucht laenger als alles andere: erst schreibt ein Modell das Drehbuch,
+# dann spricht ein zweites vierhundert Woerter. Gemessen waren gut zwei Minuten fuer einen
+# Monolog; ein Gespraech ueber sechs Themen liegt darueber. Mit den drei Minuten von
+# `ZEITGRENZE_LANG` braeche der Proxy mitten im Sprechen ab -- und der Ton entstuende
+# trotzdem, nur saehe der Anwender einen Fehler.
+ZEITGRENZE_VERTONUNG = httpx.Timeout(600.0, connect=5.0)
 
 
 def _ist_erlaubt(pfad: str) -> bool:
     return any(pfad == e or pfad.startswith(f"{e}/") for e in ERLAUBT)
+
+
+def _zeitgrenze(pfad: str) -> httpx.Timeout:
+    """Wie lange auf Signa gewartet wird.
+
+    Der Vergleich ist genau und nicht nach Praefix: `v1/interpretations` ist langsam, weil
+    dort geschrieben wird -- `v1/interpretations/{id}/podcast.wav` liefert nur eine Datei
+    aus und braucht keine drei Minuten.
+    """
+    if pfad.endswith("/podcast"):
+        return ZEITGRENZE_VERTONUNG
+    return ZEITGRENZE_LANG if pfad in LANGSAM else ZEITGRENZE
 
 
 @router.api_route("/{pfad:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
@@ -73,8 +111,7 @@ async def durchreichen(
     ziel = f"{einstellungen.signa_base_url.rstrip('/')}/api/{pfad}"
 
     try:
-        grenze = ZEITGRENZE_LANG if pfad in LANGSAM else ZEITGRENZE
-        async with httpx.AsyncClient(timeout=grenze) as klient:
+        async with httpx.AsyncClient(timeout=_zeitgrenze(pfad)) as klient:
             antwort = await klient.request(
                 request.method,
                 ziel,

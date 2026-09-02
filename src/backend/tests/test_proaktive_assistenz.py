@@ -34,31 +34,44 @@ _TZ = ZoneInfo("Europe/Zurich")
 # ── Briefing-Scheduler ────────────────────────────────────────────────────────
 
 class TestScheduledFor:
+    # Das Tagesbriefing ist per Default aus (siehe
+    # TestBriefingAnweisungsKonsistenz.test_tagesbriefing_ist_abgeschaltet).
+    # Diese Tests prüfen die Zeitrechnung, nicht den Schalter — deshalb schalten
+    # sie ihn ausdrücklich ein.
+    _DAILY_AN = {"briefing_daily_enabled": True}
+
     def test_daily_werktag_nach_sollzeit(self):
         # Donnerstag 2026-07-02 08:00 -> Soll heute 06:30
         now = datetime(2026, 7, 2, 8, 0, tzinfo=_TZ)
-        result = _scheduled_for("daily_briefing", {}, now)
+        result = _scheduled_for("daily_briefing", self._DAILY_AN, now)
         assert result == datetime(2026, 7, 2, 6, 30, tzinfo=_TZ)
 
     def test_daily_vor_sollzeit_nimmt_vortag(self):
         # Donnerstag 05:00 -> jüngster Werktag-Slot ist Mittwoch 06:30
         now = datetime(2026, 7, 2, 5, 0, tzinfo=_TZ)
-        result = _scheduled_for("daily_briefing", {}, now)
+        result = _scheduled_for("daily_briefing", self._DAILY_AN, now)
         assert result == datetime(2026, 7, 1, 6, 30, tzinfo=_TZ)
 
     def test_daily_wochenende_springt_auf_freitag(self):
         # Sonntag 2026-07-05 10:00 -> jüngster Werktag ist Freitag 03.07.
         now = datetime(2026, 7, 5, 10, 0, tzinfo=_TZ)
-        result = _scheduled_for("daily_briefing", {}, now)
+        result = _scheduled_for("daily_briefing", self._DAILY_AN, now)
         assert result == datetime(2026, 7, 3, 6, 30, tzinfo=_TZ)
 
     def test_daily_deaktiviert(self):
         now = datetime(2026, 7, 2, 8, 0, tzinfo=_TZ)
         assert _scheduled_for("daily_briefing", {"briefing_daily_enabled": False}, now) is None
 
+    def test_daily_ohne_einstellung_bleibt_aus(self):
+        """Ohne gespeicherte Einstellung greift der Default — und der ist aus."""
+        now = datetime(2026, 7, 2, 8, 0, tzinfo=_TZ)
+        assert _scheduled_for("daily_briefing", {}, now) is None
+
     def test_daily_eigene_uhrzeit(self):
         now = datetime(2026, 7, 2, 9, 0, tzinfo=_TZ)
-        result = _scheduled_for("daily_briefing", {"briefing_daily_time": "08:15"}, now)
+        result = _scheduled_for(
+            "daily_briefing", {**self._DAILY_AN, "briefing_daily_time": "08:15"}, now
+        )
         assert result == datetime(2026, 7, 2, 8, 15, tzinfo=_TZ)
 
     def test_weekly_default_sonntag(self):
@@ -146,6 +159,54 @@ class TestBriefingAnweisungsKonsistenz:
         prompt = _BRIEFING_INSTRUCTIONS["monthly_briefing"]
         assert "Umsatz" in prompt and "NICHT" in prompt
         assert "Monatsbilanz" not in prompt
+
+    def test_tagesbriefing_ist_abgeschaltet(self):
+        """Das Tagesbriefing ist per Default aus (02.09.2026).
+
+        Vorfall: Es meldete fehlende Protokolle und unvorbereitete Termine, die
+        es nur vermutete — TaskPilot sieht weder Anthonys OneNote noch, dass die
+        Vorbereitung heute Nachmittag schon geplant ist. Wer den Default wieder
+        auf True stellt, muss zuerst die Prüfregel im Docstring von
+        ``build_daily_context`` erfüllen; dieser Test hält den Entscheid fest.
+        """
+        from app.services.briefing import _DEFAULTS
+
+        assert _DEFAULTS["briefing_daily_enabled"] is False
+
+    def test_wochenbriefing_ohne_gestrichene_sektionen(self):
+        """Prompt und Datenlage müssen dieselben vier Sektionen beschreiben.
+
+        Gestrichen wurden Slot-Vorschläge, Terminlisten, Überfälliges,
+        Projektrückstand und Abwesenheiten. Bliebe eine davon im Prompt stehen,
+        füllt das Modell die Lücke aus dem Nichts.
+        """
+        src = self._quellen("build_weekly_context")
+        for sektion in (
+            "_sec_free_slots", "_sec_calendar_range", "_sec_overdue_open",
+            "_sec_project_metrics", "_sec_time_off", "_sec_week_after_next",
+        ):
+            assert sektion not in src, f"Gestrichene Sektion «{sektion}» wieder im Wochenbriefing"
+
+        from app.services.hermes_worker import _BRIEFING_INSTRUCTIONS
+
+        prompt = _BRIEFING_INSTRUCTIONS["weekly_briefing"]
+        assert "Slot-Vorschläge" not in prompt
+        assert "Liegengeblieben" not in prompt
+
+    def test_wochenbriefing_ohne_geldwert(self):
+        """Plan gegen Ist nennt nur Stunden — der Geldwert gehört in die Finanzansichten."""
+        src = self._quellen("build_weekly_context")
+        assert "Geldwert" not in src
+
+        from app.services import briefing_data
+        import inspect
+
+        plan_ist = inspect.getsource(briefing_data._sec_plan_vs_actual)
+        assert "_chf" not in plan_ist and "hourly_rate" not in plan_ist
+
+        from app.services.hermes_worker import _BRIEFING_INSTRUCTIONS
+
+        assert "KEINE Geldbeträge" in _BRIEFING_INSTRUCTIONS["weekly_briefing"]
 
     def test_tagesbriefing_verlangt_keine_priorisierung(self):
         """Das Tagesbriefing sammelt keine Aufgabenlisten — also darf der Prompt

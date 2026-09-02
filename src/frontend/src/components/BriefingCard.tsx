@@ -21,11 +21,24 @@ const TYPE_BADGES: Record<BriefingType, string> = {
   monthly_briefing: 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300',
 };
 
-function isToday(iso: string): boolean {
+/** Kalendertage seit ``iso`` — 0 = heute, 1 = gestern. */
+function tageSeit(iso: string): number {
   const d = new Date(iso);
+  const dann = new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
   const now = new Date();
-  return d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() === now.getDate();
+  const heute = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  return Math.round((heute - dann) / 86_400_000);
 }
+
+/**
+ * Nach zwei Tagen verschwindet die Karte.
+ *
+ * Ein Briefing ist eine Momentaufnahme, kein Dauerinhalt: Ab Mitte der Woche
+ * steht im Wochenbriefing nichts mehr, was noch entschieden werden könnte, und
+ * eine Karte, die man wegblendet, ohne sie zu lesen, verbraucht nur Platz.
+ * Ältere Briefings bleiben im Archiv (Agenten → Aufträge → Briefings).
+ */
+const MAX_TAGE = 1;
 
 function formatCreatedAt(iso: string): string {
   return new Date(iso).toLocaleString('de-CH', {
@@ -42,9 +55,11 @@ interface BriefingCardProps {
 }
 
 /**
- * Zeigt das jüngste Briefing (Tag/Woche/Monat) zuoberst im Cockpit.
- * Am Erstellungstag aufgeklappt, danach eine schmale Zeile; bei mehreren
- * aktuellen Briefings Umschalt-Chips pro Typ.
+ * Zeigt das jüngste Briefing (Woche/Monat) zuoberst im Cockpit.
+ *
+ * Drei Stufen: am Erstellungstag aufgeklappt, am Folgetag eine schmale Zeile,
+ * danach gar nicht mehr (siehe ``MAX_TAGE``). Bei mehreren aktuellen Briefings
+ * Umschalt-Chips pro Typ.
  */
 export function BriefingCard({ cardClass, textPrimary, textSecondary, textMuted, hasBg }: BriefingCardProps) {
   const navigate = useNavigate();
@@ -62,6 +77,7 @@ export function BriefingCard({ cardClass, textPrimary, textSecondary, textMuted,
       for (const job of jobs) {
         const t = job.job_type as BriefingType;
         if (!BRIEFING_TYPES.includes(t) || !job.output) continue;
+        if (tageSeit(job.created_at) > MAX_TAGE) continue;
         if (!latest[t] || new Date(job.created_at) > new Date(latest[t]!.created_at)) {
           latest[t] = job;
         }
@@ -74,7 +90,7 @@ export function BriefingCard({ cardClass, textPrimary, textSecondary, textMuted,
       )[0];
       if (newest) {
         setSelectedType(prev => (prev && latest[prev] ? prev : (newest.job_type as BriefingType)));
-        setExpanded(prev => (prev === null ? isToday(newest.created_at) : prev));
+        setExpanded(prev => (prev === null ? tageSeit(newest.created_at) === 0 : prev));
       }
     } catch { /* Briefings sind optional */ }
   }, []);

@@ -1922,39 +1922,39 @@ _BRIEFING_INSTRUCTIONS: dict[str, str] = {
         "Wenn die Datenlage keine Auffälligkeiten enthält, schreibe genau einen Satz: "
         "dass nichts liegt. Erfinde keine Sektionen, um Länge zu erzeugen."
     ),
+    # Die Sektionen unten entsprechen 1:1 den Sektionen in
+    # ``briefing_data.build_weekly_context``. Verlangt der Prompt mehr als die
+    # Datenlage hergibt, erfindet das Modell die Differenz — genau so entstanden
+    # die falschen Umsatzangaben im Monatsbriefing.
     "weekly_briefing": (
         "Erstelle das **Wochenbriefing** — ein Planungsinstrument für die kommende Woche, "
-        "kein Statusreport. Maximal ~300 Wörter.\n"
-        "1. **Plan vs. Ist**: Wo die Abweichung über 30% liegt. Bei Mehraufwand nennst du "
-        "den Geldwert aus der Datenlage und stellst die Frage, ob er verrechnet ist — das "
-        "ist der wichtigste Punkt des Briefings. Rechne NICHT selbst, der Betrag steht da.\n"
+        "kein Statusreport. Maximal ~200 Wörter.\n"
+        "1. **Kapazität**: Ist die Woche überbucht, nenne die Differenz aus der Datenlage "
+        "und stelle die Frage, was verschoben wird. Ist Zeit frei, nenne sie als Rahmen "
+        "für Punkt 3.\n"
         "2. **Planungslücken**: Wo sind Stunden geplant, aber keine oder zu wenige Aufgaben "
         "erfasst? Benenne jede Lücke direkt — dort fehlt die Planung, nicht die Zeit.\n"
-        "3. **Liegengeblieben**: Überfälliges, je mit dem konkreten nächsten Schritt.\n"
-        "4. **Slot-Vorschläge**: Ordne den freien Kalenderfenstern konkrete Aufgaben zu "
-        "(Fälligkeit und Vorbereitungsbedarf zuerst). Was in der übernächsten Woche ansteht "
-        "und Vorlauf braucht, gehört in die Fenster DIESER Woche. Als Vorschlag "
-        "kennzeichnen — Anthony entscheidet und bucht.\n"
-        "5. **Risiken**: Überbuchung, Deadline-Kollisionen — nur echte, keine hypothetischen."
+        "3. **Vorlauf**: Ordne den Fristen aus dem Vorlauf-Fenster die freie Zeit dieser "
+        "Woche zu — als Vorschlag gekennzeichnet, Anthony entscheidet. Ist die Woche "
+        "überbucht, sag stattdessen, was davon nicht mehr hineinpasst.\n"
+        "4. **Plan gegen Ist** (kurz): Abweichungen über 30% aus dem Rückblick, nur in "
+        "Stunden. Nenne KEINE Geldbeträge und stelle keine Verrechnungsfrage — das gehört "
+        "in die Finanz- und Kapazitätsansichten."
     ),
     "monthly_briefing": (
         "Erstelle das **Monatsbriefing** — die Vorbereitung von Anthonys Monatsplanung. "
-        "Maximal ~350 Wörter.\n\n"
+        "Maximal ~250 Wörter.\n\n"
         "Es geht NICHT um Geschäftszahlen: Umsatz, Liquidität, Debitoren, Pipeline und "
         "Kapazitätsauslastung prüft Anthony in den dafür gebauten Ansichten. Nenne keine "
         "solchen Zahlen, auch nicht schätzungsweise.\n"
-        "1. **Blick nach vorne — was steht an**: Was prägt den kommenden Monat (verfügbare "
-        "Arbeitstage, Abwesenheiten, Reisen, grosse Termine) und welche Fristen fallen "
-        "hinein.\n"
-        "2. **Was fehlt**: Projekte mit eingeplanter Kapazität, aber ohne (genügend) "
-        "erfasste Aufgaben — dort muss die Planung JETZT beginnen. Jedes einzeln benennen, "
-        "mit dem Datum der ersten Allokation.\n"
-        "3. **Vorlauf**: Was erst nach dem kommenden Monat fällig ist, aber jetzt begonnen "
-        "werden muss — insbesondere vor Abwesenheiten.\n"
-        "4. **Rückblick** (kurz, max. 4 Sätze): Was liegengeblieben ist und wo Projekte "
-        "still standen. Benenne Stillstand beim Namen, ohne zu dramatisieren.\n"
-        "5. **Empfehlungen** (max. 5): jede mit konkretem Datum, bis wann sie angegangen "
-        "sein muss."
+        "1. **Wo die Planung jetzt beginnen muss**: Projekte mit eingeplanter Kapazität, "
+        "aber ohne (genügend) erfasste Aufgaben. Jedes einzeln benennen, mit dem Datum der "
+        "ersten Allokation.\n"
+        "2. **Wie viel Zeit dafür da ist**: die verfügbaren Arbeitstage und die mehrtägigen "
+        "Termine, die davon abgehen. Übernimm die Zahlen wörtlich, rechne nichts nach.\n"
+        "3. **Stillstand**: Projekte, in denen im Bilanzmonat nichts bewegt wurde — als "
+        "Entscheidungsfrage formuliert (weiterführen, verschieben oder schliessen?), nicht "
+        "als Vorwurf. Maximal drei, die längsten zuerst."
     ),
 }
 

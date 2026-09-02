@@ -7,9 +7,13 @@
  * landet statt dort, fehlt einem Kunden mit eigener Instanz.
  *
  * Eingehaengt wird ein einziges Bauteil, nicht eine Ansicht. `Signa` bringt seine eigene
- * Reiterzeile mit (Leseliste, Quellen, Einordnung, Einstellungen). Kommt in Signa eine
+ * Reiterzeile mit (Leseliste, Quellen, Briefing, Einstellungen). Kommt in Signa eine
  * Ansicht dazu, erscheint sie hier ohne Aenderung -- bei vier Menuepunkten in TaskPilot
  * muesste jede einzeln nachgezogen werden.
+ *
+ * Die Ansicht steht in der Adresse (`?tab=`), wie im Agenten-Cockpit. Sonst koennte die
+ * Briefing-Kachel im Cockpit nur auf die Seite verweisen und nicht auf den Text, den
+ * sie anreisst -- und ein Wiederladen fiele auf die Leseliste zurueck.
  *
  * Signa ist ein eigenstaendiger Dienst. Faellt er aus, zeigt diese Seite einen Fehler;
  * der Rest von TaskPilot bleibt unberuehrt.
@@ -19,70 +23,32 @@
  */
 
 import { useMemo } from 'react';
-import { Signa, baueApi } from '@signa/reader';
-import type { SignaApi } from '@signa/reader';
+import { useSearchParams } from 'react-router-dom';
+import { Signa } from '@signa/reader';
+import type { Ansicht } from '@signa/reader';
 import '@signa/reader/styles.css';
 import { useTheme } from '../contexts/ThemeContext';
-import { getToken, tryRefreshToken } from '../api/client';
+import { erstelleZugang } from '../lib/signaZugang';
 
-// Der Weg laeuft in allen Umgebungen durch das TaskPilot-Backend, das die Anfrage an
-// Signa weiterreicht (routers/signa2.py). Dort greift die Anmeldung; die Signa-API
-// selbst kennt keine Benutzer und bleibt deshalb nach aussen zu.
-const BASIS = '/api/signa2/v1';
-
-/**
- * Ein Zugang zu Signa mit TaskPilots Anmeldung.
- *
- * Bewusst nicht der gemeinsame `api`-Client: Der wirft bei 401 den Benutzer auf die
- * Anmeldeseite. Ein Ausfall von Signa darf niemanden abmelden.
- *
- * Hier steht nur das Holen; welche Endpunkte es gibt, weiss `baueApi` im Paket. Ein
- * neuer Endpunkt in Signa ist damit keine Aenderung in TaskPilot.
- */
-function erstelleZugang(): SignaApi {
-  async function hole<T>(pfad: string, optionen: RequestInit = {}): Promise<T> {
-    const kopfzeilen: Record<string, string> = {
-      'Content-Type': 'application/json',
-      ...(optionen.headers as Record<string, string>),
-    };
-    const marke = getToken();
-    if (marke) kopfzeilen['Authorization'] = `Bearer ${marke}`;
-
-    let antwort = await fetch(`${BASIS}${pfad}`, { ...optionen, headers: kopfzeilen });
-
-    if (antwort.status === 401 && (await tryRefreshToken())) {
-      antwort = await fetch(`${BASIS}${pfad}`, {
-        ...optionen,
-        headers: { ...kopfzeilen, Authorization: `Bearer ${getToken()}` },
-      });
-    }
-
-    if (!antwort.ok) {
-      // Die Meldung des Dienstes weiterreichen statt sie zu ersetzen: «502 Bad Gateway»
-      // sagt, dass Signa nicht laeuft; «Fehler beim Laden» sagt gar nichts.
-      let meldung = `${antwort.status} ${antwort.statusText}`;
-      try {
-        const inhalt = await antwort.json();
-        if (inhalt?.detail) meldung = String(inhalt.detail);
-      } catch {
-        /* Antwort ohne JSON -- dann bleibt der Statustext. */
-      }
-      throw new Error(meldung);
-    }
-
-    if (antwort.status === 204) return undefined as T;
-    return (await antwort.json()) as T;
-  }
-
-  return baueApi(hole);
-}
+const ANSICHTEN: Ansicht[] = ['leseliste', 'quellen', 'briefing', 'einstellungen'];
 
 export function SignalePage() {
   const { resolved } = useTheme();
+  const [suche, setSuche] = useSearchParams();
 
   // Einmal bauen und hineinreichen. Ein Modul-Singleton wuerde die Einbettung
   // stillschweigend an diese eine Anwendung binden.
-  const zugang = useMemo(erstelleZugang, []);
+  const zugang = useMemo(() => erstelleZugang(), []);
 
-  return <Signa api={zugang} theme={resolved} />;
+  const gefragt = suche.get('tab') as Ansicht | null;
+  const ansicht = gefragt && ANSICHTEN.includes(gefragt) ? gefragt : 'leseliste';
+
+  return (
+    <Signa
+      api={zugang}
+      theme={resolved}
+      ansicht={ansicht}
+      onAnsicht={(ziel) => setSuche({ tab: ziel }, { replace: true })}
+    />
+  );
 }

@@ -34,8 +34,19 @@ CHECK_INTERVAL_SECONDS = 300
 _TZ = ZoneInfo("Europe/Zurich")
 
 # Defaults (überschreibbar via Owner-Settings, siehe _get_schedule)
+#
+# Das Tagesbriefing ist **aus** (02.09.2026). Nicht wegen schlecht gewählter Regeln,
+# sondern weil auf Tagesebene nichts zu verschneiden ist: Was heute gilt, steht
+# vollständig in je einer Quelle, und diese Quellen sieht Anthony ohnehin (Kalender,
+# Agenda, Freigaben im Cockpit, die tägliche Toggl-Mail). Wer dort trotzdem etwas
+# erzeugt, landet bei Wiederholung oder bei Vermutung — die Begründung im Detail steht
+# im Docstring von ``briefing_data.build_daily_context``.
+#
+# Woche und Monat bleiben an: Ihre Punkte entstehen erst, wenn zwei Systeme
+# gegeneinander gehalten werden (Kapazität gegen Board, Planung gegen Toggl). Solche
+# Aussagen stehen in keiner einzelnen Ansicht.
 _DEFAULTS = {
-    "briefing_daily_enabled": True,
+    "briefing_daily_enabled": False,
     "briefing_daily_time": "06:30",
     "briefing_weekly_enabled": True,
     "briefing_weekly_day": 6,       # 0=Montag … 6=Sonntag

@@ -1,0 +1,35 @@
+---
+description: Wer die Oberfläche prüft - der Nutzer, nie der Agent
+alwaysApply: true
+---
+
+# Die Oberfläche prüft der Nutzer
+
+**Der Agent startet nie einen Browser, um das Frontend anzusehen** — weder selbst noch über
+einen Unteragenten, weder im Entwicklungs- noch im Produktionsstand. Keine Screenshots, kein
+Klicken, kein «ich schaue kurz nach, ob es gut aussieht».
+
+Der Grund ist nicht Vorsicht, sondern Zuständigkeit: Ob eine Oberfläche stimmt, entscheidet,
+wer sie benutzt und wer sie Kunden zeigt. Der Agent kann prüfen, ob ein Knopf existiert — nicht,
+ob er am richtigen Platz sitzt. Ein Screenshot, der «sieht sauber aus» sagt, ersetzt dieses
+Urteil nicht, sondern täuscht es vor.
+
+Das gilt auch dann, wenn der Nutzer vorher Hilfe beim Testen angeboten oder eine Änderung
+freigegeben hat. Eine Freigabe für eine Änderung ist keine Freigabe, die Oberfläche anzusehen.
+
+## Was stattdessen zu tun ist
+
+Wenn Frontend-Arbeit fertig ist:
+
+1. **Maschinell prüfen, was maschinell entscheidbar ist** — Typprüfung und Bau
+   (`npm run typecheck`, `npm run build`). Das ist die Grenze.
+2. **Die Daten belegen** — die betroffenen Endpunkte über die API abfragen (`curl`), damit
+   feststeht, dass die Oberfläche etwas zu zeigen hat, bevor der Nutzer hinsieht.
+3. **Sagen, wo nachzusehen ist** — konkrete Adresse, konkreter Reiter, und was dort zu sehen
+   sein müsste. Kurz und prüfbar, damit der Nutzer in dreissig Sekunden weiss, ob es stimmt.
+
+## Ausnahme
+
+Nur wenn der Nutzer in derselben Nachricht ausdrücklich verlangt, dass der Agent den Browser
+öffnet. «Kannst du das testen?» reicht dafür nicht — dann ist die Rückfrage fällig, ob die
+Oberfläche gemeint ist oder die API.

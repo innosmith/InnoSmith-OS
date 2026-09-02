@@ -1,5 +1,6 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import { Outlet, useNavigate } from 'react-router-dom';
+import { Abspielleiste, TonspurProvider } from '@signa/reader';
 import { Sidebar } from '../components/Sidebar';
 import { MobileHeader } from '../components/MobileHeader';
 import { SearchDialog } from '../components/SearchDialog';
@@ -12,6 +13,7 @@ import { useBadgeData, BadgeProvider } from '../hooks/useBadges';
 import { useNotifications } from '../hooks/useNotifications';
 import { useMediaQuery } from '../hooks/useMediaQuery';
 import { api } from '../api/client';
+import { erstelleZugang } from '../lib/signaZugang';
 import { useAuth } from '../contexts/AuthContext';
 
 interface AppSettings {
@@ -99,7 +101,13 @@ export function AppLayout() {
 
   const isMobile = useMediaQuery('(max-width: 1023px)');
 
+  // Der Zugang zu Signa wird einmal gebaut. Er haengt hier oben und nicht in der
+  // Signale-Seite, weil der Podcast den Seitenwechsel ueberleben muss: Wer ihn im
+  // Cockpit startet und danach ein Projekt oeffnet, hoert weiter.
+  const signa = useMemo(() => erstelleZugang(), []);
+
   return (
+    <TonspurProvider api={signa}>
     <BadgeProvider value={badges}>
       <div className="app-shell flex h-dvh overflow-hidden bg-gradient-to-br from-slate-50 via-indigo-50/30 to-sky-50/40 dark:from-gray-950 dark:via-indigo-950/20 dark:to-gray-950">
         <Sidebar
@@ -182,7 +190,11 @@ export function AppLayout() {
         )}
 
         <UpdateBanner />
+        {/* Die Leiste erscheint erst, wenn eine Folge geladen ist, und liegt ueber
+            allem -- auch ueber der Seitenleiste. */}
+        <Abspielleiste />
       </div>
     </BadgeProvider>
+    </TonspurProvider>
   );
 }
