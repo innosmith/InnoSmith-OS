@@ -930,6 +930,85 @@ async def create_task_from_message(
 
 MAX_AGENT_TIMEOUT = 600
 
+
+# Der Sandbox-Server stellt diesen Text jedem gescheiterten Lauf voran
+# (src/mcp-sandbox/server.py). Ein vereinbarter Marker, keine Fehlerdeutung.
+_CODE_FEHLER_MARKER = "Ausführung fehlgeschlagen"
+
+
+def denkmodus_hinweis(denkmodus: str, codefehler: int) -> str:
+    """Hinweis, wenn ein Lauf ohne Denkmodus an der Code-Ausführung scheiterte.
+
+    Der Anlass ist messbar: Am 02.09.2026 schrieb das lokale Modell ohne Denkmodus
+    achtzehnmal hintereinander Python, das nicht einmal geparst werden konnte --
+    meist Syntaxfehler. Derselbe Auftrag mit Denkmodus «kurz» brauchte drei
+    Werkzeugaufrufe und lieferte ein nachprüfbar richtiges Ergebnis.
+
+    Ausgelöst wird am beobachteten Fehlschlag, nicht an der Frage: Ob es sich um
+    eine Auswertung handelt, aus dem Wortlaut zu erschliessen, wäre geraten -- ein
+    gescheiterter Sandbox-Lauf ist eine Tatsache.
+    """
+    if denkmodus != "aus" or codefehler < 1:
+        return ""
+    return (
+        "\n\n---\n\n"
+        f"*Hinweis: Der Denkmodus ist ausgeschaltet, und {codefehler} Code-Ausführung"
+        f"{'en' if codefehler != 1 else ''} "
+        f"{'sind' if codefehler != 1 else 'ist'} dabei gescheitert. Für Auswertungen im "
+        "Datenraum ist der Denkmodus «kurz» erfahrungsgemäss nicht Komfort, sondern "
+        "Voraussetzung — ohne ihn schreibt das lokale Modell häufig Code, der nicht "
+        "läuft, und die Zahlen darüber sind entsprechend unsicher.*"
+    )
+
+
+def zeitlimit_grund(sekunden: int, codefehler: int) -> str:
+    """Meldung beim Zeitlimit -- mit dem Grund, wenn er bekannt ist.
+
+    Am 02.09.2026 lief ein Auftrag in die 600 Sekunden, weil sich das Modell an
+    einem verschriebenen Spaltennamen festgebissen hatte: achtzehn Sandbox-Läufe,
+    fünfzehn davon fehlgeschlagen. Die Meldung «Zeitlimit überschritten» legte
+    nahe, die Aufgabe sei zu gross gewesen -- sie war es nicht, die Antwort lag
+    nach dem zweiten Aufruf vor. Wer die Zahl der Fehlläufe sieht, weiss sofort,
+    dass Wiederholen nichts bringt und die Frage enger gestellt gehört.
+    """
+    meldung = f"InnoPilot hat das Zeitlimit überschritten ({sekunden}s)"
+    if codefehler >= 3:
+        meldung += (
+            f" -- {codefehler} Code-Ausführungen sind dabei gescheitert. Der Agent hat "
+            "sich festgefahren, statt an der Aufgabengrösse zu scheitern. Die Frage "
+            "enger stellen oder in zwei Schritte teilen."
+        )
+    return meldung
+
+
+class Ablaufspeicher:
+    """Sammelt den Ablauf eines Agentenlaufs mit getrennten Budgets.
+
+    Ein gemeinsamer Deckel bevorzugt, was zuerst eintrifft, und das sind die
+    Denkschritte. Beim Lauf vom 02.09.2026 füllten 140 davon den Deckel von 200,
+    bevor der erste Werkzeugaufruf kam; der ``execute_code``, dessen Abfrage die
+    Zahlen der Antwort erzeugt hatte, fehlte danach im Protokoll. Werkzeuge sind
+    selten und tragen die Beweislast -- abgeschnitten wird nur das Denken.
+    """
+
+    def __init__(self, max_denken: int = 150, max_werkzeug: int = 300):
+        self.ereignisse: list[dict] = []
+        self._max_denken = max_denken
+        self._max_werkzeug = max_werkzeug
+        self._denken = 0
+        self._werkzeug = 0
+
+    def anhaengen(self, ereignis: dict) -> None:
+        if ereignis.get("type") == "thinking":
+            if self._denken >= self._max_denken:
+                return
+            self._denken += 1
+        else:
+            if self._werkzeug >= self._max_werkzeug:
+                return
+            self._werkzeug += 1
+        self.ereignisse.append(ereignis)
+
 # ── Agent-Event-Buffer (Background-Decoupling) ──────────────────
 # Jeder laufende/kürzlich beendete Agent-Run hat eine Event-Liste.
 # Neue Subscriber bekommen alle Events ab einem Offset.
@@ -1055,15 +1134,42 @@ MCP_SERVER_DESCRIPTIONS: dict[str, dict[str, str]] = {
     },
     "bexio": {
         "label": "Buchhaltung (Bexio)",
-        "description": "Rechnungen, Journal, Kontenplan, Bankkonten, Geschäftsjahre",
+        "description": "Einzelabfragen zu Rechnungen, Journal, Kontenplan, Bankkonten",
         "tools": (
-            "list_invoices(status, year) — Rechnungen auflisten; "
-            "get_invoice(id) — Rechnungsdetails; "
-            "search_invoices(query) — Rechnungen suchen; "
-            "get_journal(year, from_date, to_date) — Buchungsjournal; "
+            "Für Auswertungen (Umsatz, Summen, Ranglisten, Verläufe) NICHT diese Tools "
+            "nehmen, sondern den Datenraum — hier gibt es nur Einzelfälle. "
+            "search_contact(name | email) — Kontakt suchen, mindestens eines von beiden; "
+            "get_contact(contact_id) — Kontaktdetails; "
+            "list_invoices(limit, offset) — Rechnungen einer Seite, ohne Kundenfilter; "
+            "search_invoices(contact_id, status, from_date, to_date) — Rechnungen filtern; "
+            "get_invoice(invoice_id) — Rechnungsdetails; "
+            "get_journal(from_date, to_date) — Buchungsjournal; "
             "list_accounts() — Kontenplan; "
             "list_bank_accounts() — Bankkonten; "
             "get_business_years() — Geschäftsjahre"
+        ),
+    },
+    "datenraum": {
+        "label": "Datenraum (lokale Tabellen)",
+        "description": "Bexio, Toggl und Pipedrive als lokale Tabellen — die Quelle für alle Auswertungen",
+        "tools": (
+            "ERSTE ANLAUFSTELLE für jede Frage nach Zahlen: Umsatz, offene Posten, "
+            "Kunden, Stunden, Projekte, Deals. Die Fachsysteme werden im Takt lokal "
+            "gespiegelt; ein Werkzeugaufruf ersetzt Dutzende Einzelabfragen und die "
+            "Zahlen sind vollständig statt auf die erste Seite gekürzt. "
+            "datenraum_katalog() — welche Tabellen es gibt, mit Spalten und Stand; "
+            "datenraum_auffrischen(quelle) — neu laden, nur bei taggenauem Bedarf. "
+            "Ausgewertet wird danach mit execute_code über /daten/<tabelle>.parquet."
+        ),
+    },
+    "sandbox": {
+        "label": "Code-Sandbox",
+        "description": "Python in einem isolierten Container — rechnen, auswerten, visualisieren",
+        "tools": (
+            "execute_code(code) — Python ausführen; duckdb, pandas, matplotlib verfügbar. "
+            "Der Datenraum liegt unter /daten/ bereit. Dateien nach /workspace/ "
+            "erscheinen automatisch im Chat (Diagramme, Tabellen, HTML); "
+            "list_packages() — verfügbare Pakete"
         ),
     },
     "invoiceinsight": {
@@ -1204,7 +1310,10 @@ Nutze deine Tools aktiv. Behaupte niemals, du hättest keinen Zugriff.
 
 - Bei Fragen zu Firmendaten: Sofort passende Tools aufrufen
 - Dateien: search_files → download_file
-- Buchhaltung: list_accounts, get_journal, list_invoices, search_invoices
+- ZAHLEN AUS FACHSYSTEMEN (Umsatz, offene Posten, Kunden, Stunden, Projekte, Deals): Immer über den Datenraum. Er spiegelt Bexio, Toggl und Pipedrive lokal als Tabellen. Zuerst `datenraum_katalog()`, dann EIN `execute_code` mit duckdb über `/daten/<tabelle>.parquet`. Das ist vollständig und in einer Runde erledigt — Einzelabfragen der Fachsysteme liefern nur die erste Seite und brauchen ein Dutzend Runden.
+  Beispiel: `duckdb.sql("SELECT kunde, sum(netto) AS umsatz FROM '/daten/bexio_rechnungen.parquet' WHERE ist_umsatz AND kunde ILIKE '%GSW%' GROUP BY kunde")`
+  Unscharfe Namen mit ILIKE über die echten Daten auflösen, nicht raten und nicht vorher `search_contact` aufrufen. Den Stand aus dem Katalog in der Antwort nennen. Nie ganze Tabellen ausgeben — nur das Ergebnis.
+- Buchhaltung im Einzelfall (eine bestimmte Rechnung, ein Konto, das Journal): get_invoice, get_journal, list_accounts, search_invoices
 - Mehrstufige Aufgaben: Schritt für Schritt, Tool-Ergebnisse auswerten
 - Öffentliche/aktuelle Recherche im Internet (News, Studien, Markt, Personen, Firmen): Nutze IMMER `web_search` (und `web_extract` für Detailseiten). Das ist die agentische Web-Recherche.
 - WICHTIG — SIGNA ist NICHT das Internet: `semantic_search_signals`/`search_signals` durchsuchen NUR die interne strategische Signal-Datenbank (ISI). Nutze SIGNA ausschliesslich, wenn explizit nach SIGNA-Signalen/Briefings gefragt wird — NICHT für allgemeine Web-Recherche. Bei „recherchiere aktuelle Entwicklungen im Internet" → `web_search`, nicht SIGNA.
@@ -1561,6 +1670,11 @@ async def send_agent_message(
         "status": "running",
         "anonymized": bool(anon_sitzung),
         "residuals": restbestaende,
+        # Die Sitzungskennung, nicht die Zuordnung selbst. Damit kann die
+        # Oberflaeche ueber /api/content/mapping-keys/{id}/diff nachschlagen,
+        # was ersetzt wurde, und es als Vermerk in den Verlauf stellen. Die
+        # Klartextwerte reisen weiterhin nur auf ausdrueckliche Anfrage.
+        "anon_session": anon_sitzung,
     }
 
 
@@ -1723,15 +1837,19 @@ async def _run_agent_background_impl(
 
     # Trace-Akkumulator: gleiches Format wie der Worker (thinking/tool_start/
     # tool_complete), damit der bestehende Trace-Endpoint Chat-Jobs anzeigt.
-    _trace: list[dict] = []
-    _MAX_TRACE = 200
+    _ablauf = Ablaufspeicher()
+    _trace = _ablauf.ereignisse
 
     def _trace_append(event: dict):
-        if len(_trace) < _MAX_TRACE:
-            _trace.append(event)
+        _ablauf.anhaengen(event)
+
+    # Fehlgeschlagene Sandbox-Läufe zählen. Sie sind der einzige belastbare
+    # Anhaltspunkt dafür, dass der abgeschaltete Denkmodus die Auswertung getragen
+    # hat -- an der Frage selbst wäre das nur zu raten.
+    _codefehler = [0]
 
     # Der Gedankengang als Ganzes -- der Trace hält ihn nur in Stücken zu je
-    # 2000 Zeichen und deckelt bei 200 Ereignissen. Für die Anzeige nach einem
+    # 2000 Zeichen und deckelt bei 150 Ereignissen. Für die Anzeige nach einem
     # Neuladen braucht es den ungekürzten Text.
     _denken: list[str] = []
     _DENKEN_GRENZE = 200_000
@@ -1788,6 +1906,15 @@ async def _run_agent_background_impl(
             if frage:
                 event["query"] = frage
                 beschriftung = f"{name}: «{frage}»"
+        # Bei Sandbox-Läufen den Code mitschreiben. Ohne ihn ist eine Zahl in der
+        # Antwort nicht nachprüfbar: man sieht, dass gerechnet wurde, aber nicht
+        # was. Genau daran scheiterte die Klärung der Pipedrive-Auswertung vom
+        # 02.09.2026 -- die Summen stimmten, die Aufschlüsselung nicht, und die
+        # Abfrage, die beides erzeugt hatte, war nirgends festgehalten.
+        elif str(name) == _SANDBOX_EXEC_TOOL and isinstance(args, dict):
+            code = args.get("code")
+            if code:
+                event["code"] = str(code)[:4000]
         _trace_append(event)
         _emit("tool_start", beschriftung)
 
@@ -1828,7 +1955,14 @@ async def _run_agent_background_impl(
             logger.warning("web_search-Audit-Log fehlgeschlagen")
 
     def on_tool_complete(tc_id, name, args, result):
-        _trace_append({"type": "tool_complete", "name": str(name), "result": str(result)[:500]})
+        # Die Ausgabe eines Sandbox-Laufs ist die Quelle jeder Zahl in der Antwort
+        # und braucht mehr Platz als 500 Zeichen: eine Rangliste über zehn Kunden
+        # ist danach abgeschnitten, und ob die Antwort sie wiedergibt oder ergänzt
+        # hat, lässt sich nicht mehr feststellen.
+        grenze = 4000 if str(name) == _SANDBOX_EXEC_TOOL else 500
+        _trace_append({"type": "tool_complete", "name": str(name), "result": str(result)[:grenze]})
+        if str(name) == _SANDBOX_EXEC_TOOL and _CODE_FEHLER_MARKER in str(result or ""):
+            _codefehler[0] += 1
         # Sandbox-Artefakte einsammeln: der Marker <!--tp-exec:scope:names-->
         # aus dem Tool-Ergebnis liefert Scope + Dateinamen fuer das Inline-Rendering.
         if str(name) == _SANDBOX_EXEC_TOOL:
@@ -2025,8 +2159,13 @@ async def _run_agent_background_impl(
                         pass
                     bot_task.cancel()
                     logger.warning("[agent-bg] Timeout nach %.0fs, job=%s", elapsed, job_id)
+                    # Woran die Zeit verging, gehört in die Meldung. «Zeitlimit
+                    # überschritten» allein lässt offen, ob die Aufgabe zu gross war
+                    # oder ob sich der Agent an einer Kleinigkeit festgebissen hat --
+                    # und das sind zwei völlig verschiedene Konsequenzen.
+                    grund = zeitlimit_grund(MAX_AGENT_TIMEOUT, _codefehler[0])
                     await _update_agent_job("failed", error_message=f"Timeout nach {MAX_AGENT_TIMEOUT}s", tools_used=list(_tools_used), trace=list(_trace))
-                    await _push_agent_event(job_id, {"event": "error", "data": json.dumps({"error": f"InnoPilot hat das Zeitlimit überschritten ({MAX_AGENT_TIMEOUT}s)"})})
+                    await _push_agent_event(job_id, {"event": "error", "data": json.dumps({"error": grund})})
                     _agent_running[job_id] = False
                     asyncio.create_task(_cleanup_agent_events(job_id))
                     return
@@ -2051,6 +2190,9 @@ async def _run_agent_background_impl(
         # damit das Frontend den ArtifactViewer (Bilder/HTML spielbar, Vollbild)
         # rendert — sowohl live (done-Event) als auch nach Reload (gespeicherter
         # content).
+        # Der Hinweis steht vor dem Artefakt-Marker, damit er im Text landet und
+        # nicht zwischen den Marker und dessen Auswertung im Frontend gerät.
+        content = f"{content}{denkmodus_hinweis(denkmodus, _codefehler[0])}"
         artifact_marker = _artifacts_marker(_artifact_scope["scope"], _artifact_names)
         if artifact_marker:
             content = f"{content}{artifact_marker}"

@@ -180,6 +180,7 @@ _SETTINGS_KEYS: dict[str, str] = {
     "openai_api_key": "TP_OPENAI_API_KEY",
     "sandbox_executor_url": "TP_SANDBOX_EXECUTOR_URL",
     "sandbox_executor_token": "TP_SANDBOX_EXECUTOR_TOKEN",
+    "datenraum_dir": "TP_DATENRAUM_DIR",
 }
 
 
@@ -187,7 +188,17 @@ async def populate_hermes_env() -> None:
     """Setzt alle ``TP_*``-Env-Vars, die ``config.yaml`` referenziert, in ``os.environ``.
 
     Hermes löst die ``${VAR}``-Platzhalter zur Discovery-Zeit aus ``os.environ`` auf.
-    Bereits gesetzte Env-Vars bleiben unangetastet (Container-Override gewinnt).
+
+    Zwei Gruppen mit **verschiedener** Rangfolge, siehe die Begründung unten:
+
+    - Infrastruktur (``_SETTINGS_KEYS``): gesetzte Env-Var gewinnt, der Betreiber
+      übersteuert die Konfiguration.
+    - Zugangsdaten (``_DB_TOKEN_KEYS``): die DB gewinnt, denn dort schreibt die
+      Oberfläche hin -- gleiche Rangfolge wie in den Finanz- und Bexio-Routern.
+
+    Läuft einmal je Prozess (über ``ensure_runtime_ready``). Ein in der Oberfläche
+    geänderter Token erreicht die bereits gestarteten MCP-Subprozesse deshalb erst
+    nach einem Neustart des Backends.
     """
     cfg = get_settings()
 
@@ -205,10 +216,15 @@ async def populate_hermes_env() -> None:
     except Exception:
         logger.warning("Hermes-Env: DB-Settings nicht lesbar — nutze .env-Fallback")
 
+    # Rangfolge: DB (Oberfläche) -> Container-Env/.env -> leer. Absichtlich eine
+    # andere als bei den _SETTINGS_KEYS oben, und sie muss mit den Finanz- und
+    # Bexio-Routern übereinstimmen: liest die eine Strecke zuerst die DB und die
+    # andere zuerst .env, benutzen Agent und Oberfläche verschiedene Zugangsdaten.
+    # Das erscheint dann als 401 nur im Agenten, während dieselbe Integration in
+    # der Oberfläche läuft -- und ein Ablaufdatum widerlegt es nicht, denn ein
+    # widerrufener Token bleibt bis zu seinem Ablauf unauffällig.
     for db_key, env_key in _DB_TOKEN_KEYS.items():
-        if os.environ.get(env_key):
-            continue
-        value = db_settings.get(db_key) or getattr(cfg, db_key, "")
+        value = db_settings.get(db_key) or os.environ.get(env_key) or getattr(cfg, db_key, "")
         os.environ[env_key] = str(value) if value not in (None, "") else ""
 
     # Hermes' native Web-Tools (web_search/web_extract) suchen den Tavily-Key
@@ -343,6 +359,24 @@ def build_config_dict() -> dict:
             "TP_SANDBOX_EXECUTOR_URL": "${TP_SANDBOX_EXECUTOR_URL}",
             "TP_SANDBOX_EXECUTOR_TOKEN": "${TP_SANDBOX_EXECUTOR_TOKEN}",
         }, extra_pythonpath=base),
+        # Datenraum: liest den Katalog von der Platte und stoesst Abgleiche an. Er
+        # nutzt dieselbe Bibliothek wie der Worker im Backend (app.services.datenraum)
+        # -- deshalb der volle PYTHONPATH samt Backend und die Zugangsdaten der
+        # Fachsysteme. Eine zweite Implementierung wuerde driften, und eine Abweichung
+        # faellt bei Zahlen erst auf, wenn sie beim Kunden steht.
+        "datenraum": stdio("mcp-datenraum", {
+            "TP_MCP_BASE_DIR": base,
+            "TP_DATENRAUM_DIR": "${TP_DATENRAUM_DIR}",
+            "TP_DB_HOST": "${TP_DB_HOST}",
+            "TP_DB_PORT": "${TP_DB_PORT}",
+            "TP_DB_USER": "${TP_DB_USER}",
+            "TP_DB_PASSWORD": "${TP_DB_PASSWORD}",
+            "TP_DB_NAME": "${TP_DB_NAME}",
+            "TP_BEXIO_API_TOKEN": "${TP_BEXIO_API_TOKEN}",
+            "TP_TOGGL_API_TOKEN": "${TP_TOGGL_API_TOKEN}",
+            "TP_TOGGL_WORKSPACE_ID": "${TP_TOGGL_WORKSPACE_ID}",
+            "TP_PIPEDRIVE_API_TOKEN": "${TP_PIPEDRIVE_API_TOKEN}",
+        }, extra_pythonpath=":".join([pythonpath, f"{base}/backend"])),
         # Content-Converter (md -> docx/pptx). Binary nur im Docker-Image
         # vorhanden; in der Dev-Umgebung schlaegt die Discovery still fehl
         # (Hermes loggt eine Warnung und fahrt fort).
@@ -450,21 +484,60 @@ def build_config_dict() -> dict:
             "title_generation": _local_aux(),
             "curator": _local_aux(),
         },
+        # Werkzeug-Aufschub: ab welcher Schemagroesse die Werkzeuge durch die Bruecke
+        # tool_search/tool_describe/tool_call ersetzt werden.
+        #
+        # Gemessen am 02.09.2026: unsere 129 Werkzeuge wiegen ~14'170 Token, die
+        # 10-Prozent-Vorgabe zog bei ~13'107. Wir reissen die Schwelle also um acht
+        # Prozent -- und bezahlen dafuer teuer. Der Aufschub kostet pro Zug mindestens
+        # eine zusaetzliche Runde (tool_search), und ``tool_call`` verlangt die
+        # Argumente als JSON-Zeichenkette *innerhalb* eines JSON-Aufrufs. Mehrzeiligen
+        # Python-Code da hineinzuschreiben, misslang dem lokalen Modell in einem
+        # Auswertungslauf vier von vier Malen ("Unterminated string"); derselbe Code
+        # lief als Direktaufruf durch.
+        #
+        # Der Prozentsatz muss gegen ``LOCAL_CONTEXT_LENGTH`` gerechnet werden, und das
+        # sind 65'536 Token, nicht 131'072. Ein erster Anlauf setzte 15 Prozent in dem
+        # Glauben, das Fenster sei doppelt so gross -- die Schwelle lag damit bei 9'830
+        # Token, also *unter* der Werkzeugmenge, und die Bruecke blieb an. Die Absicht
+        # war richtig, die Rechnung falsch.
+        #
+        # 25 Prozent ergeben 16'384 Token: oberhalb der 14'170, die unsere Werkzeuge
+        # wiegen, und unterhalb des Qualitaetsknicks von 20'000, den Hermes selbst
+        # nennt. Der Aufschub bleibt damit bestehen -- er greift erst, wenn die
+        # Werkzeugliste wirklich gross wird. ``test_werkzeug_aufschub_greift_erst_am_
+        # qualitaetsknick`` haelt beide Grenzen fest und rechnet gegen die Konstante,
+        # damit die naechste Fensteraenderung nicht wieder still danebengreift.
+        "tools": {
+            "tool_search": {"enabled": "auto", "threshold_pct": 25.0},
+        },
         # Tool-Loop-Guardrails: schuetzen vor Endlosschleifen/Token-Verbrennung.
-        # Warnungen frueh, harte Stopps nach mehrfach identischem Fehlversuch bzw.
-        # ergebnislosem Wiederholen idempotenter Tools.
+        #
+        # Die alte Grenze von 8 gleichartigen Fehlschlaegen war zu weit. Am 02.09.2026
+        # verschrieb sich das lokale Modell bei einem Spaltennamen (``gewonn_en_am``
+        # statt ``gewonnen_am``) und fand achtzehn Sandbox-Laeufe lang nicht zurueck --
+        # obwohl DuckDB in *jeder* Fehlermeldung den richtigen Namen nannte. Zwei
+        # zufaellige Teilerfolge setzten den Zaehler zurueck, der harte Stopp griff nie,
+        # und nach 600 Sekunden brach der Lauf mit einem Zeitlimit ab.
+        #
+        # Das Bittere daran: Die Antwort lag nach dem zweiten Aufruf vollstaendig vor.
+        # Alles danach war Beiwerk, das der Agent sich selbst aufgetragen hatte. Ein
+        # frueher Stopp haette eine richtige Antwort erzwungen statt gar keiner --
+        # darum 5 statt 8. In zwei ausgewerteten Laeufen mit zusammen 36 Sandbox-
+        # Aufrufen hat sich das Modell nach dem dritten Fehlschlag in Folge kein
+        # einziges Mal mehr gefangen.
         "tool_loop_guardrails": {
             "warnings_enabled": True,
             "hard_stop_enabled": True,
             "warn_after": {
                 "exact_failure": 2,
-                "same_tool_failure": 3,
+                "same_tool_failure": 2,
                 "idempotent_no_progress": 2,
             },
             "hard_stop_after": {
-                "exact_failure": 4,
-                "same_tool_failure": 8,
-                "idempotent_no_progress": 4,
+                "exact_failure": 3,
+                "same_tool_failure": 5,
+                "idempotent_no_progress": 3,
             },
         },
         "mcp_servers": mcp_servers,

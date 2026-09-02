@@ -85,6 +85,11 @@ pymupdf>=1.27
 # ── XLSX-Extraktion (Dokumenten-Kontext-Brücke) ──
 openpyxl>=3.1
 
+# ── Datenraum (lokal materialisierte Tabellen der Fachsysteme) ──
+# Nur pyarrow, bewusst ohne pandas: das Backend schreibt Parquet, es rechnet nicht
+# damit. Gerechnet wird in der Sandbox.
+pyarrow>=18.0
+
 # ── Web Search ──
 ddgs>=9.14
 

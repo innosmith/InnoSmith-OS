@@ -49,6 +49,64 @@ function getContentText(props: ExportDialogProps): string {
   return '';
 }
 
+/** Der Titel steht meistens schon im Text -- als erste Überschrift.
+ *
+ * Vorher stand in jedem Word-Dokument «Export» auf der Titelseite, weil das die
+ * Voreinstellung war und niemand sie im Alltag überschreibt. Der Dialog bleibt
+ * der Ort, an dem man es ändert; er soll nur nicht bei null anfangen.
+ */
+function titelAusInhalt(text: string): string {
+  const ueberschrift = text.match(/^#{1,3}\s+(.+)$/m);
+  const kandidat = ueberschrift
+    ? ueberschrift[1]
+    : (text.split('\n').find(z => z.trim().length > 0) ?? '');
+  const sauber = kandidat.replace(/[*_`#]/g, '').trim();
+  return sauber.length > 0 && sauber.length <= 120 ? sauber : '';
+}
+
+function dateinameAus(titel: string, ersatz: string): string {
+  const slug = titel
+    .toLowerCase()
+    .replace(/[äàâ]/g, 'a')
+    .replace(/[öô]/g, 'o')
+    .replace(/[üû]/g, 'u')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 60);
+  return slug || ersatz;
+}
+
+/** Titelseite, Verzeichnis, Vorlage und Autor sind Hausstil, nicht Tagesfrage.
+ *
+ * Sie jedes Mal neu zu setzen ist der Grund, warum der Dialog als Umweg
+ * empfunden wird. Gemerkt wird bewusst **nicht** der Titel: der gehört zum
+ * einzelnen Dokument.
+ */
+const STIL_SCHLUESSEL = 'export_stil';
+
+interface Exportstil {
+  author: string;
+  template: string;
+  titlePage: boolean;
+  toc: boolean;
+}
+
+function leseStil(): Partial<Exportstil> {
+  try {
+    return JSON.parse(localStorage.getItem(STIL_SCHLUESSEL) || '{}') as Partial<Exportstil>;
+  } catch {
+    return {};
+  }
+}
+
+function schreibeStil(stil: Exportstil): void {
+  try {
+    localStorage.setItem(STIL_SCHLUESSEL, JSON.stringify(stil));
+  } catch {
+    /* localStorage evtl. nicht verfügbar */
+  }
+}
+
 export function ExportDialog(props: ExportDialogProps) {
   const { isOpen, onClose } = props;
 
@@ -85,11 +143,20 @@ export function ExportDialog(props: ExportDialogProps) {
       setExporting(false);
       const dateStr = new Date().toISOString().slice(0, 10);
 
+      const stil = leseStil();
+      if (stil.author) setAuthor(stil.author);
+      if (stil.template !== undefined) setTemplate(stil.template);
+      if (stil.titlePage !== undefined) setTitlePage(stil.titlePage);
+      if (stil.toc !== undefined) setToc(stil.toc);
+
       if (isFileMode) {
         const stem = (props as DirectFileModeProps).sourceFile.name.replace(/\.[^.]+$/, '');
         setFilename(stem);
+        setTitle(stem);
       } else {
-        setFilename(`export-${dateStr}`);
+        const abgeleitet = titelAusInhalt(contentText);
+        setTitle(abgeleitet || 'Export');
+        setFilename(dateinameAus(abgeleitet, `export-${dateStr}`));
       }
 
       if (!isMessageMode) {
@@ -143,6 +210,7 @@ export function ExportDialog(props: ExportDialogProps) {
   const handleExport = async () => {
     setExporting(true);
     setError(null);
+    schreibeStil({ author, template, titlePage, toc });
 
     try {
       const token = getToken();

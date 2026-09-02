@@ -10,6 +10,7 @@ import base64
 import logging
 import os
 from dataclasses import dataclass
+from datetime import date, timedelta
 
 import httpx
 
@@ -98,6 +99,23 @@ class TogglClient:
     async def _post_reports(self, path: str, body: dict) -> dict | list:
         return await self._request("POST", f"{REPORTS_URL}{path}", json_body=body)
 
+    async def _post_reports_raw(self, path: str, body: dict) -> httpx.Response:
+        """Wie ``_post_reports``, aber mit Zugriff auf die Kopfzeilen.
+
+        Die Reports-API blaettert ueber ``X-Next-Row-Number`` -- diese Angabe steht
+        nur im Kopf, nicht im Rumpf. Ohne sie endet jede Auswertung stillschweigend
+        bei der ersten Seite.
+        """
+        client = await self._ensure_client()
+        for attempt in range(MAX_RETRIES):
+            resp = await client.post(f"{REPORTS_URL}{path}", json=body)
+            if resp.status_code == 429:
+                await asyncio.sleep(RETRY_BASE_DELAY * (2 ** attempt))
+                continue
+            resp.raise_for_status()
+            return resp
+        raise RuntimeError("Toggl Reports: Rate-Limit auch nach Wiederholungen")
+
     # ── Verbindungstest ──────────────────────────────────────
 
     async def test_connection(self) -> dict:
@@ -124,11 +142,24 @@ class TogglClient:
 
     # ── Clients ──────────────────────────────────────────────
 
-    async def list_clients(self, workspace_id: int | None = None) -> list[dict]:
+    async def list_clients(
+        self,
+        workspace_id: int | None = None,
+        status: str | None = None,
+    ) -> list[dict]:
+        """Kunden eines Workspaces.
+
+        ``status="both"`` schliesst archivierte Kunden ein. Ohne das fehlen sie --
+        und mit ihnen der Name jedes Projekts, das ihnen gehoert. Im Datenraum
+        standen deshalb 195 Zeiteintraege ohne Kunden da, obwohl das Projekt sehr
+        wohl einem zugeordnet war. Fuer eine Auswertung ueber zwei Jahre ist genau
+        der abgeschlossene Kunde der interessante Fall.
+        """
         ws = workspace_id or self.config.workspace_id
         if not ws:
             return []
-        data = await self._get(f"/workspaces/{ws}/clients")
+        params = {"status": status} if status else None
+        data = await self._get(f"/workspaces/{ws}/clients", params)
         return data if isinstance(data, list) else []
 
     async def get_client(self, workspace_id: int, client_id: int) -> dict:
@@ -236,6 +267,54 @@ class TogglClient:
         if isinstance(data, dict):
             return data.get("time_entries", data.get("data", []))
         return []
+
+    async def search_all_time_entries(
+        self,
+        workspace_id: int | None,
+        start_date: str,
+        end_date: str,
+        page_size: int = 1000,
+    ) -> list[dict]:
+        """Alle Zeiteintraege eines Zeitraums -- ueber Jahresfenster und alle Seiten.
+
+        Zwei Grenzen der Reports-API v3, die beide nicht als Fehler auffallen:
+
+        * Der Zeitraum darf **ein Jahr** nicht ueberschreiten. Groessere Fenster
+          beantwortet Toggl mit ``400 Bad Request`` -- gemessen am 02.09.2026 mit
+          einem Fenster von 730 Tagen. Deshalb wird in Jahresscheiben zerlegt.
+        * Die Antwort ist seitenweise. Fehlt die Schleife ueber
+          ``X-Next-Row-Number``, endet die Summe bei der ersten Seite und sieht
+          trotzdem vollstaendig aus.
+        """
+        ws = workspace_id or self.config.workspace_id
+        if not ws:
+            return []
+
+        von = date.fromisoformat(start_date)
+        bis = date.fromisoformat(end_date)
+        alle: list[dict] = []
+
+        while von <= bis:
+            fenster_ende = min(von + timedelta(days=364), bis)
+            erste_zeile: int | None = None
+            while True:
+                body: dict = {
+                    "start_date": von.isoformat(),
+                    "end_date": fenster_ende.isoformat(),
+                    "page_size": page_size,
+                }
+                if erste_zeile is not None:
+                    body["first_row_number"] = erste_zeile
+                resp = await self._post_reports_raw(f"/workspace/{ws}/search/time_entries", body)
+                daten = resp.json()
+                alle.extend(daten if isinstance(daten, list) else daten.get("data", []))
+                naechste = resp.headers.get("X-Next-Row-Number")
+                if not naechste:
+                    break
+                erste_zeile = int(naechste)
+            von = fenster_ende + timedelta(days=1)
+
+        return alle
 
     # ── Billable Rates & Summary Reports ─────────────────────
 

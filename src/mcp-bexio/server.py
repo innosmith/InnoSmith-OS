@@ -47,13 +47,20 @@ TOOLS = [
     ),
     Tool(
         name="search_contact",
-        description="Bexio-Kontakt nach Name oder E-Mail suchen.",
+        description=(
+            "Bexio-Kontakt nach Name oder E-Mail suchen. Teiltreffer genügen "
+            "('GSW' findet 'GSW Treuhand AG'), gesucht wird in Firma/Nachname und "
+            "Vorname. Genau eines von 'name' oder 'email' MUSS gesetzt sein.\n"
+            "Beispiel: {\"name\": \"GSW\"}\n"
+            "Für Umsatz- oder Summenfragen NICHT dieses Tool, sondern den Datenraum."
+        ),
         inputSchema={
             "type": "object",
             "properties": {
-                "name": {"type": "string", "description": "Name zum Suchen"},
-                "email": {"type": "string", "description": "E-Mail zum Suchen (alternativ zu Name)"},
+                "name": {"type": "string", "description": "Name oder Namensteil"},
+                "email": {"type": "string", "description": "E-Mail (alternativ zum Namen)"},
             },
+            "anyOf": [{"required": ["name"]}, {"required": ["email"]}],
         },
     ),
     Tool(
@@ -113,11 +120,16 @@ TOOLS = [
     ),
     Tool(
         name="list_invoices",
-        description="Rechnungen (kb_invoice) in Bexio auflisten. Optional nach Kontakt filtern.",
+        description=(
+            "Eine SEITE Rechnungen (kb_invoice) auflisten — nicht den ganzen Bestand. "
+            "Für Umsatz, Summen oder Ranglisten ist dieses Tool ungeeignet: es liefert "
+            "nur einen Ausschnitt. Solche Fragen über den Datenraum beantworten "
+            "(datenraum_katalog, dann execute_code über /daten/bexio_rechnungen.parquet)."
+        ),
         inputSchema={
             "type": "object",
             "properties": {
-                "contact_id": {"type": "integer", "description": "Kontakt-ID zum Filtern"},
+                "contact_id": {"type": "integer", "description": "Kontakt-ID; läuft intern über die Suche"},
                 "limit": {"type": "integer", "default": 50},
                 "offset": {"type": "integer", "default": 0},
             },
@@ -135,13 +147,19 @@ TOOLS = [
     Tool(
         name="search_invoices",
         description=(
-            "Rechnungen filtern nach Status und/oder Zeitraum. "
-            "Status: draft, pending, partial, paid, overdue, cancelled."
+            "Rechnungen filtern nach Kunde, Status und/oder Zeitraum. Dies ist der "
+            "EINZIGE Weg, Rechnungen eines Kunden einzugrenzen.\n"
+            "Beispiel: {\"contact_id\": 42, \"status\": \"offen\"}"
         ),
         inputSchema={
             "type": "object",
             "properties": {
-                "status": {"type": "string", "description": "Rechnungsstatus (z.B. pending, paid, overdue)"},
+                "contact_id": {"type": "integer", "description": "Kontakt-ID des Kunden"},
+                "status": {
+                    "type": "string",
+                    "enum": ["entwurf", "offen", "bezahlt"],
+                    "description": "Rechnungsstatus",
+                },
                 "from_date": {"type": "string", "description": "Ab-Datum (YYYY-MM-DD)"},
                 "to_date": {"type": "string", "description": "Bis-Datum (YYYY-MM-DD)"},
             },
@@ -229,12 +247,15 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         return _json_response(result)
 
     if name == "search_contact":
-        if arguments.get("email"):
+        if (arguments.get("email") or "").strip():
             result = await c.search_contact_by_email(arguments["email"])
-        elif arguments.get("name"):
+        elif (arguments.get("name") or "").strip():
             result = await c.search_contact_by_name(arguments["name"])
         else:
-            return _json_response({"error": "name oder email erforderlich"})
+            return _json_response({
+                "error": "search_contact braucht 'name' ODER 'email'",
+                "beispiel": {"name": "GSW"},
+            })
         compact = [
             {"id": ct.get("id"), "name_1": ct.get("name_1"), "name_2": ct.get("name_2"),
              "mail": ct.get("mail")}
@@ -297,11 +318,15 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         return _json_response(result)
 
     if name == "search_invoices":
-        result = await c.search_invoices(
-            status=arguments.get("status"),
-            from_date=arguments.get("from_date"),
-            to_date=arguments.get("to_date"),
-        )
+        try:
+            result = await c.search_invoices(
+                contact_id=arguments.get("contact_id"),
+                status=arguments.get("status"),
+                from_date=arguments.get("from_date"),
+                to_date=arguments.get("to_date"),
+            )
+        except ValueError as exc:
+            return _json_response({"error": str(exc)})
         compact = [
             {"id": inv.get("id"), "document_nr": inv.get("document_nr"),
              "title": inv.get("title"), "contact_id": inv.get("contact_id"),

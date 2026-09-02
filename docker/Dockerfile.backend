@@ -102,6 +102,7 @@ COPY src/mcp-signa/ /app/mcp-signa/
 COPY src/mcp-invoiceinsight/ /app/mcp-invoiceinsight/
 COPY src/mcp-scripts/ /app/mcp-scripts/
 COPY src/mcp-sandbox/ /app/mcp-sandbox/
+COPY src/mcp-datenraum/ /app/mcp-datenraum/
 
 # Shared Libraries
 COPY src/email-graph/ /app/email-graph/

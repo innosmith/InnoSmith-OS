@@ -62,6 +62,11 @@ services:
       # Snap-Docker: Arbeitsverzeichnis unter $HOME und PFADGLEICH gemountet,
       # damit die an `docker run -v` uebergebenen Pfade auf dem Host existieren.
       TP_SANDBOX_OUTPUT_DIR: ${HOME}/.local/share/taskpilot/sandbox-output
+      # Datenraum: vom Backend geschriebene Tabellen der Fachsysteme. Der Executor
+      # liest sie nie selbst -- er reicht den Pfad an `docker run -v` weiter und
+      # haengt ihn in jeder Sandbox als /daten schreibgeschuetzt ein. Auch hier
+      # pfadgleich, aus demselben Snap-Docker-Grund.
+      TP_DATENRAUM_DIR: ${HOME}/.local/share/taskpilot/datenraum
       # Strikte(re)s Seccomp-Profil optional aktivieren (leer = Docker-Default):
       # TP_SANDBOX_SECCOMP: /opt/sandbox/seccomp-profile.json
     env_file:
@@ -71,6 +76,7 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ${HOME}/.local/share/taskpilot/sandbox-output:${HOME}/.local/share/taskpilot/sandbox-output
+      - ${HOME}/.local/share/taskpilot/datenraum:${HOME}/.local/share/taskpilot/datenraum:ro
     networks:
       - default
       - taskpilot-shared

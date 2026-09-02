@@ -34,6 +34,8 @@ const LazyAnalysisPage = lazy(() =>
   import('./pages/AnalysisPage').then(m => ({ default: m.AnalysisPage })),
 );
 
+const LazyDatenschutzPage = lazy(() => import('./pages/DatenschutzPage'));
+
 const LazyMindMapsPage = lazy(() => import('./pages/MindMapsPage'));
 const LazyMindMapEditorPage = lazy(() => import('./pages/MindMapEditorPage'));
 const LazySharedMindMapPage = lazy(() => import('./pages/SharedMindMapPage'));
@@ -178,6 +180,7 @@ export default function App() {
             <Route path="/agenten" element={<OwnerRoute><AgentQueuePage /></OwnerRoute>} />
             <Route path="/agenten/chat" element={<OwnerRoute><LazyRoute><LazyChatPage /></LazyRoute></OwnerRoute>} />
             <Route path="/agenten/chat/:conversationId" element={<OwnerRoute><LazyRoute><LazyChatPage /></LazyRoute></OwnerRoute>} />
+            <Route path="/datenschutz" element={<OwnerRoute><LazyRoute><LazyDatenschutzPage /></LazyRoute></OwnerRoute>} />
             <Route path="/mindmaps" element={<OwnerRoute><LazyRoute><LazyMindMapsPage /></LazyRoute></OwnerRoute>} />
             <Route path="/mindmaps/:id" element={<LazyRoute><LazyMindMapEditorPage /></LazyRoute>} />
             <Route path="/inbox" element={<OwnerRoute><InboxPage /></OwnerRoute>} />

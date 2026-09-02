@@ -95,6 +95,47 @@ Handles ist ausschliesslich `resolve_message_id`.
 - `_flag_pickup_cycle` — manuell gesetzte Fahnen werden **deterministisch** (ohne LLM)
   zu Aufgaben. Nur ab Aktivierungszeitpunkt, Archiv ausgenommen, kein Altbestand.
 
+## Datenraum — Zahlen kommen nicht aus Einzelabfragen
+
+Auswertungsfragen (Umsatz, offene Posten, Stunden, Deals) werden **nie** über
+Einzelabfragen der Fachsysteme beantwortet. Ein Sync-Worker im Backend
+(`services/datenraum.py`) materialisiert Bexio, Toggl und Pipedrive als
+Parquet-Tabellen unter `TP_DATENRAUM_DIR`; der Executor hängt das Verzeichnis bei
+**jedem** Sandbox-Lauf schreibgeschützt als `/daten` ein. Der Agent liest
+`datenraum_katalog()` und rechnet in **einem** `execute_code` mit DuckDB.
+
+Der Grund ist nicht Geschwindigkeit, sondern Richtigkeit. Die Bexio-Primitiven
+hatten vier stille Fehler, die alle eine plausible Zahl statt einer Fehlermeldung
+erzeugten: `GET /kb_invoice?contact_id=X` ignoriert den Filter, es gab keine
+Paginierung (50 von 652), `kb_item_status_id` blieb undekodiert, und
+**`total_gross` ist nicht der Bruttobetrag**, sondern die Positionssumme vor
+Rabatt — bei 565 von 651 Rechnungen identisch mit dem Nettobetrag. Der Betrag
+inklusive Steuer steht in `total`. Die Statustabelle steht deklariert in
+`src/bexio/rechnungen.py` (7 = Entwurf, 8 = offen, 9 = bezahlt), und die Spalte
+`ist_umsatz` hält die Entscheidung in den Daten fest statt in der Formulierung
+einer Abfrage.
+
+Dieselbe Gattung Fehler traf auch Toggl und Pipedrive: die Reports-API antwortet
+**gruppiert** (`start` und `client_id` stehen nicht auf oberster Ebene), weshalb
+alle 2639 Zeiteinträge ohne Datum und ohne Kunde im Datenraum lagen; archivierte
+Toggl-Kunden fehlen ohne `status=both`; und Pipedrive liefert `pipeline_id` und
+`stage_id` nur als Zahl. Deshalb prüft `tabelle_schreiben` jede Tabelle auf
+Spalten, die über den ganzen Bestand leer sind, und meldet sie im Katalog als
+`unbrauchbar_weil_durchgehend_leer` — der generische Wächter gegen die Spalte,
+die es gibt und die nichts trägt.
+
+Zwei Werkzeuge zu haben genügt nicht — der Agent muss sie auch treffen. Der
+Katalog liefert deshalb fertig zitierte Pfade (`'/daten/x.parquet'`), die
+Bedeutung der Geldspalten und eine lauffähige Vorlage: ohne das erfand das lokale
+Modell Spaltennamen und liess die Anführungszeichen um den Pfad weg. Und der
+Werkzeug-Aufschub (`tools.tool_search`) steht auf 15 % statt 10 %, weil
+`tool_call` Code als JSON-Zeichenkette in einem JSON-Aufruf verlangt und daran
+vier von vier Versuchen scheiterten.
+
+Rohdaten erreichen das Modell nie — der Katalog nennt Tabellen, Spalten und
+Stand, nie Zeilen. Damit bleibt die Modellwahl eine Frage der Qualität, nicht des
+Datenschutzes. Details und Fallen in `docs/datenraum.md`.
+
 ## Agent-Job-Lifecycle
 
 ```

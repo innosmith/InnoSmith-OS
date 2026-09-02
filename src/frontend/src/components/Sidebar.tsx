@@ -3,7 +3,7 @@ import { NavLink, useNavigate } from 'react-router-dom';
 import { DndContext, closestCenter, PointerSensor, TouchSensor, useSensor, useSensors, type DragEndEvent } from '@dnd-kit/core';
 import { SortableContext, verticalListSortingStrategy, useSortable, arrayMove } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
-import { BrainCircuit, CalendarClock } from 'lucide-react';
+import { BrainCircuit, CalendarClock, ShieldCheck } from 'lucide-react';
 import { api } from '../api/client';
 import { useAuth } from '../contexts/AuthContext';
 import { useTheme } from '../contexts/ThemeContext';
@@ -259,6 +259,9 @@ export function Sidebar({
                         )}
                       </span>
                     </NavLink>
+                    <NavLink to="/datenschutz" className={collapsedLinkClasses} onClick={onClose} title="Datenschutz">
+                      <ShieldCheck className="h-5 w-5" />
+                    </NavLink>
                     <NavLink to="/mindmaps" className={collapsedLinkClasses} onClick={onClose} title="Mind-Maps">
                       <BrainCircuit className="h-5 w-5" />
                     </NavLink>
@@ -371,6 +374,11 @@ export function Sidebar({
                           {activeJobCount}
                         </span>
                       )}
+                    </NavLink>
+
+                    <NavLink to="/datenschutz" className={linkClasses} onClick={onClose}>
+                      <ShieldCheck className="h-5 w-5" />
+                      <span className="flex-1">Datenschutz</span>
                     </NavLink>
 
                     <NavLink to="/mindmaps" className={linkClasses} onClick={onClose}>

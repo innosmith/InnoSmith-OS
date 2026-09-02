@@ -43,6 +43,17 @@ OUTPUT_BASE = Path(
     )
 )
 
+# Datenraum: vom Backend im Takt geschriebene Tabellen der Fachsysteme (Parquet).
+# Wird bei jedem Lauf als ``/daten`` schreibgeschützt eingehängt. Auch dieser Pfad
+# muss pfadgleich sein (Host-Pfad == Container-Pfad), weil ihn der Host-Daemon
+# auflöst -- dieselbe Snap-Docker-Bedingung wie bei OUTPUT_BASE.
+DATENRAUM_DIR = Path(
+    os.environ.get(
+        "TP_DATENRAUM_DIR",
+        str(Path.home() / ".local" / "share" / "taskpilot" / "datenraum"),
+    )
+)
+
 # Optionales, striktes Seccomp-Profil. Leer = Docker-Standard-Seccomp-Profil greift
 # weiterhin (multi-arch, bewährt). Das mitgelieferte Profil ist strenger, aber
 # architektur-sensibel; daher opt-in per Env.
@@ -56,7 +67,36 @@ MAX_WORKSPACE_BYTES = int(os.environ.get("TP_SANDBOX_MAX_WORKSPACE_BYTES", 512 *
 MAX_CONCURRENT_RUNS = int(os.environ.get("TP_SANDBOX_MAX_CONCURRENT", 4))
 # Ephemere Run-/Scope-Verzeichnisse älter als das werden aufgeräumt.
 RUN_TTL_SECONDS = int(os.environ.get("TP_SANDBOX_RUN_TTL", 3600))
+# Persistente Konversations-Scopes: laenger, aber nicht unbefristet (Default 30 Tage).
+CONV_TTL_SECONDS = int(os.environ.get("TP_SANDBOX_CONV_TTL", 30 * 24 * 3600))
+# Obergrenzen fuer die zurueckgegebene Ausgabe. Was darueber liegt, faellt weg --
+# aber nie stillschweigend, siehe ``gekuerzt``.
+MAX_STDOUT_CHARS = int(os.environ.get("TP_SANDBOX_MAX_STDOUT", 20000))
+MAX_STDERR_CHARS = int(os.environ.get("TP_SANDBOX_MAX_STDERR", 8000))
 MEMORY_LIMIT = os.environ.get("TP_SANDBOX_MEMORY", "2g")
+
+
+def gekuerzt(text: str, grenze: int) -> str:
+    """Text auf die letzten ``grenze`` Zeichen kuerzen und die Kuerzung benennen.
+
+    Die Ausgabe eines Laufs ist die Beweisgrundlage fuer jede Zahl, die daraus in
+    eine Antwort wandert. Sie schweigend am Anfang abzuschneiden erzeugt genau die
+    Fehlerart, gegen die dieser ganze Weg gebaut ist: ein Ergebnis, das vollstaendig
+    aussieht und es nicht ist. Wer nur den Schwanz einer Rangliste sieht, haelt den
+    groessten verbliebenen Posten fuer den groessten -- und niemand kann es ihm
+    ansehen.
+
+    Darum steht die fehlende Menge im Text. Sie ist eine Aufforderung, die Abfrage
+    enger zu fassen, nicht ein Hinweis zum Weiterlesen.
+    """
+    if len(text) <= grenze:
+        return text
+    fehlend = len(text) - grenze
+    return (
+        f"[... {fehlend} Zeichen am Anfang abgeschnitten (Grenze: {grenze}). "
+        f"Die Ausgabe ist unvollstaendig -- die Abfrage enger fassen, "
+        f"aggregieren oder LIMIT setzen. ...]\n"
+    ) + text[-grenze:]
 CPU_LIMIT = os.environ.get("TP_SANDBOX_CPUS", "2")
 
 _SCOPE_RE = re.compile(r"[^a-zA-Z0-9_-]")
@@ -119,16 +159,30 @@ def _dir_size(path: Path) -> int:
 
 
 def _cleanup_stale() -> None:
-    """Entfernt ephemere Run-Verzeichnisse, die älter als das TTL sind."""
+    """Entfernt Run- und Scope-Verzeichnisse, die ihre Frist überschritten haben.
+
+    Persistente ``conv-``-Scopes hatten bis zum 02.09.2026 **keine** Frist: sie
+    entstanden bei jedem Gespräch mit ``workspace_key`` und blieben unbefristet
+    liegen -- mitsamt allem, was der Agent dort an Auszügen aus Fachsystemen
+    abgelegt hatte. Eine Aufbewahrung ohne Ende ist keine Aufbewahrung.
+    """
     if not OUTPUT_BASE.exists():
         return
-    cutoff = time.time() - RUN_TTL_SECONDS
+    ephemer_cutoff = time.time() - RUN_TTL_SECONDS
+    conv_cutoff = time.time() - CONV_TTL_SECONDS
     for child in OUTPUT_BASE.iterdir():
         try:
-            if not child.is_dir() or not (child.name.startswith("run-") or child.name.startswith("script-")):
+            if not child.is_dir():
+                continue
+            if child.name.startswith(("run-", "script-")):
+                cutoff = ephemer_cutoff
+            elif child.name.startswith("conv-"):
+                cutoff = conv_cutoff
+            else:
                 continue
             if child.stat().st_mtime < cutoff:
                 shutil.rmtree(child, ignore_errors=True)
+                logger.info("Scope nach Fristablauf entfernt: %s", child.name)
         except OSError:
             pass
 
@@ -211,6 +265,12 @@ async def execute_in_sandbox(
         "-v", f"{workspace_dir}:/workspace:rw",
         "-w", "/workspace",
     ]
+    # Datenraum: die lokal materialisierten Tabellen der Fachsysteme, schreibgeschützt
+    # und bei JEDEM Lauf. Bewusst ohne Bindung an ``workspace_key``: der Schlüssel
+    # stammt beim Agenten aus den Argumenten des Modells, eine Abstimmung darüber
+    # waere genau die Sorte Kopplung, die still bricht.
+    if DATENRAUM_DIR.is_dir():
+        docker_args += ["-v", f"{DATENRAUM_DIR}:/daten:ro"]
     # --no-new-privileges bleibt bewusst AUS: Kernel 6.17-nvidia (GX10) blockt
     # jede exec mit diesem Flag (siehe docker-compose.prod.yml).
     if SECCOMP_PROFILE and Path(SECCOMP_PROFILE).is_file():
@@ -281,8 +341,8 @@ async def execute_in_sandbox(
     return {
         "success": proc.returncode == 0,
         "exit_code": proc.returncode,
-        "stdout": stdout.decode("utf-8", errors="replace")[-20000:],
-        "stderr": stderr.decode("utf-8", errors="replace")[-8000:] if stderr else "",
+        "stdout": gekuerzt(stdout.decode("utf-8", errors="replace"), MAX_STDOUT_CHARS),
+        "stderr": gekuerzt(stderr.decode("utf-8", errors="replace"), MAX_STDERR_CHARS) if stderr else "",
         "generated_files": generated_files,
         "scope": scope,
         "persistent": persistent,
@@ -447,8 +507,8 @@ async def run_registered_script(
     return {
         "success": proc.returncode == 0,
         "exit_code": proc.returncode,
-        "stdout": stdout.decode("utf-8", errors="replace")[-20000:],
-        "stderr": stderr.decode("utf-8", errors="replace")[-8000:] if stderr else "",
+        "stdout": gekuerzt(stdout.decode("utf-8", errors="replace"), MAX_STDOUT_CHARS),
+        "stderr": gekuerzt(stderr.decode("utf-8", errors="replace"), MAX_STDERR_CHARS) if stderr else "",
         "generated_files": output_files,
         "scope": scope,
         "run_id": run_id,

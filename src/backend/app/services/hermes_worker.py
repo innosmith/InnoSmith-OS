@@ -3827,7 +3827,7 @@ LOCAL_CORE_TOOLSETS: list[str] = [
 # build_config_dict() in hermes_config.py.
 _KNOWN_MCP_SERVERS: list[str] = [
     "taskpilot", "capacity", "graph", "graphAdmin", "pipedrive", "toggl", "bexio",
-    "signa", "invoiceinsight", "scripts", "sandbox", "contentConverter",
+    "signa", "invoiceinsight", "scripts", "sandbox", "datenraum", "contentConverter",
 ]
 
 
@@ -3889,6 +3889,9 @@ def build_triage_allowlist() -> list[str]:
 _GATHER_MCP_SERVERS_NARROW: list[str] = ["graph", "taskpilot", "capacity"]
 _GATHER_MCP_SERVERS_WIDE: list[str] = [
     "graph", "taskpilot", "capacity", "toggl", "pipedrive", "bexio", "signa",
+    # Der Datenraum ist hier die guenstigste Quelle: zwei Werkzeuge statt der
+    # Einzelabfragen dreier Fachsysteme, und die Zahlen sind vollstaendig.
+    "datenraum", "sandbox",
 ]
 
 

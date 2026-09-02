@@ -105,6 +105,29 @@ class PipedriveClient:
     async def _put_v1(self, path: str, body: dict) -> dict:
         return await self._request("PUT", f"{self.config.base_url_v1}{path}", json_body=body)
 
+    # ── Vollstaendige Listen ─────────────────────────────────
+
+    async def list_all(self, path: str, params: dict | None = None, seite: int = 500) -> list[dict]:
+        """Alle Datensaetze eines v2-Endpunkts holen, ueber alle Seiten.
+
+        Die ``list_*``-Methoden liefern bewusst nur eine Seite -- das genuegt fuer
+        eine Ansicht im Cockpit. Fuer eine Auswertung ist es die schlimmste Sorte
+        Fehler: das Ergebnis sieht vollstaendig aus und ist es nicht. Pipedrive v2
+        blaettert per Cursor (``additional_data.next_cursor``); ohne diese Schleife
+        endet jede Summe beim Seitenlimit.
+        """
+        alle: list[dict] = []
+        cursor: str | None = None
+        while True:
+            anfrage = {**(params or {}), "limit": str(seite)}
+            if cursor:
+                anfrage["cursor"] = cursor
+            antwort = await self._get_v2(path, anfrage)
+            alle.extend(antwort.get("data") or [])
+            cursor = (antwort.get("additional_data") or {}).get("next_cursor")
+            if not cursor:
+                return alle
+
     # ── Verbindungstest ──────────────────────────────────────
 
     async def test_connection(self) -> dict:

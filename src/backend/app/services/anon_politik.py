@@ -52,12 +52,19 @@ bemerkt. Derselbe Grund, aus dem das GSW-Cockpit auf dem Profil ``recall`` steht
 """
 
 
-async def maskiere(text: str) -> tuple[str, str, list[dict], list[str]]:
+async def maskiere(
+    text: str, begriffe: list[str] | None = None
+) -> tuple[str, str, list[dict], list[str]]:
     """Maskiert Text nach der Politik dieses Hauses.
 
     Liefert ``(maskierter_text, session_id, diff, restbestaende)``. Das Mapping
     liegt im ``mapping_store`` und wird nur ueber die Session-Kennung angefasst --
     die Klartextwerte reisen nicht durch Antwortkoerper oder Frontend-Zustand.
+
+    ``begriffe`` gilt nur fuer diesen einen Durchgang: Kennungen ohne Namensform,
+    in denen die Erkennung nichts sieht -- eine Abkuerzung, ein Projektname. Sie
+    stehen bewusst nicht in den Einstellungen. Was in genau einem Schreiben
+    vorkommt, gehoert nicht in eine dauerhafte Liste, die niemand mehr durchsieht.
 
     ``restbestaende`` sind Bruchstuecke echter Werte, die im maskierten Text
     stehen geblieben sind -- der typische Fall ist die Teilnennung: «Egli
@@ -80,6 +87,7 @@ async def maskiere(text: str) -> tuple[str, str, list[dict], list[str]]:
         entities=",".join(ENTITAETEN),
         language="de",
         threshold=SCHWELLE,
+        always_mask=",".join(b.strip() for b in (begriffe or []) if b.strip()),
     )
     if not isinstance(ergebnis, dict):
         raise RuntimeError("Anonymisierung lieferte kein Mapping")
@@ -120,7 +128,6 @@ async def bilde_zurueck(text: str, session_id: str) -> tuple[str, list[str]]:
     gemeldet statt stillschweigend ausgegeben. Ein Bericht voller plausibler
     fremder Namen ist schlimmer als ein Bericht mit einer Warnung darauf.
     """
-    from ai9 import content_converter as cc
     from ai9 import mapping_store
 
     schluessel = mapping_store.get_mapping_keys(session_id) if session_id else None
@@ -129,6 +136,21 @@ async def bilde_zurueck(text: str, session_id: str) -> tuple[str, list[str]]:
         # Neustart. Eine lange Analyse kann ihn ueberdauern -- dann steht hier
         # maskierter Text, und das muss sichtbar bleiben.
         return text, ["(Mapping nicht mehr verfuegbar)"]
+
+    return await bilde_zurueck_mit_schluessel(text, schluessel)
+
+
+async def bilde_zurueck_mit_schluessel(
+    text: str, schluessel: dict
+) -> tuple[str, list[str]]:
+    """Wie ``bilde_zurueck``, aber mit mitgebrachtem Schluessel.
+
+    Der Weg fuer die gesicherte Schluesseldatei. Ohne ihn ist der Download aus
+    dem Mapping-Store eine Datei, die man aufbewahren, aber nicht benutzen kann --
+    und nach dem TTL-Ablauf oder einem Neustart ist der Rueckweg dann endgueltig
+    zu, obwohl der Schluessel auf der Platte liegt.
+    """
+    from ai9 import content_converter as cc
 
     try:
         klar = await cc.call_tool("deanonymize_content", text=text, mapping_keys=schluessel)

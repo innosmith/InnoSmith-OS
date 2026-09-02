@@ -17,6 +17,12 @@ scripts/eval/results/
 .secrets/
 secrets/
 
+# Datenraum: materialisierte Fachdaten liegen ausserhalb des Repos
+# (~/.local/share/taskpilot/datenraum). Falls jemand eine Kopie ins Projekt
+# legt, darf sie nicht mitwandern.
+*.parquet
+**/_katalog.json
+
 # Python
 .venv/
 venv/

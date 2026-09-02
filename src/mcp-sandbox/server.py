@@ -123,9 +123,21 @@ TOOLS = [
             "daher ein eigenständiges HTML-Artefakt (eingebettetes CSS+JS) nach /workspace/ "
             "schreiben — NICHT behaupten, das sei nicht darstellbar, und KEIN externes Hosting "
             "(z. B. GitHub Pages) anbieten. "
-            "Verfügbare Packages: pandas, numpy, matplotlib, seaborn, openpyxl, scipy, pyyaml, jinja2, tabulate. "
+            "Verfügbare Packages: duckdb, pandas, pyarrow, numpy, matplotlib, seaborn, openpyxl, scipy, pyyaml, jinja2, tabulate. "
             "Input-Dateien werden in /input/ bereitgestellt (read-only). "
-            "Output-Dateien in /workspace/ schreiben."
+            "Output-Dateien in /workspace/ schreiben.\n\n"
+            "DATENRAUM: Unter /daten/ liegen die Tabellen der Fachsysteme (Bexio, Toggl, "
+            "Pipedrive) als Parquet, lokal und im Takt aktualisiert. Für Fragen nach "
+            "Umsatz, Kunden, Rechnungen, Stunden, Projekten oder Deals IMMER hier rechnen "
+            "statt die Fachsysteme einzeln abzufragen — das ist um Grössenordnungen "
+            "schneller und liefert vollständige Zahlen. Zuerst /daten/_katalog.json lesen: "
+            "dort stehen Tabellen, Spalten, Zeilenzahl und der Stand der Daten. Den Stand "
+            "in der Antwort nennen. Niemals ganze Tabellen ausgeben — nur das Ergebnis.\n"
+            "Beispiel (Umsatz eines Kunden, unscharfer Name):\n"
+            "import duckdb, json\n"
+            "print(json.load(open('/daten/_katalog.json'))['tabellen'].keys())\n"
+            "print(duckdb.sql(\"SELECT kunde, sum(netto) AS umsatz FROM '/daten/bexio_rechnungen.parquet' \"\n"
+            "                 \"WHERE ist_umsatz AND kunde ILIKE '%GSW%' GROUP BY kunde\"))"
         ),
         inputSchema={
             "type": "object",
@@ -168,6 +180,7 @@ TOOLS = [
 ]
 
 AVAILABLE_PACKAGES = [
+    "duckdb 1.1.3", "pyarrow 18.1.0",
     "pandas 2.2.3", "numpy 2.1.3", "openpyxl 3.1.5", "xlsxwriter 3.2.0",
     "matplotlib 3.9.3", "seaborn 0.13.2", "pyyaml 6.0.2", "toml 0.10.2",
     "python-dateutil 2.9.0", "chardet 5.2.0", "regex 2024.11.6",

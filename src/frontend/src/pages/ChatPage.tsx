@@ -16,6 +16,12 @@ import { BackgroundPicker } from '../components/BackgroundPicker';
 import { ExportDialog } from '../components/ExportDialog';
 import { AnonymizePanel } from '../components/AnonymizePanel';
 import { OneDrivePicker, type ContextSource } from '../components/OneDrivePicker';
+import { Antwortleiste } from '../components/chat/Antwortleiste';
+import { Datenraumleiste } from '../components/chat/Datenraumleiste';
+import { Werkzeugmenue } from '../components/chat/Werkzeugmenue';
+import { Maskenvermerk } from '../components/anon/Maskenvermerk';
+import type { Fundstelle } from '../components/anon/typen';
+import { nimmUebergabe } from '../lib/anonUebergabe';
 import { useMediaQuery } from '../hooks/useMediaQuery';
 import { useSSE } from '../hooks/useSSE';
 import { DEFAULT_PROVIDER_ORDER as PROVIDER_ORDER, PROVIDER_LABELS } from '../lib/modelOrdering';
@@ -499,15 +505,29 @@ export function ChatPage() {
   const [bgPickerOpen, setBgPickerOpen] = useState(false);
   const abortControllerRef = useRef<AbortController | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
-  const [copyMenuId, setCopyMenuId] = useState<string | null>(null);
   const [exportMsgId, setExportMsgId] = useState<string | null>(null);
   const [exportMsgContent, setExportMsgContent] = useState('');
   const [convertRawContent, setConvertRawContent] = useState<string | null>(null);
   const [convertSourceFile, setConvertSourceFile] = useState<File | null>(null);
   const [anonymizeOpen, setAnonymizeOpen] = useState(false);
   const [anonymizeInitialText, setAnonymizeInitialText] = useState('');
-  const [anonymizeSessionIds, setAnonymizeSessionIds] = useState<Record<string, string>>({});
+  /** Die Sitzung einer maskierten Vorlage, die der Mensch in den Chat gegeben hat.
+   *
+   * Sie hängt an der Unterhaltung und nicht an einer Nachricht. Vorher stand
+   * hier eine Zuordnung nach Nachrichten-ID, gefüllt wurde aber nur der
+   * Schlüssel `_pending` -- die Bedingung für den Rückweg-Knopf war damit immer
+   * falsch, und die De-Anonymisierung im Chat war unerreichbar.
+   *
+   * An der Unterhaltung ist es auch die richtigere Stelle: Maskiert wurde die
+   * Vorlage, nicht eine einzelne Antwort, und jede Antwort darauf kann
+   * Ersatznamen enthalten.
+   */
+  const [vorlagenSitzung, setVorlagenSitzung] = useState<string | null>(null);
   const [deanonymizing, setDeanonymizing] = useState<string | null>(null);
+  /** Was die Schleuse ersetzt hat, bevor die letzte Frage hinausging. */
+  const [maskenInfo, setMaskenInfo] = useState<
+    { fundstellen: Fundstelle[]; restbestaende: string[]; ziel: string } | null
+  >(null);
   const [onedriveOpen, setOnedriveOpen] = useState(false);
   const [contextSources, setContextSources] = useState<ContextSource[]>([]);
   // Angepinnte Dokumente der aktiven Konversation (persistenter Kontext).
@@ -564,7 +584,6 @@ export function ChatPage() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const modelDropdownRef = useRef<HTMLDivElement>(null);
   const mcpPopoverRef = useRef<HTMLDivElement>(null);
-  const copyMenuRef = useRef<HTMLDivElement>(null);
   const skipNextFetchRef = useRef(false);
   const settingsInitRef = useRef(false);
   const sendingRef = useRef(false);
@@ -605,6 +624,16 @@ export function ChatPage() {
     loadConversations();
     loadSettings();
   }, [loadConversations, loadSettings]);
+
+  // Übergabe von der Datenschutz-Seite: maskierter Text plus die Sitzung, mit
+  // der sich die Antwort darauf wieder zurückübersetzen lässt.
+  useEffect(() => {
+    const uebergabe = nimmUebergabe();
+    if (!uebergabe) return;
+    setInput(uebergabe.text);
+    setVorlagenSitzung(uebergabe.sessionId);
+    textareaRef.current?.focus();
+  }, []);
 
   useEffect(() => {
     const onFocus = () => loadSettings();
@@ -693,7 +722,6 @@ export function ChatPage() {
     const handler = (e: MouseEvent) => {
       if (modelDropdownRef.current && !modelDropdownRef.current.contains(e.target as Node)) setModelOpen(false);
       if (mcpPopoverRef.current && !mcpPopoverRef.current.contains(e.target as Node)) setMcpOpen(false);
-      if (copyMenuRef.current && !copyMenuRef.current.contains(e.target as Node)) setCopyMenuId(null);
     };
     document.addEventListener('mousedown', handler);
     return () => document.removeEventListener('mousedown', handler);
@@ -1403,7 +1431,35 @@ export function ChatPage() {
             const errorText = await resp.text().catch(() => `HTTP ${resp.status}`);
             throw new Error(errorText);
           }
-          const { job_id } = await resp.json();
+          const antwort = await resp.json();
+          const job_id = antwort.job_id;
+
+          // Der Vermerk im Verlauf: was die Schleuse ersetzt hat. Ohne ihn
+          // bleibt die Maskierung unsichtbare Arbeit -- sie läuft, sie wirkt,
+          // und niemand erfährt davon.
+          if (antwort.anon_session) {
+            void api
+              .get<Fundstelle[]>(`/api/content/mapping-keys/${antwort.anon_session}/diff`)
+              .then(diff =>
+                setMaskenInfo({
+                  fundstellen: diff,
+                  restbestaende: antwort.residuals || [],
+                  ziel: modelLabel(selectedModel),
+                }),
+              )
+              .catch(() => {
+                // Die Zuordnung ist abgelaufen oder nicht lesbar. Dass maskiert
+                // wurde, stimmt trotzdem -- also den Vermerk ohne Liste zeigen.
+                setMaskenInfo({
+                  fundstellen: [],
+                  restbestaende: antwort.residuals || [],
+                  ziel: modelLabel(selectedModel),
+                });
+              });
+          } else {
+            setMaskenInfo(null);
+          }
+
           updateAgentState(cid, { isStreaming: true, jobId: job_id, status: 'running' });
           agentOffsets.current[cid] = 0;
           agentAccumulators.current[cid] = { stream: '', think: '', trace: [] };
@@ -1526,6 +1582,44 @@ export function ChatPage() {
     await navigator.clipboard.writeText(content);
     setCopiedId(id);
     setTimeout(() => setCopiedId(null), 2000);
+  };
+
+  /** Setzt in einer Antwort die echten Werte wieder ein.
+   *
+   * Nur für den Weg über eine selbst maskierte Vorlage: Was der Agent an ein
+   * Cloud-Modell gibt, übersetzt das Backend bereits zurück. Wer dagegen einen
+   * maskierten Text von der Datenschutz-Seite einfügt, bekommt eine Antwort
+   * voller Ersatznamen -- und die kennt nur diese Sitzung.
+   */
+  const zurueckuebersetzen = async (msgId: string, content: string) => {
+    if (!vorlagenSitzung) return;
+    setDeanonymizing(msgId);
+    try {
+      const res = await api.post<{ original_text: string; rueckstaende: string[] }>(
+        '/api/content/deanonymize',
+        { text: content, session_id: vorlagenSitzung },
+      );
+      if (res.original_text) {
+        setMessages(prev =>
+          prev.map(m =>
+            m.id === msgId
+              ? { ...m, content: res.original_text, residuals: res.rueckstaende || [] }
+              : m,
+          ),
+        );
+      }
+    } catch (err) {
+      // Abgelaufene Sitzung ist der Normalfall nach zwei Stunden. Stillschweigen
+      // hiesse, dass der Knopf nichts tut und niemand weiss warum.
+      setMessages(prev =>
+        prev.map(m =>
+          m.id === msgId
+            ? { ...m, residuals: [`Rückübersetzung nicht möglich: ${(err as Error).message}`] }
+            : m,
+        ),
+      );
+    }
+    setDeanonymizing(null);
   };
 
   const copyAsHtml = async (id: string, content: string) => {
@@ -1833,6 +1927,14 @@ export function ChatPage() {
           </button>
         </div>
 
+        {/* Wohin dieser Text geht — dauerhaft, nicht als Popup. */}
+        {selectedModel && (
+          <Datenraumleiste
+            lokal={selectedModelInfo?.type === 'local'}
+            modell={modelLabel(selectedModel)}
+          />
+        )}
+
         {/* Nachrichten oder Leerzustand */}
         {!activeId && messages.length === 0 ? (
           <div className="flex flex-1 flex-col items-center justify-center px-4 pb-[env(safe-area-inset-bottom,0px)]">
@@ -1846,7 +1948,7 @@ export function ChatPage() {
             </div>
 
             {/* Prominente Eingabekarte im Leerzustand */}
-            <div className="w-full max-w-4xl px-4">
+            <div className="w-full max-w-7xl px-4">
               {(attachments.length > 0 || contextSources.length > 0) && (
                 <div className="mb-2 flex flex-wrap gap-2">
                   {attachments.map((f, i) => (
@@ -1989,7 +2091,7 @@ export function ChatPage() {
           </div>
         ) : (
           <div ref={scrollContainerRef} className="flex-1 overflow-y-auto overscroll-contain px-3 py-4 sm:px-4 sm:py-6">
-            <div className="mx-auto max-w-4xl space-y-4">
+            <div className="mx-auto max-w-7xl space-y-4">
               {contextItems.length > 0 && (
                 <div className="rounded-xl border border-indigo-200/70 bg-indigo-50/60 px-3 py-2 dark:border-indigo-800/50 dark:bg-indigo-900/15">
                   <div className="mb-1.5 flex items-center gap-1.5 text-[11px] font-medium text-indigo-700 dark:text-indigo-300">
@@ -2138,62 +2240,16 @@ export function ChatPage() {
                     )}
 
                     {msg.role === 'assistant' ? (
-                      <div className="absolute -bottom-3 right-2 flex items-center gap-0.5 rounded-lg border border-gray-200 bg-white px-1 py-0.5 opacity-0 shadow-sm transition-opacity group-hover/msg:opacity-100 dark:border-gray-700 dark:bg-gray-800">
-                        <div className="relative" ref={copyMenuId === msg.id ? copyMenuRef : undefined}>
-                          <div className="flex items-center">
-                            <button onClick={() => copyAsMarkdown(msg.id, msg.content)} className="rounded-l p-1 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300" title="Als Markdown kopieren">
-                              {copiedId === msg.id ? <CheckIcon className="h-3.5 w-3.5 text-green-500" /> : <CopyIcon className="h-3.5 w-3.5" />}
-                            </button>
-                            <button onClick={() => setCopyMenuId(copyMenuId === msg.id ? null : msg.id)} className="rounded-r p-0.5 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300" title="Kopier-Optionen">
-                              <ChevronIcon className="h-2.5 w-2.5" />
-                            </button>
-                          </div>
-                          {copyMenuId === msg.id && (
-                            <div className="absolute bottom-full right-0 mb-1 w-44 rounded-lg border border-gray-200 bg-white py-1 shadow-lg dark:border-gray-700 dark:bg-gray-800 z-50">
-                              <button onClick={() => { copyAsMarkdown(msg.id, msg.content); setCopyMenuId(null); }} className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-gray-700 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-gray-700">
-                                <CopyIcon className="h-3.5 w-3.5" />
-                                Als Markdown
-                              </button>
-                              <button onClick={() => { copyAsHtml(msg.id, msg.content); setCopyMenuId(null); }} className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-gray-700 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-gray-700">
-                                <HtmlIcon className="h-3.5 w-3.5" />
-                                Als HTML
-                              </button>
-                            </div>
-                          )}
-                        </div>
-                        <button onClick={() => { setExportMsgId(msg.id); setExportMsgContent(msg.content); }} className="rounded p-1 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300" title="Herunterladen als...">
-                          <DownloadIcon className="h-3.5 w-3.5" />
-                        </button>
-                        <button onClick={() => { setAnonymizeInitialText(msg.content); setAnonymizeOpen(true); }} className="rounded p-1 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300" title="Text anonymisieren">
-                          <ShieldIcon className="h-3.5 w-3.5" />
-                        </button>
-                        {anonymizeSessionIds[msg.id] && (
-                          <button
-                            onClick={async () => {
-                              setDeanonymizing(msg.id);
-                              try {
-                                const res = await api.post<{ original_text: string }>('/api/content/deanonymize', {
-                                  text: msg.content,
-                                  session_id: anonymizeSessionIds[msg.id],
-                                });
-                                if (res.original_text) {
-                                  setMessages(prev => prev.map(m => m.id === msg.id ? { ...m, content: res.original_text } : m));
-                                  setAnonymizeSessionIds(prev => { const n = { ...prev }; delete n[msg.id]; return n; });
-                                }
-                              } catch { /* ignore */ }
-                              setDeanonymizing(null);
-                            }}
-                            disabled={deanonymizing === msg.id}
-                            className="rounded p-1 text-amber-500 hover:text-amber-600 dark:text-amber-400 dark:hover:text-amber-300"
-                            title="De-anonymisieren"
-                          >
-                            <ShieldCheckIcon className="h-3.5 w-3.5" />
-                          </button>
-                        )}
-                        <button onClick={() => createTaskFromMessage(msg.id, msg.content)} className="rounded p-1 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300" title="Aufgabe erstellen">
-                          <TaskIcon className="h-3.5 w-3.5" />
-                        </button>
-                      </div>
+                      <Antwortleiste
+                        kopiert={copiedId === msg.id}
+                        onKopieren={() => copyAsMarkdown(msg.id, msg.content)}
+                        onKopierenHtml={() => copyAsHtml(msg.id, msg.content)}
+                        onExport={() => { setExportMsgId(msg.id); setExportMsgContent(msg.content); }}
+                        onAufgabe={() => createTaskFromMessage(msg.id, msg.content)}
+                        onAnonymisieren={() => { setAnonymizeInitialText(msg.content); setAnonymizeOpen(true); }}
+                        laeuftZurueck={deanonymizing === msg.id}
+                        onZurueckuebersetzen={vorlagenSitzung ? () => void zurueckuebersetzen(msg.id, msg.content) : undefined}
+                      />
                     ) : (
                       <div className="absolute -bottom-3 left-2 flex items-center gap-0.5 rounded-lg border border-indigo-400/30 bg-indigo-700 px-1 py-0.5 opacity-0 shadow-sm transition-opacity group-hover/msg:opacity-100">
                         <button onClick={() => copyAsMarkdown(msg.id, msg.content)} className="rounded p-1 text-indigo-200 hover:text-white" title="Prompt kopieren">
@@ -2207,6 +2263,15 @@ export function ChatPage() {
                   </div>
                 </div>
               ))}
+
+              {/* Der Beleg: was ersetzt wurde, bevor die Frage hinausging. */}
+              {maskenInfo && (
+                <Maskenvermerk
+                  fundstellen={maskenInfo.fundstellen}
+                  restbestaende={maskenInfo.restbestaende}
+                  ziel={maskenInfo.ziel}
+                />
+              )}
 
               {/* Streaming / Agent-Verarbeitung */}
               {isStreaming && (
@@ -2347,7 +2412,7 @@ export function ChatPage() {
         {/* Anhänge + Eingabe nur wenn Chat aktiv (Leerzustand hat eigene Eingabe) */}
         {(activeId || messages.length > 0) && (attachments.length > 0 || contextSources.length > 0) && (
           <div className="border-t border-gray-200 bg-gray-50 px-4 py-2 dark:border-gray-800 dark:bg-gray-900/50">
-            <div className="mx-auto flex max-w-4xl flex-wrap gap-2">
+            <div className="mx-auto flex max-w-7xl flex-wrap gap-2">
               {attachments.map((f, i) => (
                 <div key={i} className="flex items-center gap-1.5 rounded-lg bg-white px-2.5 py-1.5 text-xs text-gray-700 shadow-sm dark:bg-gray-800 dark:text-gray-300">
                   <FileIcon className="h-3.5 w-3.5 text-gray-400" />
@@ -2375,7 +2440,7 @@ export function ChatPage() {
 
         {/* Eingabebereich am unteren Rand — nur bei aktiver Konversation */}
         {(activeId || messages.length > 0) && <div className="border-t border-gray-200 bg-white/80 px-4 py-3 pb-[max(0.75rem,env(safe-area-inset-bottom,0px))] backdrop-blur-sm dark:border-gray-800 dark:bg-gray-900/80">
-          <div className="mx-auto max-w-4xl">
+          <div className="mx-auto max-w-7xl">
             <div className="rounded-2xl border border-gray-300 bg-white shadow-sm transition-colors focus-within:border-indigo-500 focus-within:ring-1 focus-within:ring-indigo-500 dark:border-gray-600 dark:bg-gray-800">
               <textarea
                 ref={textareaRef}
@@ -2488,17 +2553,11 @@ export function ChatPage() {
                     <span className="text-[10px] text-gray-400 dark:text-gray-500">{messages.length} Nachrichten</span>
                   )}
                   <input ref={fileInputRef} type="file" multiple className="hidden" onChange={handleFileSelect} />
-                  <button onClick={() => fileInputRef.current?.click()} className="flex h-10 w-10 items-center justify-center rounded-md text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-600 lg:h-auto lg:w-auto lg:p-1 dark:hover:bg-gray-700" title="Datei anhängen">
-                    <AttachIcon className="h-4 w-4" />
-                  </button>
-                  <button onClick={() => setOnedriveOpen(true)} className="flex h-10 w-10 items-center justify-center rounded-md text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-600 lg:h-auto lg:w-auto lg:p-1 dark:hover:bg-gray-700" title="OneDrive-Dateien anhängen">
-                    <OneDriveIcon className="h-4 w-4" />
-                  </button>
-                  <button onClick={() => { setAnonymizeInitialText(input); setAnonymizeOpen(true); }} className="rounded-md p-1 text-emerald-500 transition-colors hover:bg-emerald-50 hover:text-emerald-600 dark:hover:bg-emerald-900/30" title="Text anonymisieren">
-                    <ShieldIcon className="h-4 w-4" />
-                  </button>
-                  <button
-                    onClick={() => {
+                  <Werkzeugmenue
+                    onDatei={() => fileInputRef.current?.click()}
+                    onOneDrive={() => setOnedriveOpen(true)}
+                    onAnonymisieren={() => { setAnonymizeInitialText(input); setAnonymizeOpen(true); }}
+                    onKonvertieren={() => {
                       const mdFile = attachments.find(f => f.name.toLowerCase().endsWith('.md'));
                       if (mdFile) {
                         setConvertSourceFile(mdFile);
@@ -2506,12 +2565,8 @@ export function ChatPage() {
                         setConvertRawContent(input.trim());
                       }
                     }}
-                    disabled={!input.trim() && !attachments.some(f => f.name.toLowerCase().endsWith('.md'))}
-                    className="rounded-md p-1 text-orange-500 transition-colors hover:bg-orange-50 hover:text-orange-600 disabled:opacity-40 dark:hover:bg-orange-900/30"
-                    title="Text/Datei als Word, PDF oder PPTX konvertieren"
-                  >
-                    <FileOutputIcon className="h-4 w-4" />
-                  </button>
+                    konvertierenMoeglich={!!input.trim() || attachments.some(f => f.name.toLowerCase().endsWith('.md'))}
+                  />
                   <button onClick={handleSend} disabled={!input.trim() || (isStreaming && !(mode === 'agent' && !!activeAgent?.jobId))} className="flex h-7 w-7 items-center justify-center rounded-lg bg-indigo-600 text-white transition-colors hover:bg-indigo-700 disabled:opacity-40">
                     <SendIcon className="h-3.5 w-3.5" />
                   </button>
@@ -2575,9 +2630,9 @@ export function ChatPage() {
         initialText={anonymizeInitialText}
         onInsertText={(text, sessionId) => {
           setInput(text);
-          if (sessionId) {
-            setAnonymizeSessionIds(prev => ({ ...prev, _pending: sessionId }));
-          }
+          // Die Sitzung gehört ab jetzt der Unterhaltung: Jede Antwort auf diese
+          // Vorlage kann Ersatznamen enthalten und braucht den Rückweg.
+          if (sessionId) setVorlagenSitzung(sessionId);
           textareaRef.current?.focus();
         }}
       />
@@ -2611,9 +2666,6 @@ function CheckIcon({ className }: { className?: string }) {
 }
 function CopyIcon({ className }: { className?: string }) {
   return <svg className={className} fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M15.666 3.888A2.25 2.25 0 0 0 13.5 2.25h-3c-1.03 0-1.9.693-2.166 1.638m7.332 0c.055.194.084.4.084.612v0a.75.75 0 0 1-.75.75H9.75a.75.75 0 0 1-.75-.75v0c0-.212.03-.418.084-.612m7.332 0c.646.049 1.288.11 1.927.184 1.1.128 1.907 1.077 1.907 2.185V19.5a2.25 2.25 0 0 1-2.25 2.25H6.75A2.25 2.25 0 0 1 4.5 19.5V6.257c0-1.108.806-2.057 1.907-2.185a48.208 48.208 0 0 1 1.927-.184" /></svg>;
-}
-function DownloadIcon({ className }: { className?: string }) {
-  return <svg className={className} fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5M16.5 12 12 16.5m0 0L7.5 12m4.5 4.5V3" /></svg>;
 }
 function SendIcon({ className }: { className?: string }) {
   return <svg className={className} fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M6 12 3.269 3.125A59.769 59.769 0 0 1 21.485 12 59.768 59.768 0 0 1 3.27 20.875L5.999 12Zm0 0h7.5" /></svg>;
@@ -2651,12 +2703,6 @@ function CloudIcon({ className }: { className?: string }) {
 function BrainIcon({ className }: { className?: string }) {
   return <svg className={className} fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M9.813 15.904 9 18.75l-.813-2.846a4.5 4.5 0 0 0-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 0 0 3.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 0 0 3.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 0 0-3.09 3.09ZM18.259 8.715 18 9.75l-.259-1.035a3.375 3.375 0 0 0-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 0 0 2.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 0 0 2.455 2.456L21.75 6l-1.036.259a3.375 3.375 0 0 0-2.455 2.456Z" /></svg>;
 }
-function TaskIcon({ className }: { className?: string }) {
-  return <svg className={className} fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" /></svg>;
-}
-function HtmlIcon({ className }: { className?: string }) {
-  return <svg className={className} fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M17.25 6.75 22.5 12l-5.25 5.25m-10.5 0L1.5 12l5.25-5.25m7.5-3-4.5 16.5" /></svg>;
-}
 function OneDriveIcon({ className }: { className?: string }) {
   return <svg className={className} fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M2.25 15a4.5 4.5 0 0 0 4.5 4.5H18a3.75 3.75 0 0 0 1.332-7.257 3 3 0 0 0-3.758-3.848 5.25 5.25 0 0 0-10.233 2.33A4.502 4.502 0 0 0 2.25 15Z" /></svg>;
 }
@@ -2673,8 +2719,5 @@ function SparkleIcon({ className }: { className?: string }) {
   return <svg className={className} fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M9.813 15.904 9 18.75l-.813-2.846a4.5 4.5 0 0 0-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 0 0 3.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 0 0 3.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 0 0-3.09 3.09ZM18.259 8.715 18 9.75l-.259-1.035a3.375 3.375 0 0 0-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 0 0 2.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 0 0 2.455 2.456L21.75 6l-1.036.259a3.375 3.375 0 0 0-2.455 2.456ZM16.894 20.567 16.5 21.75l-.394-1.183a2.25 2.25 0 0 0-1.423-1.423L13.5 18.75l1.183-.394a2.25 2.25 0 0 0 1.423-1.423l.394-1.183.394 1.183a2.25 2.25 0 0 0 1.423 1.423l1.183.394-1.183.394a2.25 2.25 0 0 0-1.423 1.423Z" /></svg>;
 }
 function ShieldIcon({ className }: { className?: string }) {
-  return <svg className={className} fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75 11.25 15 15 9.75m-3-7.036A11.959 11.959 0 0 1 3.598 6 11.99 11.99 0 0 0 3 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.248-8.25-3.285Z" /></svg>;
-}
-function ShieldCheckIcon({ className }: { className?: string }) {
   return <svg className={className} fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75 11.25 15 15 9.75m-3-7.036A11.959 11.959 0 0 1 3.598 6 11.99 11.99 0 0 0 3 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.248-8.25-3.285Z" /></svg>;
 }

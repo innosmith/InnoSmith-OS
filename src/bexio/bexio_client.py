@@ -61,6 +61,24 @@ def decode_token_expiry(token: str) -> dict | None:
     }
 
 
+def _status_kennung(status: str | int) -> int:
+    """Rechnungsstatus als Zahl -- akzeptiert Kennung oder Beschriftung.
+
+    Die Zuordnung steht in ``rechnungen.py`` und nur dort; hier wird sie nur
+    nachgeschlagen. Zwei Tabellen waeren zwei Wahrheiten.
+    """
+    if isinstance(status, int) or str(status).isdigit():
+        return int(status)
+    from rechnungen import RECHNUNGSSTATUS
+
+    gesucht = str(status).strip().lower()
+    for kennung, (beschriftung, _) in RECHNUNGSSTATUS.items():
+        if beschriftung == gesucht:
+            return kennung
+    erlaubt = ", ".join(b for b, _ in RECHNUNGSSTATUS.values())
+    raise ValueError(f"Unbekannter Rechnungsstatus '{status}'. Erlaubt: {erlaubt} oder die Kennung")
+
+
 @dataclass
 class BexioConfig:
     api_token: str = ""
@@ -164,12 +182,24 @@ class BexioClient:
         return data if isinstance(data, dict) else {}
 
     async def search_contact_by_name(self, name: str) -> list[dict]:
-        """Kontakte per POST /contact/search nach Name suchen."""
-        search_body = [
-            {"field": "name_1", "value": name, "criteria": "like"}
-        ]
-        data = await self._post_v2("/contact/search", search_body)
-        return data if isinstance(data, list) else []
+        """Kontakte per POST /contact/search nach Name suchen.
+
+        ``like`` sucht bei Bexio bereits als Teiltreffer, ohne dass Platzhalter
+        noetig waeren. Gesucht wird in ``name_1`` (Firma bzw. Nachname) und
+        ``name_2`` (Vorname); die Treffer werden ueber die Kennung vereinigt, damit
+        eine Person nicht doppelt erscheint.
+        """
+        if not (name or "").strip():
+            raise ValueError("search_contact_by_name braucht einen Namen")
+        treffer: dict[int, dict] = {}
+        for feld in ("name_1", "name_2"):
+            data = await self._post_v2(
+                "/contact/search", [{"field": feld, "value": name, "criteria": "like"}]
+            )
+            for k in data if isinstance(data, list) else []:
+                if k.get("id") is not None:
+                    treffer[int(k["id"])] = k
+        return list(treffer.values())
 
     async def search_contact_by_email(self, email: str) -> list[dict]:
         """Kontakte per POST /contact/search nach E-Mail suchen."""
@@ -182,10 +212,19 @@ class BexioClient:
     # ── Aufträge (kb_order) ──────────────────────────────────
 
     async def list_orders(self, contact_id: int | None = None, limit: int = 50) -> list[dict]:
-        params = {"limit": str(limit)}
+        """Auftraege laden; bei ``contact_id`` ueber die Suche.
+
+        Derselbe Grund wie bei ``list_invoices``: der GET-Parameter ``contact_id``
+        wird von Bexio entgegengenommen und ignoriert. Wer ihm traut, bekommt alle
+        Auftraege und haelt sie fuer die eines Kunden.
+        """
         if contact_id:
-            params["contact_id"] = str(contact_id)
-        data = await self._get_v2("/kb_order", params)
+            data = await self._post_v2(
+                "/kb_order/search",
+                [{"field": "contact_id", "value": str(contact_id), "criteria": "="}],
+            )
+            return data if isinstance(data, list) else []
+        data = await self._get_v2("/kb_order", {"limit": str(limit)})
         return data if isinstance(data, list) else []
 
     async def get_order(self, order_id: int) -> dict:
@@ -200,30 +239,70 @@ class BexioClient:
         limit: int = 50,
         offset: int = 0,
     ) -> list[dict]:
-        params: dict[str, str] = {"limit": str(limit), "offset": str(offset)}
+        """Eine Seite Rechnungen laden.
+
+        ``contact_id`` wird bewusst **nicht** als GET-Parameter gesendet: Bexio nimmt
+        ihn entgegen und ignoriert ihn. Am 02.09.2026 gemessen -- 652 Rechnungen
+        ungefiltert, 652 "gefiltert", waehrend ``POST /kb_invoice/search`` mit
+        derselben Kennung korrekt 159 lieferte. Ein wirkungsloser Filter ist
+        schlimmer als keiner: die Summe sieht richtig aus und ist es nicht.
+        Die Einschraenkung laeuft deshalb ueber die Suche.
+        """
         if contact_id:
-            params["contact_id"] = str(contact_id)
+            return await self.search_invoices(contact_id=contact_id)
+        params: dict[str, str] = {"limit": str(limit), "offset": str(offset)}
         data = await self._get_v2("/kb_invoice", params)
         return data if isinstance(data, list) else []
 
     async def search_invoices(
         self,
-        status: str | None = None,
+        status: str | int | None = None,
         from_date: str | None = None,
         to_date: str | None = None,
+        contact_id: int | None = None,
     ) -> list[dict]:
-        """Rechnungen filtern. status: 'draft','pending','partial','paid','overdue','cancelled'."""
+        """Rechnungen filtern (POST /kb_invoice/search).
+
+        ``status`` akzeptiert die Kennung (7/8/9) oder die Beschriftung
+        ('entwurf', 'offen', 'bezahlt'). Frueher wurde der Name unveraendert gegen
+        das numerische Feld ``kb_item_status_id`` gestellt -- das trifft nie.
+
+        Ohne Kriterien wurde bisher stillschweigend auf ``list_invoices(limit=200)``
+        ausgewichen. Bei 652 Rechnungen fehlte damit zwei Dritteln des Bestands,
+        ohne dass es irgendwo auffiel. Jetzt wird sauber ueber alle Seiten geblaettert.
+        """
         criteria: list[dict] = []
-        if status:
-            criteria.append({"field": "kb_item_status_id", "value": status, "criteria": "="})
+        if contact_id:
+            criteria.append({"field": "contact_id", "value": str(contact_id), "criteria": "="})
+        if status is not None and status != "":
+            criteria.append({
+                "field": "kb_item_status_id",
+                "value": str(_status_kennung(status)),
+                "criteria": "=",
+            })
         if from_date:
             criteria.append({"field": "is_valid_from", "value": from_date, "criteria": ">="})
         if to_date:
             criteria.append({"field": "is_valid_from", "value": to_date, "criteria": "<="})
         if not criteria:
-            return await self.list_invoices(limit=200)
+            return await self.alle_rechnungen()
         data = await self._post_v2("/kb_invoice/search", criteria)
         return data if isinstance(data, list) else []
+
+    async def alle_rechnungen(self, seite: int = 500) -> list[dict]:
+        """Alle Rechnungen ueber alle Seiten laden.
+
+        ``list_invoices`` liefert bewusst nur eine Seite. Fuer jede Auswertung ist
+        das zu wenig, und der Fehler ist unsichtbar -- das Ergebnis wirkt vollstaendig.
+        """
+        alle: list[dict] = []
+        offset = 0
+        while True:
+            batch = await self.list_invoices(limit=seite, offset=offset)
+            alle.extend(batch)
+            if len(batch) < seite:
+                return alle
+            offset += seite
 
     async def get_invoice(self, invoice_id: int) -> dict:
         data = await self._get_v2(f"/kb_invoice/{invoice_id}")

@@ -72,6 +72,7 @@ class UserSettings(BaseModel):
     chat_background_url: str | None = None
     projects_background_url: str | None = None
     capacity_background_url: str | None = None
+    datenschutz_background_url: str | None = None
     project_sidebar_order: list[str] | None = None
     # Ob die Projektliste in der Sidebar aufgeklappt ist. Gespeichert, weil sie die einzige
     # Zone ist, die scrollt: Wer sie zuklappt, will das nach dem Neuladen nicht wiederholen.
@@ -111,6 +112,7 @@ SETTINGS_FIELDS = [
     "inbox_background_url", "agents_background_url", "signale_background_url",
     "finance_background_url", "debtors_background_url", "creditors_background_url",
     "chat_background_url", "projects_background_url", "capacity_background_url",
+    "datenschutz_background_url",
     "project_sidebar_order", "projects_expanded", "debtor_budgets",
     "default_hourly_rate", "forecast_pipeline_weight",
     "forecast_fill_horizon_months", "forecast_vat_rate",

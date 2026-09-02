@@ -68,6 +68,7 @@ from app.services.meetings import start_meeting_poller, stop_meeting_poller
 from app.services.notification import start_notification_scheduler, stop_notification_scheduler
 from app.services.pipeline_promoter import start_pipeline_promoter, stop_pipeline_promoter
 from app.services.recurring import start_recurring_scheduler, stop_recurring_scheduler
+from app.services.datenraum import start_datenraum_worker, stop_datenraum_worker
 from app.services.semantic_index import start_semantic_index, stop_semantic_index
 from app.services.agent_scheduler import start_agent_scheduler, stop_agent_scheduler
 from app.services.reflection import (
@@ -97,20 +98,47 @@ UPLOADS_DIR.mkdir(exist_ok=True)
 (UPLOADS_DIR / "icons").mkdir(exist_ok=True)
 
 
-def _check_bexio_token_expiry() -> None:
+async def _check_bexio_token_expiry() -> None:
     """Warnt beim Start, wenn der Bexio-Token bald ablaeuft oder bereits abgelaufen ist.
 
     Ein Bexio Personal Access Token (PAT) ist 6 Monate gueltig; danach liefert die
     API stillschweigend 401. Diese Pruefung macht den Ablauf sichtbar, bevor er
     Buchhaltungs- und Finanzansicht lahmlegt.
+
+    Geprueft wird zusaetzlich, ob .env und Datenbank denselben Token halten. Am
+    02.09.2026 lag in .env ein abgelaufener Token, waehrend die Oberflaeche einen
+    gueltigen fuehrte: jeder frisch gestartete Prozess bekam 401, das laufende
+    Backend nicht. Ein solcher Zustand ist von aussen nicht unterscheidbar von
+    "Bexio ist gerade gestoert" -- deshalb wird die Abweichung genannt, nie der Wert.
     """
-    token = app_settings.bexio_api_token
-    if not token:
-        return
     log = logging.getLogger("taskpilot.lifespan")
     try:
         from bexio_client import decode_token_expiry
     except ImportError:
+        return
+
+    env_token = app_settings.bexio_api_token
+    db_token = ""
+    try:
+        from app.core.principal import get_owner_settings
+
+        async with async_session() as db:
+            db_token = (await get_owner_settings(db)).get("bexio_api_token") or ""
+    except Exception:  # noqa: BLE001 - eine Startpruefung darf den Start nie verhindern
+        pass
+
+    if db_token and env_token and db_token != env_token:
+        env_info = decode_token_expiry(env_token) or {}
+        log.warning(
+            "Bexio-Token: Oberflaeche und .env halten VERSCHIEDENE Token. Es gilt der "
+            "aus der Oberflaeche; der Wert in .env (%s) wirkt nur in frisch gestarteten "
+            "Prozessen und fuehrt dort zu 401. Den Eintrag in .env entfernen oder "
+            "angleichen.",
+            "abgelaufen" if env_info.get("is_expired") else "noch gueltig",
+        )
+
+    token = db_token or env_token
+    if not token:
         return
     info = decode_token_expiry(token)
     if not info:
@@ -212,7 +240,7 @@ async def lifespan(app: FastAPI):
             )
         await db.commit()
 
-    _check_bexio_token_expiry()
+    await _check_bexio_token_expiry()
     await _check_tasks_folder()
 
     _export_template_dir()
@@ -227,7 +255,9 @@ async def lifespan(app: FastAPI):
     await start_briefing_scheduler()
     await start_meeting_poller()
     await start_semantic_index()
+    await start_datenraum_worker()
     yield
+    await stop_datenraum_worker()
     await stop_semantic_index()
     await stop_meeting_poller()
     await stop_briefing_scheduler()

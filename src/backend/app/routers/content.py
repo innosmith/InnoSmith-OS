@@ -38,6 +38,13 @@ _TMP_DIR.mkdir(parents=True, exist_ok=True)
 class AnonymizeRequest(BaseModel):
     text: str
     language: str = "auto"
+    begriffe: list[str] = []
+    """Eigene Begriffe, die nur in diesem Durchgang gelten.
+
+    Kennungen ohne Namensform -- eine Abkuerzung, ein Projektname --, in denen
+    die Erkennung nichts sieht. Bewusst nicht in den Einstellungen: Was in genau
+    einem Schreiben vorkommt, gehoert nicht in eine dauerhafte Liste.
+    """
 
 
 class AnonymizeResponse(BaseModel):
@@ -56,7 +63,15 @@ class AnonymizeResponse(BaseModel):
 
 class DeanonymizeRequest(BaseModel):
     text: str
-    session_id: str
+    session_id: str | None = None
+    keys: dict | None = None
+    """Mitgebrachter Schluessel aus der gesicherten Datei.
+
+    Alternative zur Sitzung, kein Zusatz: Der Store haelt Mappings nur zwei
+    Stunden und ueberlebt keinen Neustart. Ohne diesen Weg waere die
+    heruntergeladene Schluesseldatei etwas, das man aufbewahren, aber nie
+    benutzen kann.
+    """
 
 
 class DeanonymizeResponse(BaseModel):
@@ -97,7 +112,7 @@ async def anonymize_text(
 
     try:
         anonymized_text, session_id, diff_pairs, restbestaende = await anon_politik.maskiere(
-            body.text
+            body.text, body.begriffe
         )
     except Exception:  # noqa: BLE001
         logger.exception("Anonymisierung fehlgeschlagen")
@@ -115,10 +130,17 @@ async def anonymize_text(
 async def anonymize_file(
     file: UploadFile = File(...),
     language: str = "auto",
+    begriffe: str = Form(""),
     user: User = Depends(require_role("owner")),
 ):
-    """Anonymisiert eine hochgeladene Datei (MD, DOCX, PDF)."""
+    """Anonymisiert eine hochgeladene Datei (MD, DOCX, PDF).
+
+    ``begriffe`` kommt als Zeilenliste aus dem Formular -- ein Begriff pro Zeile,
+    gueltig nur fuer diesen Durchgang.
+    """
     from app.services import anon_politik
+
+    eigene = [z.strip() for z in begriffe.splitlines() if z.strip()]
 
     suffix = Path(file.filename or "upload.txt").suffix
     tmp_path = _TMP_DIR / f"{uuid.uuid4().hex}{suffix}"
@@ -131,7 +153,7 @@ async def anonymize_file(
         text_content = extracted if isinstance(extracted, str) else str(extracted)
 
         anonymized_text, session_id, diff_pairs, restbestaende = await anon_politik.maskiere(
-            text_content
+            text_content, eigene
         )
     except Exception:  # noqa: BLE001
         logger.exception("Datei-Anonymisierung fehlgeschlagen")
@@ -157,18 +179,38 @@ async def deanonymize_text(
 ):
     """Stellt Originalwerte in anonymisiertem Text wieder her.
 
-    Nutzt die im Backend gespeicherten Mapping-Keys (via session_id).
+    Zwei Quellen fuer den Schluessel, in dieser Reihenfolge: die mitgebrachte
+    Datei (``keys``), sonst die laufende Sitzung (``session_id``). Die Datei hat
+    Vorrang, weil sie die ausdruecklichere Angabe ist -- wer sie hochlaedt, meint
+    sie und nicht eine zufaellig noch offene Sitzung.
     """
     from app.services import anon_politik
 
-    if mapping_store.get_mapping_keys(body.session_id) is None:
+    if body.keys:
+        if not isinstance(body.keys.get("mappings"), dict):
+            raise HTTPException(
+                status_code=422,
+                detail="Die Datei ist kein Schlüssel: Feld «mappings» fehlt.",
+            )
+        original_text, rueckstaende = await anon_politik.bilde_zurueck_mit_schluessel(
+            body.text, body.keys
+        )
+    elif body.session_id:
+        if mapping_store.get_mapping_keys(body.session_id) is None:
+            raise HTTPException(
+                status_code=404,
+                detail="Mapping-Keys nicht gefunden oder abgelaufen (TTL 2h). "
+                "Bitte erneut anonymisieren oder die gesicherte Schlüsseldatei verwenden.",
+            )
+        original_text, rueckstaende = await anon_politik.bilde_zurueck(
+            body.text, body.session_id
+        )
+    else:
         raise HTTPException(
-            status_code=404,
-            detail="Mapping-Keys nicht gefunden oder abgelaufen (TTL 2h). "
-            "Bitte erneut anonymisieren oder die heruntergeladene Key-Datei verwenden.",
+            status_code=422,
+            detail="Weder eine Sitzung noch eine Schlüsseldatei angegeben.",
         )
 
-    original_text, rueckstaende = await anon_politik.bilde_zurueck(body.text, body.session_id)
     if rueckstaende:
         logger.warning("De-Anonymisierung: Ersatznamen im Text geblieben: %s", rueckstaende[:5])
 

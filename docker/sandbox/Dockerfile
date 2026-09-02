@@ -12,7 +12,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt /opt/sandbox/requirements.txt
 RUN pip install --no-cache-dir -r /opt/sandbox/requirements.txt
 
-RUN mkdir -p /input /workspace /tmp && \
+# /daten ist der Einhängepunkt des Datenraums (schreibgeschützt, vom Executor bei
+# jedem Lauf gesetzt). Explizit anlegen, damit er auch bei read-only Root-FS steht.
+RUN mkdir -p /input /daten /workspace /tmp && \
     chown sandbox:sandbox /workspace /tmp
 
 COPY seccomp-profile.json /opt/sandbox/seccomp-profile.json

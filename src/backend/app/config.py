@@ -319,6 +319,15 @@ class Settings(BaseSettings):
     sandbox_executor_url: str = "http://127.0.0.1:8090"
     sandbox_executor_token: str = ""
 
+    # Datenraum: lokal materialisierte Tabellen der Fachsysteme (Bexio, Toggl,
+    # Pipedrive). Der Executor haengt das Verzeichnis bei jedem Sandbox-Lauf
+    # schreibgeschuetzt unter /daten ein, damit Auswertungen ohne Live-Abfrage und
+    # ohne Rohdaten im Modellkontext laufen. Leer = ~/.local/share/taskpilot/datenraum.
+    # Der Pfad muss fuer Backend und Executor derselbe sein (pfadgleicher Mount).
+    datenraum_enabled: bool = True
+    datenraum_dir: str = ""
+    datenraum_full_hour: int = 3
+
     # Document Export & Content-Services (contentConverter)
     contentconverter_path: str = "/home/innosmith/dev/github/contentConverter"
     contentconverter_cconv_bin: str = "/home/innosmith/dev/github/innosmith-os/.venv/bin/cconv"

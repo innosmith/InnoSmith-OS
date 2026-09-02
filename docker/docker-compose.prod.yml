@@ -48,11 +48,17 @@ services:
       # Code-Sandbox laeuft im Sandbox-Executor-Sidecar (taskpilot-shared-Netz).
       # Der Token kommt aus ../.env.prod (TP_SANDBOX_EXECUTOR_TOKEN).
       TP_SANDBOX_EXECUTOR_URL: http://taskpilot-sandbox-executor:8090
+      # Datenraum: pfadgleich gemountet, damit Backend (schreibend) und Executor
+      # (der den Pfad an `docker run -v` weiterreicht) dieselbe Stelle meinen.
+      # Ohne explizite Variable waere $HOME im Container /home/taskpilot -- ein
+      # Pfad, den der Host-Daemon nicht aufloesen kann.
+      TP_DATENRAUM_DIR: ${HOME}/.local/share/taskpilot/datenraum
     volumes:
       - prod-uploads:/app/uploads
       - prod-exports:/tmp/taskpilot-exports
       - ${HOME}/.hermes:/home/taskpilot/.hermes
       - ${HOME}/OneDrive/Finanzen/Kreditoren:${HOME}/OneDrive/Finanzen/Kreditoren:ro
+      - ${HOME}/.local/share/taskpilot/datenraum:${HOME}/.local/share/taskpilot/datenraum
     # no-new-privileges deaktiviert: Kernel 6.17-nvidia blockt jede exec mit diesem Flag
     # Security durch non-root User (taskpilot) + Cloudflare Zero Trust gewaehrleistet
     depends_on:
