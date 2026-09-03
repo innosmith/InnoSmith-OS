@@ -23,6 +23,13 @@ RETRY_BASE_DELAY = 1.0
 
 BASE_URL_V2 = "https://api.bexio.com/2.0"
 BASE_URL_V3 = "https://api.bexio.com/3.0"
+BASE_URL_V4 = "https://api.bexio.com/4.0"
+
+# Wie viele Einzelabrufe gleichzeitig laufen duerfen. Die Kreditorenliste gibt
+# weder Lieferantenkennung noch Kontierung her (siehe kreditoren.py), also braucht
+# jede Rechnung einen eigenen Abruf. Acht parallel holen 435 Rechnungen in rund
+# acht Sekunden, ohne dass Bexio mit 429 antwortet.
+DETAIL_PARALLEL = 8
 
 
 def decode_token_expiry(token: str) -> dict | None:
@@ -143,6 +150,9 @@ class BexioClient:
 
     async def _get_v3(self, path: str, params: dict | None = None) -> dict | list:
         return await self._request("GET", f"{BASE_URL_V3}{path}", params=params)
+
+    async def _get_v4(self, path: str, params: dict | None = None) -> dict | list:
+        return await self._request("GET", f"{BASE_URL_V4}{path}", params=params)
 
     # ── Token-Ablauf ─────────────────────────────────────────
 
@@ -308,6 +318,85 @@ class BexioClient:
         data = await self._get_v2(f"/kb_invoice/{invoice_id}")
         return data if isinstance(data, dict) else {}
 
+    # ── Lieferantenrechnungen (purchase/bills, v4) ───────────
+
+    async def list_bills(self, seite: int = 1, limit: int = 100) -> tuple[list[dict], dict]:
+        """Eine Seite Lieferantenrechnungen samt Blaetter-Angabe.
+
+        **Geblaettert wird ueber ``page``, nicht ueber ``offset``.** Bexio nimmt
+        ``offset`` entgegen und ignoriert es: am 03.09.2026 lieferte ``offset=50``
+        exakt dieselben 50 Zeilen wie ``offset=0``. Dieselbe Gattung Fehler wie der
+        wirkungslose ``contact_id``-Filter auf ``kb_invoice`` -- eine plausible
+        Antwort statt einer Fehlermeldung. Wer hier ``offset`` verwendet, laedt die
+        erste Seite so oft, wie er zu blaettern glaubt.
+
+        Der zweite Rueckgabewert ist ``paging`` mit ``item_count`` und
+        ``page_count``. Damit ist Vollstaendigkeit pruefbar statt vermutet.
+        """
+        antwort = await self._get_v4(
+            "/purchase/bills", {"page": str(seite), "limit": str(limit)}
+        )
+        if not isinstance(antwort, dict):
+            return [], {}
+        daten = antwort.get("data")
+        return (daten if isinstance(daten, list) else []), (antwort.get("paging") or {})
+
+    async def alle_lieferantenrechnungen(self, limit: int = 100) -> tuple[list[dict], int]:
+        """Alle Lieferantenrechnungen ueber alle Seiten, mit gemeldeter Gesamtzahl.
+
+        Gibt zusaetzlich ``item_count`` der ersten Seite zurueck. Der Aufrufer
+        vergleicht ihn mit der Anzahl eingesammelter Zeilen -- ein unvollstaendiger
+        Abzug ist sonst nicht von einem kleinen Bestand zu unterscheiden.
+        """
+        alle: list[dict] = []
+        gemeldet = 0
+        seite = 1
+        while True:
+            zeilen, paging = await self.list_bills(seite=seite, limit=limit)
+            if seite == 1:
+                gemeldet = int(paging.get("item_count") or 0)
+            if not zeilen:
+                return alle, gemeldet
+            alle.extend(zeilen)
+            seite += 1
+
+    async def get_bill(self, bill_id: str) -> dict:
+        """Einzelne Lieferantenrechnung -- die Liste allein genuegt nicht.
+
+        Nur der Einzelabruf traegt ``supplier_id`` (die stabile Kennung statt des
+        frei geschriebenen Lieferantennamens), ``line_items`` mit der Kontierung
+        und ``base_currency_amount`` -- den CHF-Gegenwert einer Fremdwaehrungs-
+        rechnung. In der Liste steht nur der Fremdwaehrungsbetrag; wer ihn ohne
+        Umrechnung summiert, addiert Euro zu Franken.
+        """
+        data = await self._get_v4(f"/purchase/bills/{bill_id}")
+        return data if isinstance(data, dict) else {}
+
+    async def alle_lieferantenrechnungen_detailliert(
+        self, kennungen: list[str]
+    ) -> tuple[dict[str, dict], list[str]]:
+        """Einzelabrufe gebuendelt, begrenzt parallel.
+
+        Gibt die gelungenen Abrufe und die Kennungen der misslungenen zurueck.
+        Fehlschlaege werden **nicht** verschluckt: eine Rechnung ohne Detail hat
+        keinen Lieferanten und keine Kontierung, und das muss als Luecke sichtbar
+        sein statt als leere Spalte.
+        """
+        zaehler = asyncio.Semaphore(DETAIL_PARALLEL)
+        gelungen: dict[str, dict] = {}
+        misslungen: list[str] = []
+
+        async def einer(kennung: str) -> None:
+            async with zaehler:
+                try:
+                    gelungen[kennung] = await self.get_bill(kennung)
+                except Exception as exc:  # noqa: BLE001 -- Luecke wird gemeldet, nicht geworfen
+                    logger.warning("Lieferantenrechnung %s nicht abrufbar: %s", kennung, exc)
+                    misslungen.append(kennung)
+
+        await asyncio.gather(*(einer(k) for k in kennungen))
+        return gelungen, misslungen
+
     # ── Bankkonten ────────────────────────────────────────────
 
     async def list_bank_accounts(self) -> list[dict]:
@@ -334,6 +423,28 @@ class BexioClient:
 
     # ── Journal (Accounting, v3) ──────────────────────────────
 
+    async def list_journal(
+        self,
+        from_date: str,
+        to_date: str,
+        limit: int = 2000,
+        offset: int = 0,
+    ) -> list[dict]:
+        """Eine einzelne Seite des Buchungsjournals -- ohne eigenes Blaettern.
+
+        Getrennt von ``get_journal``, weil sich nur so pruefen laesst, **ob**
+        ``offset`` ueberhaupt wirkt: dazu muessen zwei Seiten gezielt angefordert
+        und verglichen werden. ``/4.0/purchase/bills`` nimmt ``offset`` entgegen
+        und ignoriert ihn -- diese Annahme will man hier nicht ungeprueft erben.
+        """
+        data = await self._get_v3(
+            "/accounting/journal",
+            {"from": from_date, "to": to_date, "limit": str(limit), "offset": str(offset)},
+        )
+        if not isinstance(data, list):
+            return []
+        return [e for e in data if isinstance(e, dict)]
+
     async def get_journal(
         self,
         from_date: str,
@@ -344,24 +455,27 @@ class BexioClient:
         """Buchhaltungsjournal laden (alle Buchungen im Zeitraum).
 
         Jede Buchung enthaelt: debit_account_id, credit_account_id,
-        amount, date, ref_class, description.
+        amount, base_currency_amount, date, ref_class, description.
+
+        Geblaettert wird ueber ``offset``, und der Abbruch haengt **nicht** allein
+        an der Seitengroesse: die Schleife endet auch, sobald eine Seite keine neue
+        Buchungskennung mehr bringt. Ohne diesen Waechter liefe sie endlos, falls
+        Bexio ``offset`` ignoriert -- genau das tut die Kreditorenschnittstelle.
+        Ein Stillstand waere die teuerste Art, diese Falle zu erben.
         """
-        all_entries: list[dict] = []
-        current_offset = offset
+        alle: list[dict] = []
+        gesehen: set = set()
+        aktuell = offset
         while True:
-            params = {
-                "from": from_date,
-                "to": to_date,
-                "limit": str(limit),
-                "offset": str(current_offset),
-            }
-            data = await self._get_v3("/accounting/journal", params)
-            batch = data if isinstance(data, list) else []
-            all_entries.extend(batch)
-            if len(batch) < limit:
-                break
-            current_offset += limit
-        return all_entries
+            seite = await self.list_journal(from_date, to_date, limit, aktuell)
+            neu = [e for e in seite if e.get("id") not in gesehen]
+            if not neu:
+                return alle
+            gesehen.update(e.get("id") for e in neu)
+            alle.extend(neu)
+            if len(seite) < limit:
+                return alle
+            aktuell += limit
 
     async def get_business_years(self) -> list[dict]:
         """Geschaeftsjahre laden (Start/Ende/Status)."""

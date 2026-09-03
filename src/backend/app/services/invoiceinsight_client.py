@@ -149,6 +149,75 @@ class InvoiceInsightClient:
             use_cache=True,
         )
 
+    # ── Vollexport für den Datenraum ────────────────────
+
+    async def export_alle_rechnungen(
+        self, seitengroesse: int = 500,
+    ) -> tuple[list[dict], dict]:
+        """Den ganzen Rechnungsbestand blätternd holen -- Zeilen und Befund.
+
+        Alle anderen Methoden dieses Clients holen Kennzahlen: aggregiert, klein,
+        für den Dialog gedacht. Diese holt den Bestand selbst, und zwar für den
+        Datenraum -- die Zeilen gehen in eine Parquet-Datei, nie in einen Kontext.
+
+        Die Vollständigkeit wird **geprüft, nicht angenommen**. ``total`` aus der
+        ersten Seite ist die Sollzahl; weicht die Anzahl geholter Zeilen davon ab,
+        steht das im Befund und wandert in den Katalog. Ohne diesen Abgleich sieht
+        ein abgebrochener Export aus wie ein kleiner Bestand -- und genau daran
+        sind die Kreditorenwerkzeuge bisher gescheitert: ``search_invoices``
+        schneidet bei 20 Zeilen ab, ohne dass irgendwo steht, dass abgeschnitten
+        wurde.
+
+        Die Notbremse bei 200 Seiten fängt einen Server ab, der nie eine leere
+        Seite liefert. Eine Endlosschleife im Abgleich-Worker wäre schlimmer als
+        ein unvollständiger Abzug, denn sie fällt erst auf, wenn nichts mehr geht.
+        """
+        zeilen: list[dict] = []
+        soll = 0
+        stand = ""
+        schema: dict = {}
+        fehlend: dict = {}
+        offset = 0
+
+        for _ in range(200):
+            seite = await self.call_tool(
+                "export_invoices",
+                {"offset": offset, "limit": seitengroesse},
+            )
+            if not isinstance(seite, dict):
+                raise RuntimeError(
+                    f"export_invoices lieferte {type(seite).__name__} statt eines Objekts "
+                    "-- läuft die passende Fassung des MCP-Servers?"
+                )
+            if offset == 0:
+                soll = int(seite.get("total") or 0)
+                stand = str(seite.get("as_of") or "")
+                schema = seite.get("schema") or {}
+                fehlend = seite.get("nicht_auswertbar") or {}
+            teil = seite.get("rows") or []
+            if not teil:
+                break
+            zeilen.extend(teil)
+            offset += len(teil)
+        else:
+            logger.warning("InvoiceInsight-Export nach 200 Seiten abgebrochen")
+
+        befund: dict = {"gemeldet": soll, "geholt": len(zeilen), "stand": stand}
+        if schema.get("meaning"):
+            befund["spalten_bedeutung"] = schema["meaning"]
+        if fehlend:
+            # Belege, die es gibt und die nicht im Bestand stehen. Gehört in den
+            # Katalog, nicht ins Protokoll: ein blinder Fleck, den niemand nennt,
+            # sieht aus wie Vollständigkeit.
+            befund["nicht_auswertbare_belege"] = fehlend
+        if soll and len(zeilen) != soll:
+            befund["unvollstaendig"] = f"{len(zeilen)} von {soll} Zeilen"
+            logger.warning(
+                "InvoiceInsight-Export unvollständig: %d von %d Zeilen",
+                len(zeilen), soll,
+            )
+        return zeilen, befund
+
     # ── Reine Resources (ohne Filterparameter) ──────────
 
     async def get_cashflow_forecast(self) -> Any:

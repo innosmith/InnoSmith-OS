@@ -76,6 +76,227 @@ class TestWerkzeugnamen:
         assert genannte <= echte
 
 
+class TestQuellenUndWegweiserPassenZusammen:
+    """Eine Quelle, die es gibt, muss auffrischbar sein und erklärt werden.
+
+    Beim Anlegen der Kreditorenquelle stand sie zuerst in ``QUELLEN``, aber nicht im
+    Enum von ``datenraum_auffrischen`` -- der Agent hätte sie sehen, aber nicht
+    auffrischen können. Genau die Art Bruch, die kein Einzeltest bemerkt, weil beide
+    Seiten für sich richtig sind.
+    """
+
+    @pytest.fixture(scope="class")
+    def server_quelltext(self):
+        with open(os.path.join(SRC, "mcp-datenraum", "server.py"), encoding="utf-8") as f:
+            return f.read()
+
+    def test_jede_quelle_ist_auffrischbar(self, server_quelltext):
+        from app.services.datenraum import QUELLEN
+
+        enum = set(re.search(r'"enum": \[([^\]]+)\]', server_quelltext).group(1).replace('"', "").split(", "))
+        fehlend = set(QUELLEN) - enum
+        assert not fehlend, f"Quellen ohne Eintrag im Auffrischen-Enum: {sorted(fehlend)}"
+
+    def test_zeitspalten_gehoeren_zu_einer_tabelle_die_erzeugt_wird(self):
+        """Eine Zeitspalten-Deklaration für eine Tabelle, die niemand schreibt, ist
+        tot -- und verdeckt, dass die echte Tabelle keine hat."""
+        import inspect
+
+        from app.services import datenraum
+
+        quelltext = inspect.getsource(datenraum)
+        for tabelle in datenraum.ZEITSPALTEN:
+            assert f'"{tabelle}"' in quelltext, f"ZEITSPALTEN nennt unbekannte Tabelle: {tabelle}"
+
+    def test_die_ausgaben_lesart_trennt_alle_drei_bestaende(self, server_quelltext):
+        """Drei Tabellen berühren Ausgaben, und nur eine beantwortet «wie viel».
+
+        Der Text stand bis zum 03.09.2026 falsch da: er empfahl ``bexio_kreditoren``
+        für Ausgabensummen. Über den Kreditorenweg liefen 2025 aber nur 88'177 von
+        401'459 CHF. Der Fehler war nicht bemerkbar, weil beide Zahlen plausibel
+        aussehen.
+        """
+        assert "KREDITOREN_LESART" in server_quelltext
+        for pflicht in (
+            "bexio_journal", "bexio_kreditoren", "invoiceinsight_rechnungen", "doppelt",
+        ):
+            assert pflicht in server_quelltext, f"Lesart nennt '{pflicht}' nicht"
+
+    def test_die_lesart_empfiehlt_die_kreditoren_nicht_fuer_ausgaben(self, server_quelltext):
+        """Der genaue Rückfall, der einmal drinstand -- als Test festgehalten."""
+        lesart = server_quelltext[server_quelltext.index("KREDITOREN_LESART"):]
+        lesart = lesart[: lesart.index("\nREZEPTE")]
+        assert "UNGEEIGNET" in lesart
+        assert "ist_aufwand" in lesart, "die Lesart muss den Filter nennen, nicht nur die Tabelle"
+
+    def test_die_lesart_schreibt_keine_zahl_der_falschen_tabelle_zu(self, server_quelltext):
+        """Die erste Korrektur enthielt den nächsten Fehler: sie schrieb die 88'177 CHF
+        (Journal, Haben 2000) der Tabelle ``bexio_kreditoren`` zu, die auf 156'934 CHF
+        summiert. Eine Behauptung, die ein Agent in zehn Sekunden widerlegt, kostet
+        das Vertrauen in den ganzen Katalog -- sie ist schlimmer als keine.
+
+        Der Test hält fest, dass beide Zahlen dastehen und der Kontofilter genannt
+        ist, der sie ineinander überführt.
+        """
+        lesart = server_quelltext[server_quelltext.index("KREDITOREN_LESART"):]
+        lesart = lesart[: lesart.index("\nREZEPTE")]
+        assert "156'934" in lesart, "die tatsächliche Tabellensumme fehlt"
+        assert "88'177" in lesart, "der Journalwert fehlt"
+        assert "konto_nr" in lesart, "der Filter, der beide Zahlen versöhnt, fehlt"
+
+    def test_kein_rezept_summiert_die_buchungswaehrung(self, server_quelltext):
+        """``betrag`` steht in Buchungswährung, ``betrag_chf`` in Franken. 250 der
+        5262 Journalbuchungen lauten auf Fremdwährung, und die falsche Summe kommt
+        ohne Fehlermeldung -- bei Cursor 2026 sind es 16'164 statt 12'924 CHF.
+
+        Der Fehler unterlief beim Nachmessen dem Agenten selbst, mit der Deklaration
+        vor Augen. Ein Rezept ist die geprüfte Referenz; wenn dort ``sum(betrag)``
+        steht, wandert der Fehler in jede daraus abgewandelte Abfrage.
+        """
+        rezepte = server_quelltext[server_quelltext.index("REZEPTE = {"):]
+        rezepte = rezepte[: rezepte.index("\nVORLAGE")]
+        # sum(betrag) trifft zu, sum(betrag_chf) nicht -- der Unterstrich trennt.
+        verstoesse = re.findall(r"sum\(\s*betrag\s*\)", rezepte)
+        assert not verstoesse, (
+            f"{len(verstoesse)} Rezept(e) summieren die Buchungswährung statt betrag_chf"
+        )
+
+    def test_die_waehrungsfalle_nennt_die_gemessene_abweichung(self, server_quelltext):
+        """Eine Warnung ohne Zahl wirkt nicht -- gemessen am eigenen Fehlgriff."""
+        erklaerung = server_quelltext[server_quelltext.index('"bexio_journal.betrag"'):]
+        erklaerung = erklaerung[:500]
+        assert "16'164" in erklaerung and "12'924" in erklaerung, (
+            "die Deklaration muss die gemessene Abweichung nennen, nicht nur die Eigenschaft"
+        )
+
+    def test_die_bezugsteuer_falle_ist_deklariert(self, server_quelltext):
+        """Eine Auslandsleistung erzeugt zwei Aufwandsbuchungen auf demselben
+        Sollkonto. Wer Rechnungen zählt, zählt doppelt -- Cursor 2026: 62 Buchungen,
+        31 Rechnungen. Die Beträge bleiben richtig, nur die Anzahl nicht."""
+        erklaerung = server_quelltext[server_quelltext.index('"bexio_journal.haben_konto_nr"'):]
+        erklaerung = erklaerung[:600]
+        assert "2203" in erklaerung
+        assert "Bezugsteuer" in erklaerung
+
+    def test_gefaehrliche_geldspalten_sind_erklaert(self, server_quelltext):
+        """``jahreskosten_chf`` ist eine Hochrechnung. Wer sie für Ausgaben summiert,
+        meldet ein Vielfaches -- und die Zahl sieht plausibel aus."""
+        assert "invoiceinsight_rechnungen.jahreskosten_chf" in server_quelltext
+        assert "HOCHRECHNUNG" in server_quelltext
+
+    def test_fertige_abfragen_zeigen_auf_vorhandene_tabellen(self, server_quelltext):
+        """Ein Rezept, das eine Tabelle nennt, die niemand schreibt, scheitert erst
+        in der Sandbox -- und dort sieht es aus wie ein Fehler des Modells."""
+        from app.services.datenraum import ZEITSPALTEN
+
+        rezepte = server_quelltext[server_quelltext.index("REZEPTE = {"):]
+        genannt = set(re.findall(r"/daten/(\w+)\.parquet", rezepte))
+        assert genannt, "keine einzige fertige Abfrage vorhanden"
+        # Tabellen ohne Zeitspalte gibt es (bexio_konten); geprüft wird die
+        # Gegenrichtung: keine erfundenen Namen.
+        bekannt = set(ZEITSPALTEN) | {"bexio_konten"}
+        assert genannt <= bekannt, f"unbekannte Tabellen in den Rezepten: {sorted(genannt - bekannt)}"
+
+
+# Spaltentypen, bei denen ein Missverständnis still bleibt.
+#
+# Eine Zahl summiert man falsch, ein Datum vergleicht man falsch, eine Wahrheit
+# filtert man falsch -- und in allen drei Fällen kommt ein plausibles Ergebnis
+# heraus statt einer Fehlermeldung. Bei Text passiert das nicht: wer den falschen
+# Namen liest, sieht es.
+ERKLAERUNGSPFLICHTIGE_TYPEN = ("double", "float", "int", "date", "timestamp", "bool")
+
+
+def _erklaerungspflichtig(spalten: dict[str, str]) -> set[str]:
+    """Welche Spalten einer Tabelle eine Erklärung brauchen.
+
+    Kennungen (``*_id``) sind ausgenommen: sie sind Identität, nicht Messung, und
+    eine Erklärung zu ``deal_id`` wäre Rauschen im Katalog. Ihr Textzwilling
+    dagegen ist pflichtig -- die Wahl zwischen ``lieferant`` und ``lieferant_id``
+    ist eine Entscheidung, und die falsche gruppiert nach Schreibweise.
+    """
+    kennungen = {n for n in spalten if n.endswith("_id")}
+    pflicht = set()
+    for name, typ in spalten.items():
+        if name in kennungen:
+            continue
+        if any(t in str(typ).lower() for t in ERKLAERUNGSPFLICHTIGE_TYPEN):
+            pflicht.add(name)
+        elif f"{name}_id" in kennungen:
+            pflicht.add(name)
+    return pflicht
+
+
+def erklaerte_spalten(server_quelltext: str) -> set[str]:
+    """Die Schlüssel aus ``SPALTEN_BEDEUTUNG``, aus dem Quelltext gelesen."""
+    abschnitt = server_quelltext[
+        server_quelltext.index("SPALTEN_BEDEUTUNG = {"):
+        server_quelltext.index("KREDITOREN_LESART = (")
+    ]
+    return set(re.findall(r'"(\w+\.\w+)":', abschnitt))
+
+
+class TestErklaerungspflicht:
+    """Jede Zahl-, Datums- und Wahrheitsspalte muss erklärt sein.
+
+    Nicht als einmalige Fleissarbeit, sondern als Invariante: am 03.09.2026 waren
+    8 von 33 InvoiceInsight-Spalten erklärt. Eine Nachpflege hält nicht, eine
+    Prüfung schon -- eine neue Spalte bricht diesen Test, bis jemand entschieden
+    hat, was sie bedeutet.
+
+    Geprüft wird gegen den tatsächlichen Katalog, weil nur er die wahren Spalten
+    kennt. Ohne Datenraum ist die Frage nicht beantwortbar, und ein Test, der dann
+    stillschweigend durchgeht, wäre schlimmer als keiner.
+    """
+
+    @pytest.fixture(scope="class")
+    def server_quelltext(self):
+        with open(os.path.join(SRC, "mcp-datenraum", "server.py"), encoding="utf-8") as f:
+            return f.read()
+
+    @pytest.fixture(scope="class")
+    def katalog(self):
+        from app.services.datenraum import katalog_lesen
+
+        tabellen = katalog_lesen().get("tabellen", {})
+        if not tabellen:
+            pytest.skip("kein Datenraum vorhanden -- Spaltenbild nicht prüfbar")
+        return tabellen
+
+    def test_jede_stille_spalte_ist_erklaert(self, katalog, server_quelltext):
+        erklaert = erklaerte_spalten(server_quelltext)
+        fehlend: list[str] = []
+        for name, eintrag in katalog.items():
+            spalten = eintrag.get("spalten") or {}
+            for spalte in _erklaerungspflichtig(spalten):
+                if f"{name}.{spalte}" not in erklaert:
+                    fehlend.append(f"{name}.{spalte}")
+        assert not fehlend, (
+            "Spalten ohne Erklärung im Katalog (Zahl, Datum oder Wahrheit -- genau die, "
+            f"die man still falsch benutzt): {sorted(fehlend)}"
+        )
+
+    def test_keine_erklaerung_zeigt_ins_leere(self, katalog, server_quelltext):
+        """Eine Erklärung zu einer Spalte, die es nicht gibt, lässt ein Modell nach
+        ihr suchen. ``bexio_kreditoren.mwst`` ist die bewusste Ausnahme: sie erklärt,
+        dass es die Spalte NICHT gibt."""
+        gewollte_ausnahmen = {"bexio_kreditoren.mwst"}
+        echte = {
+            f"{name}.{spalte}"
+            for name, eintrag in katalog.items()
+            for spalte in (eintrag.get("spalten") or {})
+        }
+        bekannte_tabellen = set(katalog)
+        verwaist = [
+            schluessel
+            for schluessel in erklaerte_spalten(server_quelltext)
+            if schluessel.split(".", 1)[0] in bekannte_tabellen
+            and schluessel not in echte
+            and schluessel not in gewollte_ausnahmen
+        ]
+        assert not verwaist, f"Erklärungen ohne Spalte: {sorted(verwaist)}"
+
+
 class TestPromptLeitplanken:
     """Geprüft wird die Vorlage im Quelltext.
 

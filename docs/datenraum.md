@@ -40,13 +40,18 @@ Zahl. Aus acht Runden wird eine, und die Rohdaten erreichen das Modell nie.
 
 | Tabelle | Quelle | Takt |
 |---|---|---|
-| `bexio_rechnungen` | Buchhaltung | stündlich |
+| `bexio_journal` | Buchhaltung, **alle** Buchungen — die einzige vollständige Ausgabenquelle | stündlich |
+| `bexio_rechnungen` | Buchhaltung, Debitoren | stündlich |
 | `bexio_kontakte` | Buchhaltung | stündlich |
+| `bexio_kreditoren` | Buchhaltung, Lieferantenrechnungen (rund 22 % des Aufwands) | stündlich |
+| `bexio_konten` | Kontenplan — löst Kontokennungen im Journal auf | stündlich |
+| `bexio_geschaeftsjahre` | Geschäftsjahre mit Abschlussstand | stündlich |
 | `toggl_zeiteintraege` | Zeiterfassung, rollende 24 Monate | stündlich |
 | `toggl_projekte` | Zeiterfassung | stündlich |
 | `pipedrive_deals` | CRM, alle Status | nächtlich |
 | `pipedrive_personen` | CRM | nächtlich |
 | `pipedrive_organisationen` | CRM | nächtlich |
+| `invoiceinsight_rechnungen` | Belegauswertung der Kreditoren | nächtlich |
 
 ## Die Entscheidung steht in der Spalte, nicht in der Abfrage
 
@@ -68,6 +73,268 @@ Eine unbekannte Kennung zählt **nicht** als Umsatz, bleibt aber als
 sähe aus wie «es gibt nichts».
 
 Wer nach Geldeingang statt nach Umsatz fragt, nutzt die Spalte `bezahlt`.
+
+## Das Journal ist die Ausgabenwahrheit, nicht die Kreditorenliste
+
+Bis zum 03.09.2026 stand im Katalog, für Ausgabensummen sei `bexio_kreditoren`
+zuständig. Das war falsch, und zwar auf die teuerste Art: die Zahl kam, sie sah
+plausibel aus, und sie war zu klein.
+
+| Jahr | Aufwand insgesamt | davon über den Kreditorenweg | Anteil |
+|---|---|---|---|
+| 2025 | 401'459 CHF | 88'177 CHF | 22 % |
+| 2026 (bis Sept.) | 266'476 CHF | 56'056 CHF | 21 % |
+
+Beide Spalten stammen aus **derselben** Tabelle und demselben Datumsbegriff — das
+ist der Punkt. Die rechte Spalte ist der Aufwand mit Habenkonto `2000`, nicht die
+Summe über `bexio_kreditoren`.
+
+Der Grund ist kein Fehler in Bexio, sondern der Zahlweg. Eine mit Karte bezahlte
+Rechnung wird nicht als Lieferantenrechnung erfasst, sondern direkt gebucht:
+
+```
+Soll 6570 Software / Haben 2120 Kontokorrent Gesellschafter
+Soll 6570 Software / Haben 2203 Bezugsteuer        (bei Auslandsleistungen)
+```
+
+Cursor steht 2026 mit 31 Rechnungen und 12'924 CHF im Journal — und mit **null**
+in `bexio_kreditoren`. Von 299 Aufwandsbuchungen des Jahres 2026 tragen 34 die
+Herkunft `lieferantenrechnung`; 245 sind manuell erfasst. Manuell ist hier der
+Normalfall, nicht die Ausnahme.
+
+Daraus folgt die Aufteilung, die der Katalog als `ausgaben_lesart` mitgibt:
+
+| Frage | Tabelle | Filter |
+|---|---|---|
+| Was hat uns X gekostet? | `bexio_journal` | `WHERE ist_aufwand`, gruppiert nach `soll_konto` |
+| Was ist offen, wann fällig? | `bexio_kreditoren` | `WHERE ist_offen` |
+| Wofür genau, welche MwSt, wann läuft das Abo aus? | `invoiceinsight_rechnungen` | `WHERE dokumenttyp = 'RECHNUNG'` |
+
+### Die Kreditorenliste ist in beide Richtungen falsch
+
+Die erste Fassung dieser Seite behauptete, `bexio_kreditoren` summiere 2025 auf
+88'177 CHF. Das war eine Verwechslung: die Tabelle summiert auf **156'934 CHF**,
+die 88'177 stammen aus dem Journal. Ein Agent hätte die Aussage in zehn Sekunden
+widerlegt — und danach dem übrigen Katalog zu Recht misstraut.
+
+Die naive Summe irrt **gleichzeitig nach oben und nach unten**:
+
+- **Zu hoch**, weil 68'796 CHF davon gar kein Aufwand sind, sondern Bilanzbuchungen:
+  Rückzahlungen an den Inhaber (`2120`, 34'500 CHF), MWST-Abrechnung (`2201`,
+  23'771 CHF), beschlossene Ausschüttung (`2261`, 10'500 CHF).
+- **Zu tief**, weil alles fehlt, was nie als Lieferantenrechnung erfasst wurde.
+
+Beide Fehler heben sich teilweise auf, und genau deshalb sah 156'934 plausibel
+aus. Filtert man nach Aufwandskonten — erste Ziffer von `konto_nr` zwischen 4 und
+8 —, stimmen die Tabellen überein:
+
+| Jahr | `bexio_kreditoren`, aufwandskontiert | Journal, Haben 2000 | Differenz |
+|---|---|---|---|
+| 2023 | 113'767 CHF | 113'767 CHF | 0 |
+| 2024 | 81'475 CHF | 81'475 CHF | 0 |
+| 2025 | 88'138 CHF | 88'177 CHF | 39 CHF |
+| 2026 | 56'056 CHF | 56'056 CHF | 0 |
+
+Die Systeme widersprechen sich also nicht. Die naive Summe stellt bloss eine
+andere Frage als die, die gemeint war.
+
+### Die Bezugsteuer verdoppelt die Anzahl, nicht den Betrag
+
+Eine Leistung aus dem Ausland erzeugt **zwei** Aufwandsbuchungen auf demselben
+Sollkonto: den Rechnungsbetrag gegen den Zahlweg und die Bezugsteuer gegen
+`2203`. Cursor 2026 steht deshalb mit 62 Buchungen da und hat 31 Rechnungen —
+11'956 CHF plus 968 CHF Steuer, zusammen 12'924 CHF.
+
+Für Summen ist beides richtig: dieses Konto zieht keine Vorsteuer ab, die Steuer
+ist echter Aufwand. Für Anzahlen ist es falsch. Wer Rechnungen zählen will,
+schliesst `haben_konto_nr = '2203'` aus — der Katalog gibt die Abfrage fertig mit.
+
+### Die Währungsfalle erwischte den Autor dieser Seite
+
+Beim Nachmessen der obigen Zahlen summierte ich `betrag` statt `betrag_chf` und
+schrieb daraufhin vier korrigierte Werte in diese Datei, die alle zu hoch waren.
+Aufgefallen ist es erst, als ein fertiges Rezept für Cursor 2026 11'956 CHF
+lieferte, wo meine eigene Abfrage 16'164 sagte.
+
+Das ist bemerkenswert, weil die Deklaration die Falle bereits benannte
+(«über mehrere Währungen NICHT summierbar») und sie trotzdem nicht verhinderte.
+250 der 5262 Buchungen lauten auf Fremdwährung; über den ganzen Bestand macht das
+4'450 CHF aus, bei einem einzelnen Lieferanten aber ein Viertel.
+
+Zwei Folgerungen sind in den Katalog eingeflossen. Erstens nennt die Deklaration
+jetzt die **gemessene Abweichung** statt nur die Eigenschaft — eine Warnung mit
+Zahl bleibt haften, eine ohne nicht. Zweitens sind die fertigen Rezepte nicht
+bloss eine Hilfe für schwache Modelle: sie waren hier die Instanz, die den Fehler
+fand. Was im Rezept steht, ist geprüft; was daneben entsteht, ist es nicht.
+
+### Die Sollseite entscheidet
+
+Jede Buchung nennt zwei Konten. `1021 Geschäftskonto` als Sollkonto ist ein
+Geldeingang, kein Aufwand. Deshalb ist `ist_aufwand` als Eigenschaft der
+**Sollseite** definiert (Kontoklasse 4000–8999) und nicht der Buchung. Wer beide
+Seiten summiert, zählt jeden Betrag doppelt.
+
+`haben_konto_nr` beantwortet dafür die zweite Frage: **wie** bezahlt wurde. `2120`
+heisst, der Inhaber hat vorgeschossen; `2000`, es lief über eine
+Lieferantenrechnung; `1021` und `1020`, direkt ab Bankkonto. Damit ist auch «was
+habe ich privat vorgeschossen» eine Abfrage statt einer Schätzung: 2025 waren das
+24'255 CHF in 130 Buchungen.
+
+### Blättern wurde geprüft, nicht angenommen
+
+`/4.0/purchase/bills` nimmt `offset` entgegen und ignoriert ihn. Ob das
+Journal dieselbe Falle stellt, liess sich nicht durch Hinsehen entscheiden: der
+grösste Jahrgang hat 809 Buchungen bei einem Limit von 2000, es wurde also nie
+geblättert. `_blaettern_pruefen` fordert deshalb einmal zwei kleine Seiten an und
+vergleicht die Kennungen. Zusätzlich bricht `get_journal` ab, sobald eine Seite
+keine neue Kennung mehr bringt — ohne diesen Wächter liefe die Schleife endlos,
+falls `offset` je wirkungslos wird.
+
+### Zwei Stammdatentabellen, die je einen stillen Fehler verhindern
+
+`bexio_konten` löst Kontokennungen auf. Ohne sie ist `debit_account_id: 227` eine
+nackte Zahl.
+
+`bexio_geschaeftsjahre` sagt, ob ein Jahr abgeschlossen ist. 2025 steht mit
+401'459 CHF als volles Jahr da, 2026 mit 266'476 CHF als Teiljahr von acht
+Monaten. Nebeneinandergestellt sieht das nach einem Einbruch von einem Drittel
+aus, wo bloss Monate fehlen — arithmetisch richtig, inhaltlich falsch.
+
+## Zwei Kreditorentabellen, und keine ist die bessere
+
+Kreditoren stehen an zwei Orten, und der Reflex, den «richtigen» zu wählen, führt
+in beiden Richtungen in die Irre. Sie beantworten verschiedene Fragen:
+
+| | `bexio_kreditoren` | `invoiceinsight_rechnungen` |
+|---|---|---|
+| Was es ist | die Buchhaltung | die Belegauswertung |
+| Beantwortet | **wie viel** | **wofür** |
+| Zeilen (3.9.2026) | 435 | 1111 |
+| Zeitraum | 2019–2026 | 2018–2026 |
+| Währungen | CHF, EUR | CHF, USD, EUR |
+| Mehrwertsteuer | keine (siehe unten) | ausgewiesen, wo die Rechnung eine trug |
+| Detailgrad | Betrag und Aufwandskonto | Produkt, Kategorie, Abrechnungszyklus, Erneuerung |
+| Verbindlich | ja | nein |
+
+### Es sind dieselben Belege — belegweise nachgewiesen
+
+Der Verdacht, hier würden Äpfel mit Birnen verglichen, hat sich nicht bestätigt.
+Bei Lieferanten, die auf Rechnung fakturieren, decken sich die Belege fast exakt:
+
+| Lieferant | in Bexio | davon in InvoiceInsight, gleiches Datum und gleicher Betrag |
+|---|---|---|
+| T+R AG | 16 | 15 |
+| bexio AG | 8 | 7 (über acht Jahre) |
+
+Wo die Bestände auseinanderlaufen, gibt es genau drei Gründe — und keiner davon
+ist ein Rechenfehler:
+
+1. **Zahlweg.** Mit Karte bezahlte Abos stehen nicht in `bexio_kreditoren`,
+   sondern im Journal gegen `2120 Kontokorrent Gesellschafter`. Sie erreichen die
+   Buchhaltung also sehr wohl, nur an anderer Stelle. Cursor 2026: 12'924 CHF im
+   Journal, null in `bexio_kreditoren`.
+2. **Periode.** `invoiceinsight_rechnungen.datum` ist das Rechnungsdatum,
+   `bexio_journal.datum` das Buchungsdatum. Über den Jahreswechsel landet derselbe
+   Beleg dadurch in zwei verschiedenen Jahren.
+3. **Sammelbuchung.** Cursor 2026: 129 Einzelrechnungen in der Belegauswertung
+   gegen 31 Buchungsvorgänge in Bexio.
+
+Dazu kommen fehlende Belege in der Belegauswertung — Ausgleichskasse 2022: Bexio
+13, InvoiceInsight 8.
+
+Daraus folgt die Regel, die im Katalog als `ausgaben_lesart` beim Agenten
+ankommt: **eine Tabelle wählen und dazusagen, welche.** Eine Summe je Lieferant
+über zwei Tabellen hinweg zählt doppelt.
+
+Nützlich ist gerade die Unterdeckung: Wie viel läuft am Kreditorenbot vorbei? Das
+ist eine beantwortbare Frage und nicht ein Datenfehler.
+
+## Bei den Kreditoren gibt es keine Mehrwertsteuer
+
+Bei den Debitoren war `total_gross` ein falsch benannter Bruttobetrag. Bei den
+Kreditoren ist die Falle die spiegelbildliche: `gross` und `net` sind bei **allen
+435** Rechnungen identisch, und `tax_id` ist über den ganzen Bestand leer. Dieses
+Konto verbucht Kreditoren ohne Vorsteuer.
+
+Es gibt deshalb genau **einen** Betrag und bewusst keine Steuerspalte. Wer sie
+vermisst, findet die Vorsteuer in `invoiceinsight_rechnungen.mwst` — dort, wo der
+Beleg sie auswies.
+
+Dort bedeutet ein leeres Feld allerdings **zweierlei**, und die beiden Fälle sind
+nicht unterscheidbar: entweder trug der Beleg keine Steuer (AHV, BVG, Steuern und
+Versicherungen sind befreit) oder sie war nicht lesbar. Bei Auslandsrechnungen ist
+leer der Normalfall — dort entsteht die Schweizer Steuer erst in der Buchhaltung
+als Bezugsteuer, gegen Habenkonto `2203`, und steht nie auf dem Beleg. Der Katalog
+sagt das, statt einen leeren Wert für eine Null auszugeben.
+
+## Der QR-Code ist die einzige Zahl, die niemand geschätzt hat
+
+Ein Teil der Belege trägt einen Schweizer QR-Einzahlungsschein. Was dort steht —
+Betrag, Zahlungsempfänger, IBAN, Referenz — ist **maschinell gelesen**, nicht vom
+Modell aus einem Bild erschlossen. Diese Felder lagen bis zum 03.09.2026 in der
+Datenbank und nicht im Export.
+
+Jetzt gehen sie mit, und zwar ausdrücklich **nicht** als zweite Wahrheit: für
+Summen bleibt `betrag_chf` zuständig. `qr_betrag` ist die Gegenprobe. Weicht er
+ab, ist das ein Prüffall — der einzige Weg, eine Extraktionsungenauigkeit
+überhaupt zu bemerken, ohne den Beleg von Hand aufzuschlagen.
+
+Dazu kommt `beleg_datei`: der Dateiname des PDF, damit eine Zahl auf ihren Beleg
+zeigt. Der Pfad bleibt draussen — er liegt auf einer fremden Maschine, und wer ihn
+mitschickt, verspricht etwas, das der Empfänger nicht öffnen kann.
+
+## Erklärungspflicht statt Nachpflege
+
+Am 03.09.2026 waren 8 von 33 Spalten der Belegauswertung im Katalog erklärt. Der
+Rest war da, benutzbar und unerklärt — und genau dort entstehen die stillen
+Fehler: eine Zahl summiert man falsch, ein Datum vergleicht man falsch, eine
+Wahrheit filtert man falsch, und in allen drei Fällen kommt ein plausibles
+Ergebnis heraus statt einer Fehlermeldung. Bei Text passiert das nicht: wer den
+falschen Namen liest, sieht es.
+
+Nachpflegen hält nicht. Deshalb ist es eine Invariante:
+
+> Jede Zahl-, Datums- und Wahrheitsspalte im Katalog braucht einen Eintrag in
+> `SPALTEN_BEDEUTUNG`. Kennungen (`*_id`) sind ausgenommen — sie sind Identität,
+> nicht Messung. Ihr Textzwilling ist es nicht: die Wahl zwischen `lieferant` und
+> `lieferant_id` ist eine Entscheidung, und die falsche gruppiert nach
+> Schreibweise.
+
+`test_datenraum_konsistenz.py::TestErklaerungspflicht` prüft das gegen den
+tatsächlichen Katalog, in beide Richtungen: keine unerklärte Spalte, und keine
+Erklärung, die ins Leere zeigt. Eine neue Spalte bricht den Test, bis jemand
+entschieden hat, was sie bedeutet.
+
+## `offset` blättert nicht, `page` schon
+
+`GET /4.0/purchase/bills` nimmt `offset` entgegen und ignoriert es. Am 3.
+September 2026 gemessen: `offset=50` lieferte exakt dieselben 50 Zeilen wie
+`offset=0`. Dieselbe Gattung wie der wirkungslose `contact_id`-Filter — eine
+plausible Antwort statt einer Fehlermeldung. Wer `offset` benutzt, lädt fünfmal
+die erste Seite und hält 100 Zeilen für 435.
+
+Geblättert wird über `page`. Die Sollzahl steht in `paging.item_count` und wird
+nach jedem Abgleich gegen die eingesammelten Zeilen geprüft; eine Abweichung
+landet als `kreditoren_unvollstaendig` im Katalog.
+
+Drei Dinge stehen zudem **nur im Einzelabruf** und in keiner Listenantwort: die
+Lieferantenkennung `supplier_id`, die Kontierung, und `base_currency_amount` — der
+CHF-Gegenwert einer Fremdwährungsrechnung. Der Abgleich holt deshalb jede Rechnung
+einzeln nach, acht parallel; für 435 Rechnungen dauert das rund acht Sekunden.
+
+Nach dem freien Lieferantennamen zu gruppieren wäre dieselbe Falle, die bei
+Pipedrive den Umsatz eines Amts vervielfacht hat. Die stabile Kennung ist
+`lieferant_id`.
+
+## `jahreskosten_chf` ist eine Hochrechnung, keine Ausgabe
+
+Die gefährlichste Spalte von `invoiceinsight_rechnungen`: Eine Monatsrechnung über
+20 Franken steht dort mit 240. Die Spalte beantwortet «was kostet uns das im Jahr»
+und niemals «was haben wir ausgegeben». Für Ausgaben gilt `betrag_chf`.
+
+Ebenso: Nicht jede Zeile ist eine Rechnung. `dokumenttyp` kennt auch
+`KONTOAUSZUG`, `MAHNUNG`, `GUTSCHRIFT` und `VORAUSRECHNUNG`. Ausgabensummen
+gehören auf `RECHNUNG` eingeschränkt.
 
 ## Der Bruttobetrag steht nicht in `total_gross`
 

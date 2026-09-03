@@ -97,12 +97,13 @@ Handles ist ausschliesslich `resolve_message_id`.
 
 ## Datenraum — Zahlen kommen nicht aus Einzelabfragen
 
-Auswertungsfragen (Umsatz, offene Posten, Stunden, Deals) werden **nie** über
-Einzelabfragen der Fachsysteme beantwortet. Ein Sync-Worker im Backend
-(`services/datenraum.py`) materialisiert Bexio, Toggl und Pipedrive als
-Parquet-Tabellen unter `TP_DATENRAUM_DIR`; der Executor hängt das Verzeichnis bei
-**jedem** Sandbox-Lauf schreibgeschützt als `/daten` ein. Der Agent liest
-`datenraum_katalog()` und rechnet in **einem** `execute_code` mit DuckDB.
+Auswertungsfragen (Umsatz, offene Posten, Stunden, Deals, Ausgaben) werden **nie**
+über Einzelabfragen der Fachsysteme beantwortet. Ein Sync-Worker im Backend
+(`services/datenraum.py`) materialisiert Bexio, Toggl, Pipedrive und
+InvoiceInsight als Parquet-Tabellen unter `TP_DATENRAUM_DIR`; der Executor hängt
+das Verzeichnis bei **jedem** Sandbox-Lauf schreibgeschützt als `/daten` ein. Der
+Agent liest `datenraum_katalog()` und rechnet in **einem** `execute_code` mit
+DuckDB.
 
 Der Grund ist nicht Geschwindigkeit, sondern Richtigkeit. Die Bexio-Primitiven
 hatten vier stille Fehler, die alle eine plausible Zahl statt einer Fehlermeldung
@@ -131,6 +132,81 @@ Modell Spaltennamen und liess die Anführungszeichen um den Pfad weg. Und der
 Werkzeug-Aufschub (`tools.tool_search`) steht auf 15 % statt 10 %, weil
 `tool_call` Code als JSON-Zeichenkette in einem JSON-Aufruf verlangt und daran
 vier von vier Versuchen scheiterten.
+
+Bei den **Ausgaben** kommt eine Falle hinzu, die keine Spalte betrifft, sondern
+eine Mengenbeziehung — und sie kostete beinahe eine falsche Demo-Zahl. Der
+Katalog empfahl `bexio_kreditoren` für Ausgabensummen. Über den Kreditorenweg
+liefen 2025 aber bloss **88'177 von 401'459 CHF**, also 22 Prozent.
+Kartenbezahlte Abos erreichen die Buchhaltung sehr wohl, nur anders — `Soll 6570
+Software / Haben 2120 Kontokorrent Gesellschafter`. Cursor steht 2026 mit 12'924
+CHF im Journal und mit null in `bexio_kreditoren`.
+
+Die Korrektur selbst enthielt den nächsten Fehler, und er ist lehrreicher als der
+erste: der Katalog schrieb die 88'177 der Tabelle `bexio_kreditoren` zu. Deren
+Summe ist aber 156'934 CHF — eine Behauptung, die ein Agent in zehn Sekunden
+widerlegt, und danach glaubt er dem ganzen Katalog nicht mehr. **Eine falsifizierbare
+Deklaration ist schlimmer als keine.** Richtig ist: die naive Summe irrt in beide
+Richtungen zugleich. Zu hoch um 68'796 CHF Bilanzbuchungen (Rückzahlungen an den
+Inhaber, MWST-Abrechnung, Ausschüttung), zu tief um alles, was nie als
+Lieferantenrechnung erfasst wurde. Filtert man nach Aufwandskonten (`konto_nr`
+beginnt mit 4 bis 8), trifft die Tabelle den Journalwert 2023, 2024 und 2026 auf
+den Franken und 2025 auf 39 CHF. Die Systeme widersprechen sich nicht.
+
+Eine dritte Falle betrifft nicht Beträge, sondern **Anzahlen**: eine
+Auslandsleistung erzeugt zwei Aufwandsbuchungen auf demselben Sollkonto — den
+Betrag und die Bezugsteuer gegen `2203`. Cursor 2026 zeigt 62 Buchungen bei 31
+Rechnungen. Für Summen ist beides richtig (dieses Konto zieht keine Vorsteuer
+ab), fürs Zählen nicht.
+
+Die vierte erwischte beim Nachmessen den Agenten selbst: `betrag` steht in
+Buchungswährung, `betrag_chf` in Franken. 250 der 5262 Buchungen lauten auf
+Fremdwährung, und die falsche Summe kommt ohne Fehlermeldung — bei Cursor 2026
+16'164 statt 12'924. Die Deklaration hatte das benannt und trotzdem nicht
+verhindert. Daraus folgt eine allgemeine Regel: **eine Warnung ohne gemessene
+Zahl wirkt nicht.** Seither nennt jede Fallen-Deklaration die konkrete
+Abweichung, und die `REZEPTE` sind nicht nur Hilfe für schwache Modelle, sondern
+die geprüfte Referenz — hier war ein Rezept die Instanz, die den Fehler fand.
+
+Deshalb liegt seit dem 03.09.2026 das **ganze Buchungsjournal** im Datenraum
+(`src/bexio/journal.py`), dazu Kontenplan und Geschäftsjahre
+(`src/bexio/stammdaten.py`). Drei Tabellen, drei Fragen, und der Katalog gibt die
+Zuordnung als `ausgaben_lesart` mit: `bexio_journal` mit `WHERE ist_aufwand`
+beantwortet «was hat uns X gekostet», `bexio_kreditoren` «was ist offen und
+fällig», `invoiceinsight_rechnungen` «wofür genau». Über zwei Tabellen hinweg zu
+summieren zählt doppelt.
+
+`ist_aufwand` ist dabei eine Eigenschaft der **Sollseite** (Kontoklasse
+4000–8999), nicht der Buchung: `1021 Geschäftskonto` als Sollkonto ist ein
+Geldeingang. Wer beide Seiten summiert, zählt jeden Betrag doppelt.
+`haben_konto_nr` beantwortet dafür, **wie** bezahlt wurde. Und
+`bexio_geschaeftsjahre.ist_abgeschlossen` verhindert den Vergleich eines
+laufenden Teiljahrs mit einem vollen — arithmetisch richtig, inhaltlich falsch.
+
+Auch die Kreditorenschnittstelle hatte ihre stillen Fehler: `offset` wird von
+`/4.0/purchase/bills` entgegengenommen und **ignoriert** (nur `page` blättert),
+`gross` ist bei allen 435 Rechnungen gleich `net`, weil dieses Konto ohne
+Vorsteuer verbucht, und Lieferantenkennung, Kontierung sowie der CHF-Gegenwert
+einer Fremdwährungsrechnung stehen ausschliesslich im Einzelabruf. Deklariert in
+`src/bexio/kreditoren.py`. Ob das Journal dieselbe Blätterfalle stellt, wird
+**geprüft statt angenommen**: `_blaettern_pruefen` fordert zwei kleine Seiten an
+und vergleicht sie, und `get_journal` bricht ab, sobald eine Seite keine neue
+Kennung bringt — sonst liefe die Schleife endlos.
+
+Damit das nicht wieder auseinanderfranst, gilt eine **Erklärungspflicht**: jede
+Zahl-, Datums- und Wahrheitsspalte im Katalog braucht einen Eintrag in
+`SPALTEN_BEDEUTUNG` (Kennungen `*_id` ausgenommen, ihre Textzwillinge nicht).
+`TestErklaerungspflicht` prüft das in beide Richtungen gegen den echten Katalog.
+Der Katalog liefert zusätzlich **fertige Abfragen** (`fertige_abfragen`) für die
+Fragen, die tatsächlich gestellt werden: eine lauffähige Abfrage abzuwandeln
+gelingt einem lokalen Modell zuverlässig, eine aus einer Beschreibung zu bauen
+nicht.
+
+Der Weg der InvoiceInsight-Daten folgt der Multi-Repo-Regel jenes Projekts: der
+blätterbare Vollexport liegt generisch im Kern (`invoiceInsight/app/export_service.py`,
+`export_page()`), die Instanz `InnoSmithInvoices` legt nur ein dünnes MCP-Werkzeug
+`export_invoices` darüber. Nötig wurde er, weil die bestehenden Werkzeuge bei 20
+bzw. 50 Zeilen ohne Offset abschneiden — was jenseits liegt, war nicht bloss
+gekürzt, sondern unerreichbar.
 
 Rohdaten erreichen das Modell nie — der Katalog nennt Tabellen, Spalten und
 Stand, nie Zeilen. Damit bleibt die Modellwahl eine Frage der Qualität, nicht des

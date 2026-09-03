@@ -138,10 +138,17 @@ def durchgehend_leere_spalten(tabelle) -> list[str]:
 ZEITSPALTEN: dict[str, tuple[str, ...]] = {
     "bexio_rechnungen": ("datum", "faellig_am", "geaendert_am"),
     "bexio_kontakte": ("geaendert_am",),
+    "bexio_kreditoren": ("datum", "faellig_am", "erfasst_am"),
+    "bexio_journal": ("datum",),
+    "bexio_geschaeftsjahre": ("von", "bis", "abgeschlossen_am"),
     "toggl_zeiteintraege": ("datum", "beginn"),
     "pipedrive_deals": (
         "erstellt_am", "abgeschlossen_am", "gewonnen_am", "verloren_am",
         "erwarteter_abschluss",
+    ),
+    "invoiceinsight_rechnungen": (
+        "datum", "faellig_am", "erneuerung_am", "leistung_von", "leistung_bis",
+        "erfasst_am",
     ),
 }
 
@@ -285,17 +292,38 @@ class Quelle:
 
 
 async def _lade_bexio(settings: dict) -> tuple[dict[str, list[dict]], dict]:
-    """Rechnungen und Kontakte aus Bexio."""
+    """Die Buchhaltung als Ganzes: Debitoren, Kreditoren, Journal und Stammdaten.
+
+    Fuenf Tabellen, weil vier Fragen gestellt werden und keine einzelne Tabelle
+    mehr als eine davon beantwortet:
+
+    * «Was haben wir eingenommen» -- ``bexio_rechnungen``
+    * «Was hat uns etwas gekostet» -- ``bexio_journal``, und **nur** dort. Ueber
+      den Kreditorenweg liefen 2025 bloss 88'177 von 401'459 CHF Aufwand.
+    * «Was ist offen, wann faellig» -- ``bexio_kreditoren``
+    * «Was bedeutet Konto 227, ist 2026 schon abgeschlossen» -- die Stammdaten
+
+    Das Journal braucht den Kontenplan, um Kennungen aufzuloesen, und die
+    Geschaeftsjahre, um seine Abrufe zu begrenzen. Deshalb werden beide vor ihm
+    geladen und ihr Ergebnis weitergereicht statt zweimal geholt.
+    """
     from bexio_client import BexioClient, BexioConfig
+    from journal import journal_laden
+    from kreditoren import lieferantenrechnungen_laden
     from rechnungen import kontakte_laden, rechnungen_laden
+    from stammdaten import geschaeftsjahre_laden, kontenplan_laden
 
     token = settings.get("bexio_api_token") or get_settings().bexio_api_token
     if not token:
         raise RuntimeError("Bexio-Token nicht konfiguriert")
 
     client = BexioClient(BexioConfig(api_token=token))
+    kontenzeilen, konten = await kontenplan_laden(client)
     bestand = await rechnungen_laden(client)
     kontakte = await kontakte_laden(client)
+    kreditoren = await lieferantenrechnungen_laden(client, konten)
+    jahre = await geschaeftsjahre_laden(client)
+    journal = await journal_laden(client, konten, jahre)
 
     hinweise: dict = {"waehrungen": bestand.waehrungen}
     if bestand.unbekannte_status:
@@ -305,7 +333,51 @@ async def _lade_bexio(settings: dict) -> tuple[dict[str, list[dict]], dict]:
     if bestand.ohne_mwst:
         hinweise["rechnungen_ohne_mwst"] = bestand.ohne_mwst
 
-    return {"bexio_rechnungen": bestand.zeilen, "bexio_kontakte": kontakte}, hinweise
+    # Der Kreditorenbefund gehört in den Katalog, nicht ins Protokoll: eine
+    # unvollständige Tabelle, die aussieht wie eine vollständige, ist genau der
+    # stille Fehler, den dieser Dienst verhindern soll.
+    hinweise["kreditoren_gemeldet"] = kreditoren.gemeldet
+    hinweise["kreditoren_waehrungen"] = kreditoren.waehrungen
+    if not kreditoren.vollstaendig:
+        hinweise["kreditoren_unvollstaendig"] = (
+            f"{len(kreditoren.zeilen)} von {kreditoren.gemeldet} Zeilen"
+        )
+    if kreditoren.ohne_detail:
+        hinweise["kreditoren_ohne_detail"] = len(kreditoren.ohne_detail)
+    if kreditoren.unbekannte_status:
+        hinweise["kreditoren_unbekannte_status"] = kreditoren.unbekannte_status
+    if kreditoren.ohne_umrechnung:
+        hinweise["kreditoren_ohne_umrechnung"] = kreditoren.ohne_umrechnung
+
+    # Beim Journal ist die Vollstaendigkeit die einzige Eigenschaft, die zaehlt:
+    # ein abgeschnittener Jahrgang sieht aus wie ein sparsames Jahr.
+    hinweise["journal_jahre"] = sorted(j for j in journal.jahre if j)
+    if not journal.blaettern_geprueft:
+        hinweise["journal_blaettern"] = "ungeprüft (zu wenige Buchungen für die Probe)"
+    elif journal.blaettern_wirkungslos:
+        hinweise["journal_blaettern"] = "offset wirkt NICHT -- Jahrgänge am Limit sind unvollständig"
+    if journal.jahre_am_limit:
+        hinweise["journal_jahre_am_limit"] = journal.jahre_am_limit
+    if journal.ohne_konto:
+        hinweise["journal_ohne_konto"] = journal.ohne_konto
+    if journal.unbekannte_herkunft:
+        hinweise["journal_unbekannte_herkunft"] = journal.unbekannte_herkunft
+
+    offene_jahre = [j["jahr"] for j in jahre if not j["ist_abgeschlossen"]]
+    if offene_jahre:
+        hinweise["offene_geschaeftsjahre"] = offene_jahre
+
+    return (
+        {
+            "bexio_rechnungen": bestand.zeilen,
+            "bexio_kontakte": kontakte,
+            "bexio_kreditoren": kreditoren.zeilen,
+            "bexio_journal": journal.zeilen,
+            "bexio_konten": kontenzeilen,
+            "bexio_geschaeftsjahre": jahre,
+        },
+        hinweise,
+    )
 
 
 async def _lade_toggl(settings: dict) -> tuple[dict[str, list[dict]], dict]:
@@ -480,11 +552,50 @@ async def _lade_pipedrive(settings: dict) -> tuple[dict[str, list[dict]], dict]:
     )
 
 
+async def _lade_invoiceinsight(settings: dict) -> tuple[dict[str, list[dict]], dict]:
+    """Kreditorenrechnungen aus InvoiceInsight -- die Belegebene zur Buchhaltung.
+
+    Es ist **derselbe Gegenstand** wie in Bexio, nicht ein anderer. Der Abgleich vom
+    03.09.2026 zeigt das Beleg für Beleg: von 16 T+R-Rechnungen in Bexio stehen 15
+    hier mit identischem Datum und identischem Betrag, bei bexio AG 7 von 8 über
+    acht Jahre. Wer daraus zwei getrennte Welten macht, vergleicht nichts mehr.
+
+    Was InvoiceInsight hinzufügt, ist der Detailgrad: Produkt, Kategorie,
+    Abrechnungszyklus, Erneuerungsdatum, Mehrwertsteuer -- und bei rund einem
+    Fünftel der Belege die maschinell aus dem Einzahlungsschein gelesenen QR-Daten.
+    Eine Buchhaltung hält je Beleg im Wesentlichen einen Betrag fest.
+
+    Wo die Bestände auseinanderlaufen, gibt es genau drei Gründe, und keiner davon
+    ist ein Rechenfehler: hier fehlende Belege (Ausgleichskasse 2022: Bexio 13,
+    hier 8), der Versatz zwischen Rechnungs- und Buchungsdatum, der denselben Beleg
+    über den Jahreswechsel in zwei Jahre legt, und Sammelbuchungen (Cursor 2026:
+    129 Einzelrechnungen hier gegen 31 Buchungsvorgänge dort).
+    """
+    from app.services.invoiceinsight_client import InvoiceInsightClient
+
+    cfg = get_settings()
+    schluessel = settings.get("invoiceinsight_api_key") or cfg.invoiceinsight_api_key
+    url = settings.get("invoiceinsight_url") or cfg.invoiceinsight_url
+    if not schluessel or not url:
+        raise RuntimeError("InvoiceInsight nicht konfiguriert")
+
+    zeilen, befund = await InvoiceInsightClient(url, schluessel).export_alle_rechnungen()
+    return {"invoiceinsight_rechnungen": zeilen}, befund
+
+
 QUELLEN: dict[str, Quelle] = {
     "bexio": Quelle(
         lader=_lade_bexio,
-        beschreibung="Rechnungen und Kontakte aus der Buchhaltung",
+        beschreibung=(
+            "Die Buchhaltung: Buchungsjournal (vollständiger Aufwand), Debitoren, "
+            "Kreditoren, Kontenplan und Geschäftsjahre"
+        ),
         stuendlich=True,
+    ),
+    "invoiceinsight": Quelle(
+        lader=_lade_invoiceinsight,
+        beschreibung="Kreditorenrechnungen mit Produkt, Kategorie und Abrechnungszyklus",
+        stuendlich=False,
     ),
     "toggl": Quelle(
         lader=_lade_toggl,

@@ -1151,15 +1151,20 @@ MCP_SERVER_DESCRIPTIONS: dict[str, dict[str, str]] = {
     },
     "datenraum": {
         "label": "Datenraum (lokale Tabellen)",
-        "description": "Bexio, Toggl und Pipedrive als lokale Tabellen — die Quelle für alle Auswertungen",
+        "description": "Die ganze Buchhaltung, dazu Belege, Zeiten und CRM als lokale Tabellen — die Quelle für alle Auswertungen",
         "tools": (
-            "ERSTE ANLAUFSTELLE für jede Frage nach Zahlen: Umsatz, offene Posten, "
-            "Kunden, Stunden, Projekte, Deals. Die Fachsysteme werden im Takt lokal "
-            "gespiegelt; ein Werkzeugaufruf ersetzt Dutzende Einzelabfragen und die "
-            "Zahlen sind vollständig statt auf die erste Seite gekürzt. "
-            "datenraum_katalog() — welche Tabellen es gibt, mit Spalten und Stand; "
+            "ERSTE ANLAUFSTELLE für jede Frage nach Zahlen: Umsatz, Ausgaben, offene "
+            "Posten, Kunden, Lieferanten, Stunden, Projekte, Deals. Die Fachsysteme "
+            "werden im Takt lokal gespiegelt; ein Werkzeugaufruf ersetzt Dutzende "
+            "Einzelabfragen und die Zahlen sind vollständig statt auf die erste Seite "
+            "gekürzt. "
+            "datenraum_katalog() — welche Tabellen es gibt, mit Spalten, Bedeutung, "
+            "Stand und fertigen Abfragen; "
             "datenraum_auffrischen(quelle) — neu laden, nur bei taggenauem Bedarf. "
-            "Ausgewertet wird danach mit execute_code über /daten/<tabelle>.parquet."
+            "Ausgewertet wird danach mit execute_code über /daten/<tabelle>.parquet. "
+            "Für AUSGABEN und Kosten ist bexio_journal zuständig (WHERE ist_aufwand, "
+            "gruppiert nach soll_konto), nicht bexio_kreditoren — letztere enthält nur "
+            "die als Lieferantenrechnung erfassten rund 20 Prozent."
         ),
     },
     "sandbox": {
@@ -1176,6 +1181,11 @@ MCP_SERVER_DESCRIPTIONS: dict[str, dict[str, str]] = {
         "label": "Kreditoren-Analyse",
         "description": "KPIs, Zahlungen, Anomalien, Cashflow-Prognose",
         "tools": (
+            "Für Summen und Auswertungen NICHT hierher, sondern in den Datenraum: die "
+            "Belege liegen vollständig unter /daten/invoiceinsight_rechnungen.parquet, "
+            "der verbuchte Aufwand unter /daten/bexio_journal.parquet, die offenen "
+            "Lieferantenrechnungen unter /daten/bexio_kreditoren.parquet. Die Werkzeuge "
+            "hier liefern fertige Kennzahlen und Einzelfälle, keine Bestände. "
             "get_kpis() — Kennzahlen; "
             "get_upcoming_payments() — Anstehende Zahlungen; "
             "get_cost_distribution() — Kostenverteilung; "
@@ -1310,9 +1320,11 @@ Nutze deine Tools aktiv. Behaupte niemals, du hättest keinen Zugriff.
 
 - Bei Fragen zu Firmendaten: Sofort passende Tools aufrufen
 - Dateien: search_files → download_file
-- ZAHLEN AUS FACHSYSTEMEN (Umsatz, offene Posten, Kunden, Stunden, Projekte, Deals): Immer über den Datenraum. Er spiegelt Bexio, Toggl und Pipedrive lokal als Tabellen. Zuerst `datenraum_katalog()`, dann EIN `execute_code` mit duckdb über `/daten/<tabelle>.parquet`. Das ist vollständig und in einer Runde erledigt — Einzelabfragen der Fachsysteme liefern nur die erste Seite und brauchen ein Dutzend Runden.
+- ZAHLEN AUS FACHSYSTEMEN (Umsatz, Ausgaben, offene Posten, Kunden, Stunden, Projekte, Deals): Immer über den Datenraum. Er spiegelt die Buchhaltung, die Belegauswertung, Toggl und Pipedrive lokal als Tabellen. Zuerst `datenraum_katalog()`, dann EIN `execute_code` mit duckdb über `/daten/<tabelle>.parquet`. Das ist vollständig und in einer Runde erledigt — Einzelabfragen der Fachsysteme liefern nur die erste Seite und brauchen ein Dutzend Runden.
   Beispiel: `duckdb.sql("SELECT kunde, sum(netto) AS umsatz FROM '/daten/bexio_rechnungen.parquet' WHERE ist_umsatz AND kunde ILIKE '%GSW%' GROUP BY kunde")`
   Unscharfe Namen mit ILIKE über die echten Daten auflösen, nicht raten und nicht vorher `search_contact` aufrufen. Den Stand aus dem Katalog in der Antwort nennen. Nie ganze Tabellen ausgeben — nur das Ergebnis.
+- AUSGABEN und KOSTEN: `/daten/bexio_journal.parquet` mit `WHERE ist_aufwand`, gruppiert nach `soll_konto`. Das ist das vollständige Bild. `bexio_kreditoren` enthält nur die als Lieferantenrechnung erfassten rund 20 Prozent — mit Karte bezahlte Abos fehlen dort und stehen im Journal gegen Konto 2120. Der Katalog erklärt das unter `ausgaben_lesart`.
+- JAHRESVERGLEICHE: vorher `/daten/bexio_geschaeftsjahre.parquet` prüfen. Ein laufendes Jahr (`ist_abgeschlossen = false`) ist ein Teiljahr; es gegen ein volles Jahr zu stellen zeigt einen Einbruch, wo bloss Monate fehlen. Das gehört in die Antwort.
 - Buchhaltung im Einzelfall (eine bestimmte Rechnung, ein Konto, das Journal): get_invoice, get_journal, list_accounts, search_invoices
 - Mehrstufige Aufgaben: Schritt für Schritt, Tool-Ergebnisse auswerten
 - Öffentliche/aktuelle Recherche im Internet (News, Studien, Markt, Personen, Firmen): Nutze IMMER `web_search` (und `web_extract` für Detailseiten). Das ist die agentische Web-Recherche.
