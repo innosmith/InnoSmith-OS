@@ -22,9 +22,15 @@ from calendar import monthrange
 from datetime import date, timedelta
 
 import asyncpg
-from mcp.server import Server
+from mcp.server.lowlevel import Server
 from mcp.server.stdio import stdio_server
-from mcp.types import TextContent, Tool
+from mcp.types import (
+    CallToolRequestParams,
+    CallToolResult,
+    ListToolsResult,
+    TextContent,
+    Tool,
+)
 
 _HERE = os.path.dirname(__file__)
 sys.path.insert(0, os.path.join(_HERE, "..", "capacity"))
@@ -126,10 +132,8 @@ TOOLS = [
     ),
 ]
 
-server = Server("taskpilot-capacity")
 
 
-@server.list_tools()
 async def list_tools() -> list[Tool]:
     return TOOLS
 
@@ -341,7 +345,6 @@ async def _absences(pool: asyncpg.Pool, args: dict) -> dict:
     }
 
 
-@server.call_tool()
 async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     try:
         pool = await get_pool()
@@ -358,6 +361,19 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         logger.exception("Tool %s fehlgeschlagen", name)
         payload = {"error": f"Fehler in {name}: {exc}"}
     return [TextContent(type="text", text=json.dumps(payload, indent=2, ensure_ascii=False))]
+
+
+
+async def _on_list_tools(_ctx, _params) -> ListToolsResult:
+    return ListToolsResult(tools=await list_tools())
+
+
+async def _on_call_tool(_ctx, params: CallToolRequestParams) -> CallToolResult:
+    content = await call_tool(params.name, params.arguments or {})
+    return CallToolResult(content=content)
+
+
+server = Server("taskpilot-capacity", on_list_tools=_on_list_tools, on_call_tool=_on_call_tool)
 
 
 async def main():

@@ -60,8 +60,19 @@ RUN MMDC_BIN="$(command -v mmdc)" \
     && test -x "$(sed -n 's/.*"executablePath":"\([^"]*\)".*/\1/p' /etc/puppeteer-config.json)"
 
 # Private Packages (via docker/build.sh nach vendor/ kopiert)
-# [all] = pdf + anonymize + mcp + extract (Presidio, spaCy, GLiNER, Faker, …)
 COPY src/backend/vendor/ /opt/vendor/
+
+# Hermes 0.21: Nous sperrt bdist_wheel (kein PyPI-Wheel mehr). Editable-Install
+# aus dem vendorten Tag, Extra [mcp] pinnt mcp==2.0.0. Ohne Extra ist der
+# MCP-Client still tot.
+RUN if [ -d /opt/vendor/hermes-agent ]; then \
+      pip install --no-cache-dir -e "/opt/vendor/hermes-agent[mcp]"; \
+    else \
+      echo "FEHLER: /opt/vendor/hermes-agent fehlt -- 'make vendor' bzw. docker/build.sh zuerst ausfuehren." >&2; \
+      exit 1; \
+    fi
+
+# [all] = pdf + anonymize + mcp + extract (Presidio, spaCy, GLiNER, Faker, …)
 RUN if [ -d /opt/vendor/contentconverter ]; then \
       pip install --no-cache-dir -e "/opt/vendor/contentconverter[all]"; \
     fi

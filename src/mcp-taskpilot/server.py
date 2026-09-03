@@ -8,9 +8,15 @@ import sys
 from datetime import datetime, timezone
 
 import asyncpg
-from mcp.server import Server
+from mcp.server.lowlevel import Server
 from mcp.server.stdio import stdio_server
-from mcp.types import TextContent, Tool
+from mcp.types import (
+    CallToolRequestParams,
+    CallToolResult,
+    ListToolsResult,
+    TextContent,
+    Tool,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -190,7 +196,6 @@ TOOLS = [
     ),
 ]
 
-server = Server("taskpilot")
 pool: asyncpg.Pool | None = None
 
 
@@ -211,12 +216,10 @@ def _row_to_dict(row: asyncpg.Record) -> dict:
     return d
 
 
-@server.list_tools()
 async def list_tools() -> list[Tool]:
     return TOOLS
 
 
-@server.call_tool()
 async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     p = await get_pool()
 
@@ -628,6 +631,19 @@ async def _semantic_search_documents(p: asyncpg.Pool, arguments: dict) -> list[T
     ranked = sorted(merged.values(), key=lambda it: scores[(it["source_type"], it["source_id"])], reverse=True)
     results = ranked[:limit]
     return [TextContent(type="text", text=json.dumps({"mode": mode, "count": len(results), "results": results}, indent=2, ensure_ascii=False))]
+
+
+
+async def _on_list_tools(_ctx, _params) -> ListToolsResult:
+    return ListToolsResult(tools=await list_tools())
+
+
+async def _on_call_tool(_ctx, params: CallToolRequestParams) -> CallToolResult:
+    content = await call_tool(params.name, params.arguments or {})
+    return CallToolResult(content=content)
+
+
+server = Server("taskpilot", on_list_tools=_on_list_tools, on_call_tool=_on_call_tool)
 
 
 async def main():

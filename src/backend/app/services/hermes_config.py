@@ -442,6 +442,12 @@ def build_config_dict() -> dict:
             "creation_nudge_interval": 25,
             "write_approval": True,
         },
+        # Ab 0.19 ist Smart Approvals Default: ein LLM darf geflaggte Kommandos
+        # allein durchwinken. Das bricht Leitprinzip 4 (externe Kommunikation
+        # immer L1). mode=manual zwingt jede Freigabe auf den Menschen.
+        "approvals": {
+            "mode": "manual",
+        },
         # Gateway-Skill-Curator (periodisches Pruning/Archivieren) defensiv AUS:
         # er laeuft ohnehin nur ueber den Hermes-Gateway, den wir nicht fahren.
         # enabled=false verhindert, dass ein manuelles `hermes curator run` je

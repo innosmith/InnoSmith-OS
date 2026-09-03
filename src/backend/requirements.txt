@@ -1,5 +1,5 @@
 # ── FastAPI + ASGI ──
-fastapi>=0.136
+fastapi>=0.141
 uvicorn[standard]>=0.46
 sse-starlette>=3.3
 
@@ -20,7 +20,7 @@ pydantic-settings>=2.14
 
 # ── HTTP & Networking ──
 httpx>=0.28
-# hermes-agent 0.18.0 pinnt websockets==15.0.1 (hart); untere Grenze entsprechend
+# hermes-agent 0.21 pinnt websockets==15.0.1 (hart); untere Grenze entsprechend
 # gelockert (vorher >=16.0), damit pip beide Constraints erfuellen kann. uvicorn
 # [standard] & Co. laufen problemlos mit 15.x.
 websockets>=15.0,<16
@@ -30,22 +30,23 @@ cachetools>=7.0
 Pillow>=11.0
 
 # ── LLM & Agent ──
-litellm>=1.83
+litellm>=1.99,<1.100
 openai>=2.24
 anthropic>=0.97
 tiktoken>=0.12
-# EXAKT gepinnt (nicht >=): reproduzierbare Builds, kein unbemerkter Versions-
-# sprung beim naechsten docker build. 0.18.0 ("The Judgment Release") schliesst
-# 100% aller P0/P1 inkl. des interrupt-protected-compression sibling-fork-Bugs
-# (#56391/#56416) -- passt zu unseren beobachteten "cancel scope"-RuntimeErrors --
-# und macht den Self-Improvement-Fork guenstiger/klueger (weniger Memory-/Skill-
-# Drift). API-Oberflaeche (AIAgent-Init, run_conversation->final_response,
-# session_total_tokens, request_overrides, skill_view) gegen 0.18.0 verifiziert.
-# Upgrade bewusst + getestet erhoehen (Eval-Suite), nie automatisch.
-hermes-agent==0.18.0
+# hermes-agent 0.21.0 (Tag v2026.8.31, «Pantheon»): kein PyPI-Wheel mehr.
+# Nous sperrt bdist_wheel. Die einbettende App vendort den Tag
+# (docker/build.sh, HERMES_REF=v2026.8.31) und installiert
+#   pip install -e /pfad/zu/hermes-agent[mcp]
+# Extra [mcp] ist Pflicht -- ohne ihn ist der MCP-Client still tot und pinnt
+# mcp==2.0.0. Library-API (AIAgent-Init, run_conversation->final_response,
+# session_total_tokens, request_overrides, skill_view) gegen 0.21.0 verifiziert.
+# Hartpins von 0.21 nicht ueberstimmen: pydantic==2.13.4, openai==2.24.0,
+# websockets==15.0.1, croniter==6.0.0.
 
 # ── MCP (Model Context Protocol) ──
-mcp>=1.27
+# Exakt der Hermes-0.21-Pin, nicht 2.1.x -- sonst Resolver-Kampf.
+mcp==2.0.0
 
 # ── AI9 Core (privates Package, InnoSmith-IP) ──
 # Wiederverwendbarer, app-neutraler Kern (Schwester-Repo ../AI9). Wird wie
@@ -94,7 +95,7 @@ pyarrow>=18.0
 ddgs>=9.14
 
 # ── Scheduling ──
-# hermes-agent pinnt croniter==6.0.0 (PyPI-Wheel); untere Grenze entsprechend
+# hermes-agent 0.21 pinnt croniter==6.0.0 (hart); untere Grenze entsprechend
 # gelockert, damit pip beide Constraints erfüllen kann (API ist stabil).
 croniter>=6.0,<7
 APScheduler>=3.11

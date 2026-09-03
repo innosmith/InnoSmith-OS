@@ -15,9 +15,15 @@ import sys
 from pathlib import Path
 
 import httpx
-from mcp.server import Server
+from mcp.server.lowlevel import Server
 from mcp.server.stdio import stdio_server
-from mcp.types import TextContent, Tool
+from mcp.types import (
+    CallToolRequestParams,
+    CallToolResult,
+    ListToolsResult,
+    TextContent,
+    Tool,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -122,15 +128,12 @@ TOOLS = [
     ),
 ]
 
-server = Server("scripts")
 
 
-@server.list_tools()
 async def list_tools() -> list[Tool]:
     return TOOLS
 
 
-@server.call_tool()
 async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     registry = _load_registry()
 
@@ -206,6 +209,19 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         return [TextContent(type="text", text=output_text)]
 
     return [TextContent(type="text", text=f"Unbekanntes Tool: {name}")]
+
+
+
+async def _on_list_tools(_ctx, _params) -> ListToolsResult:
+    return ListToolsResult(tools=await list_tools())
+
+
+async def _on_call_tool(_ctx, params: CallToolRequestParams) -> CallToolResult:
+    content = await call_tool(params.name, params.arguments or {})
+    return CallToolResult(content=content)
+
+
+server = Server("scripts", on_list_tools=_on_list_tools, on_call_tool=_on_call_tool)
 
 
 async def main():

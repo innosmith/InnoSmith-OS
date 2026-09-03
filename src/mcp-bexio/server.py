@@ -10,9 +10,15 @@ import logging
 import os
 import sys
 
-from mcp.server import Server
+from mcp.server.lowlevel import Server
 from mcp.server.stdio import stdio_server
-from mcp.types import TextContent, Tool
+from mcp.types import (
+    CallToolRequestParams,
+    CallToolResult,
+    ListToolsResult,
+    TextContent,
+    Tool,
+)
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "bexio"))
 from bexio_client import BexioClient, BexioConfig  # noqa: E402
@@ -202,7 +208,6 @@ TOOLS = [
     ),
 ]
 
-server = Server("taskpilot-bexio")
 _client: BexioClient | None = None
 
 
@@ -217,12 +222,10 @@ def _json_response(data) -> list[TextContent]:
     return [TextContent(type="text", text=json.dumps(data, default=str, ensure_ascii=False))]
 
 
-@server.list_tools()
 async def list_tools() -> list[Tool]:
     return TOOLS
 
 
-@server.call_tool()
 async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     c = _get_client()
 
@@ -361,6 +364,19 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         return _json_response(result)
 
     return _json_response({"error": f"Unbekanntes Tool: {name}"})
+
+
+
+async def _on_list_tools(_ctx, _params) -> ListToolsResult:
+    return ListToolsResult(tools=await list_tools())
+
+
+async def _on_call_tool(_ctx, params: CallToolRequestParams) -> CallToolResult:
+    content = await call_tool(params.name, params.arguments or {})
+    return CallToolResult(content=content)
+
+
+server = Server("taskpilot-bexio", on_list_tools=_on_list_tools, on_call_tool=_on_call_tool)
 
 
 async def main():

@@ -10,9 +10,15 @@ import logging
 import os
 import sys
 
-from mcp.server import Server
+from mcp.server.lowlevel import Server
 from mcp.server.stdio import stdio_server
-from mcp.types import TextContent, Tool
+from mcp.types import (
+    CallToolRequestParams,
+    CallToolResult,
+    ListToolsResult,
+    TextContent,
+    Tool,
+)
 
 # Pfad zum Backend-`services`-Paket robust auflösen: im Dev-Layout liegt es unter
 # ``../backend/app`` (src/backend/app), im Docker-Image flach unter ``../app`` (/app/app).
@@ -123,7 +129,6 @@ TOOLS = [
     ),
 ]
 
-server = Server("taskpilot-invoiceinsight")
 _client: InvoiceInsightClient | None = None
 
 
@@ -142,12 +147,10 @@ def _json_response(data) -> list[TextContent]:
     return [TextContent(type="text", text=json.dumps(data, default=str, ensure_ascii=False))]
 
 
-@server.list_tools()
 async def list_tools() -> list[Tool]:
     return TOOLS
 
 
-@server.call_tool()
 async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     c = _get_client()
 
@@ -213,6 +216,19 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         return _json_response({"error": str(e), "tool": name})
 
     return _json_response({"error": f"Unbekanntes Tool: {name}"})
+
+
+
+async def _on_list_tools(_ctx, _params) -> ListToolsResult:
+    return ListToolsResult(tools=await list_tools())
+
+
+async def _on_call_tool(_ctx, params: CallToolRequestParams) -> CallToolResult:
+    content = await call_tool(params.name, params.arguments or {})
+    return CallToolResult(content=content)
+
+
+server = Server("taskpilot-invoiceinsight", on_list_tools=_on_list_tools, on_call_tool=_on_call_tool)
 
 
 async def main():

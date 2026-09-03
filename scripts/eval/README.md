@@ -84,6 +84,15 @@ Das beste Modell als FIXEN Tag in `.env` setzen (reproduzierbar, kein `:latest`)
 TP_TRIAGE_MODEL=ollama/<modell>:<fixer-tag>
 ```
 
+## Hermes-Library-Sonde (0.21)
+
+Beim Agent-Upgrade zuerst die isolierte API-Sonde, noch bevor ein Image
+gebaut wird. Scheitert sie, gilt der 0.19-Fallback, nicht ein ``uv``-Bypass.
+
+```
+/pfad/zum/probe-venv/bin/python scripts/eval/check_hermes_021_api.py
+```
+
 ## Datenschutz
 
 `scripts/eval/golden_set.jsonl` und `scripts/eval/results/` enthalten echte

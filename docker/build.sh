@@ -33,7 +33,7 @@ rm -rf "$VENDOR_DIR/contentconverter/.git"
 # vendored, damit das Docker-Image ohne Git-Credentials/Registry gebaut werden
 # kann. Dev nutzt stattdessen den Editable-Install (siehe requirements.txt).
 AI9_SRC="${AI9_PATH:-$HOME/dev/github/AI9}"
-AI9_REF="${AI9_REF:-v0.5.2}"
+AI9_REF="${AI9_REF:-v0.5.3}"
 
 if [ ! -d "$AI9_SRC" ]; then
     echo "FEHLER: AI9-Core nicht gefunden unter $AI9_SRC"
@@ -77,6 +77,58 @@ rm -rf "$VENDOR_DIR/ai9/.git" \
        "$VENDOR_DIR/ai9/.ruff_cache"
 
 echo "$AI9_REF ($AI9_TAGGED)" > "$VENDOR_DIR/ai9/VENDORED_REF"
+
+# Hermes Agent-Runtime (Nous, Tag v2026.8.31 = 0.21.0). Kein PyPI-Wheel mehr:
+# Nous sperrt bdist_wheel. Vendorn analog AI9, Install im Image via
+# ``pip install -e /opt/vendor/hermes-agent[mcp]``.
+HERMES_SRC="${HERMES_PATH:-$HOME/dev/github/hermes-agent}"
+HERMES_REF="${HERMES_REF:-v2026.8.31}"
+
+if [ ! -d "$HERMES_SRC" ]; then
+    echo "FEHLER: hermes-agent nicht gefunden unter $HERMES_SRC" >&2
+    echo "Setze HERMES_PATH auf den Checkout von NousResearch/hermes-agent." >&2
+    exit 1
+fi
+
+if ! git -C "$HERMES_SRC" rev-parse --verify --quiet "$HERMES_REF" >/dev/null; then
+    echo "FEHLER: Schild $HERMES_REF existiert im Hermes-Repository nicht." >&2
+    echo "Vorhandene Schilder: $(git -C "$HERMES_SRC" tag -l | tr '\n' ' ')" >&2
+    exit 1
+fi
+
+HERMES_HEAD="$(git -C "$HERMES_SRC" rev-parse HEAD)"
+HERMES_TAGGED="$(git -C "$HERMES_SRC" rev-parse "${HERMES_REF}^{commit}")"
+
+if [ "$HERMES_HEAD" != "$HERMES_TAGGED" ]; then
+    echo "FEHLER: Die Arbeitskopie von hermes-agent steht nicht auf $HERMES_REF." >&2
+    echo "  HEAD:    $HERMES_HEAD" >&2
+    echo "  $HERMES_REF: $HERMES_TAGGED" >&2
+    echo "Wechsle dorthin oder setze HERMES_REF auf die gewuenschte Fassung." >&2
+    exit 1
+fi
+
+if [ -n "$(git -C "$HERMES_SRC" status --porcelain)" ]; then
+    echo "FEHLER: Die Arbeitskopie von hermes-agent hat nicht eingecheckte Aenderungen." >&2
+    echo "Auf dem Schild stuende $HERMES_REF, kopiert wuerde etwas anderes." >&2
+    exit 1
+fi
+
+echo "  hermes-agent: $HERMES_SRC ($HERMES_REF)"
+mkdir -p "$VENDOR_DIR/hermes-agent"
+# Website, Desktop-Apps und die Testsuite braucht das Image nicht -- sie
+# sprengen den Build-Kontext, ohne dass ``from run_agent import AIAgent`` sie liest.
+rsync -a --delete \
+    --exclude '.git' \
+    --exclude '.venv' \
+    --exclude '__pycache__' \
+    --exclude '.pytest_cache' \
+    --exclude 'website' \
+    --exclude 'tests' \
+    --exclude 'apps' \
+    --exclude 'contributors' \
+    "$HERMES_SRC/" "$VENDOR_DIR/hermes-agent/"
+
+echo "$HERMES_REF ($HERMES_TAGGED)" > "$VENDOR_DIR/hermes-agent/VENDORED_REF"
 
 echo "==> Vendor-Verzeichnis bereit."
 

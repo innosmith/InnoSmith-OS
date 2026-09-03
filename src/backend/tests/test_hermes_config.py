@@ -24,6 +24,12 @@ def test_skill_writes_are_gated():
     assert cfg["skills"]["creation_nudge_interval"] == 25
 
 
+def test_approvals_zwingen_den_menschen():
+    """Smart Approvals sind ab Hermes 0.19 Default -- TaskPilot darf das nicht."""
+    cfg = build_config_dict()
+    assert cfg["approvals"]["mode"] == "manual"
+
+
 def test_all_auxiliary_slots_pinned_to_local():
     cfg = build_config_dict()
     aux = cfg["auxiliary"]

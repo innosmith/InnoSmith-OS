@@ -3,7 +3,7 @@
 # Kein pip install zur Laufzeit möglich (kein Netzwerk).
 
 # Datenverarbeitung
-pandas==2.2.3
+pandas==2.3.3
 numpy==2.1.3
 openpyxl==3.1.5
 xlsxwriter==3.2.0
@@ -11,7 +11,7 @@ xlsxwriter==3.2.0
 # Datenraum: die Tabellen unter /daten liegen als Parquet vor. duckdb liest sie
 # direkt per Pfad und beantwortet Aggregationen in SQL, ohne Ladeschritt; pyarrow
 # ist zusaetzlich noetig, damit auch pandas.read_parquet funktioniert.
-duckdb==1.1.3
+duckdb==1.5.5
 pyarrow==18.1.0
 
 # Visualisierung

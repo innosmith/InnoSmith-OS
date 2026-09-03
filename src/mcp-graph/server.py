@@ -19,9 +19,15 @@ import sys
 import time
 from pathlib import Path
 
-from mcp.server import Server
+from mcp.server.lowlevel import Server
 from mcp.server.stdio import stdio_server
-from mcp.types import TextContent, Tool
+from mcp.types import (
+    CallToolRequestParams,
+    CallToolResult,
+    ListToolsResult,
+    TextContent,
+    Tool,
+)
 
 import httpx
 
@@ -550,7 +556,6 @@ def _visible_tools() -> list[Tool]:
     return TOOLS
 
 
-server = Server("taskpilot-graph")
 _client: GraphClient | None = None
 
 
@@ -567,12 +572,10 @@ def _get_client() -> GraphClient:
     return _client
 
 
-@server.list_tools()
 async def list_tools() -> list[Tool]:
     return _visible_tools()
 
 
-@server.call_tool()
 async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     t0 = time.monotonic()
     logger.info("Tool %s aufgerufen: %s", name, {k: str(v)[:100] for k, v in arguments.items()})
@@ -1113,6 +1116,19 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         elapsed = (time.monotonic() - t0) * 1000
         logger.error("Tool %s fehlgeschlagen nach %.0fms: %s: %s", name, elapsed, type(e).__name__, e)
         return [TextContent(type="text", text=f"Fehler: {type(e).__name__}: {e}")]
+
+
+
+async def _on_list_tools(_ctx, _params) -> ListToolsResult:
+    return ListToolsResult(tools=await list_tools())
+
+
+async def _on_call_tool(_ctx, params: CallToolRequestParams) -> CallToolResult:
+    content = await call_tool(params.name, params.arguments or {})
+    return CallToolResult(content=content)
+
+
+server = Server("taskpilot-graph", on_list_tools=_on_list_tools, on_call_tool=_on_call_tool)
 
 
 async def main():

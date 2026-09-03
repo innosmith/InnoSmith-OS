@@ -2,11 +2,12 @@
 
 import json
 import logging
-from typing import Any
+from contextlib import asynccontextmanager
+from typing import Any, AsyncIterator
 
 from cachetools import TTLCache
 from mcp import ClientSession
-from mcp.client.streamable_http import streamablehttp_client
+from mcp.client.streamable_http import create_mcp_http_client, streamable_http_client
 
 logger = logging.getLogger("taskpilot.invoiceinsight")
 
@@ -44,6 +45,18 @@ def _build_args(**kwargs: Any) -> dict[str, Any] | None:
     return args or None
 
 
+@asynccontextmanager
+async def _mcp_sitzung(url: str, api_key: str) -> AsyncIterator[ClientSession]:
+    """MCP-2-Sitzung: Header über httpx2-Client, Transport liefert (read, write)."""
+    async with create_mcp_http_client(
+        headers={"Authorization": f"Bearer {api_key}"},
+    ) as http:
+        async with streamable_http_client(url, http_client=http) as (read, write):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                yield session
+
+
 class InvoiceInsightClient:
     """Async Client fuer den InvoiceInsight MCP-Server."""
 
@@ -57,17 +70,12 @@ class InvoiceInsightClient:
             if cached is not None:
                 return cached
 
-        async with streamablehttp_client(
-            self._url,
-            headers={"Authorization": f"Bearer {self._api_key}"},
-        ) as (read, write, _):
-            async with ClientSession(read, write) as session:
-                await session.initialize()
-                raw = await session.read_resource(uri)
-                data = _parse_content(raw)
-                if use_cache:
-                    _resource_cache[uri] = data
-                return data
+        async with _mcp_sitzung(self._url, self._api_key) as session:
+            raw = await session.read_resource(uri)
+            data = _parse_content(raw)
+            if use_cache:
+                _resource_cache[uri] = data
+            return data
 
     async def call_tool(self, name: str, arguments: dict | None = None, *, use_cache: bool = False) -> Any:
         cache_key = f"{name}:{json.dumps(arguments or {}, sort_keys=True)}"
@@ -76,17 +84,12 @@ class InvoiceInsightClient:
             if cached is not None:
                 return cached
 
-        async with streamablehttp_client(
-            self._url,
-            headers={"Authorization": f"Bearer {self._api_key}"},
-        ) as (read, write, _):
-            async with ClientSession(read, write) as session:
-                await session.initialize()
-                raw = await session.call_tool(name, arguments or {})
-                data = _parse_content(raw)
-                if use_cache:
-                    _tool_cache[cache_key] = data
-                return data
+        async with _mcp_sitzung(self._url, self._api_key) as session:
+            raw = await session.call_tool(name, arguments or {})
+            data = _parse_content(raw)
+            if use_cache:
+                _tool_cache[cache_key] = data
+            return data
 
     # ── Filterbare Tools (ehemals Resources) ─────────────
 
