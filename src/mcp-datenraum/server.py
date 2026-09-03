@@ -679,7 +679,12 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             return _antwort({"fehler": f"Unbekannte Quelle '{quelle}'", "erlaubt": [*QUELLEN, "alle"]})
 
         logger.info("Datenraum wird aufgefrischt: %s", quelle)
-        katalog = await abgleichen(None if quelle == "alle" else [quelle])
+        # Ohne Zuordnungsvorschläge: die kosten acht Aufrufe auf demselben lokalen
+        # Modell, das gerade der fragende Agent belegt -- und liessen einen
+        # Chat-Lauf in sein Zeitlimit laufen. Der Hintergrundtakt erledigt sie.
+        katalog = await abgleichen(
+            None if quelle == "alle" else [quelle], vorschlaege=False
+        )
         betroffen = list(QUELLEN) if quelle == "alle" else [quelle]
         return _antwort({
             "stand": katalog.get("stand"),

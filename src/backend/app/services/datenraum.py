@@ -791,8 +791,17 @@ def _dateisperre():
             fcntl.flock(f, fcntl.LOCK_UN)
 
 
-async def abgleichen(quellen: list[str] | None = None) -> dict:
-    """Die genannten Quellen abgleichen (Default: alle) und den Katalog neu schreiben."""
+async def abgleichen(quellen: list[str] | None = None, *, vorschlaege: bool = True) -> dict:
+    """Die genannten Quellen abgleichen (Default: alle) und den Katalog neu schreiben.
+
+    ``vorschlaege=False`` überspringt die Zuordnungsvorschläge. Der Aufruf über das
+    Werkzeug ``datenraum_auffrischen`` setzt das, und zwar aus einem gemessenen
+    Grund: die Vorschläge kosten acht Modellaufrufe auf demselben lokalen Modell,
+    das in diesem Moment der fragende Agent belegt. Am 03.09.2026 hat genau das
+    einen Chat-Lauf ins Zeitlimit von 600 Sekunden getrieben -- der Agent wartete
+    minutenlang auf seinen eigenen Auffrischungsaufruf, während dieser um dieselbe
+    GPU kämpfte. Im Hintergrundtakt ist die Arbeit richtig, im Werkzeugpfad nicht.
+    """
     async with _laeuft:
         namen = [n for n in (quellen or list(QUELLEN)) if n in QUELLEN]
         if not namen:
@@ -810,7 +819,8 @@ async def abgleichen(quellen: list[str] | None = None) -> dict:
             for name in namen:
                 await quelle_abgleichen(name, settings, katalog)
 
-            await _kundschaften_vorschlagen()
+            if vorschlaege:
+                await _kundschaften_vorschlagen()
             kundenschluessel_schreiben(katalog)
             katalog["stand"] = datetime.now(timezone.utc).isoformat()
             katalog["verzeichnis_in_der_sandbox"] = "/daten"

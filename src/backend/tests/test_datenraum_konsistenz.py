@@ -842,3 +842,62 @@ class TestDasWerkzeugFuerDieAntwort:
             quelle = f.read()
         anfang = quelle.index('if name == "kundschaft_zuordnen":')
         assert "kundenschluessel_schreiben" in quelle[anfang:]
+
+
+class TestDerAgentWartetNichtAufSichSelbst:
+    """Zuordnungsvorschläge gehören in den Hintergrundtakt, nicht in den Werkzeugpfad.
+
+    Am 03.09.2026 lief ein Chat-Lauf ins Zeitlimit von 600 Sekunden: der Agent rief
+    `datenraum_auffrischen`, und dieser Aufruf startete acht Modellaufrufe auf
+    demselben lokalen Modell, das der Agent selbst gerade belegte. Er wartete also
+    minutenlang auf seine eigene Auffrischung.
+    """
+
+    def test_das_werkzeug_frischt_ohne_vorschlaege_auf(self):
+        with open(os.path.join(SRC, "mcp-datenraum", "server.py"), encoding="utf-8") as f:
+            quelle = f.read()
+        anfang = quelle.index('if name == "datenraum_auffrischen":')
+        assert "vorschlaege=False" in quelle[anfang:anfang + 1200]
+
+    def test_der_hintergrundtakt_schlaegt_weiterhin_vor(self):
+        """Sonst entstünde nie ein Vorschlag und der Schlüssel bliebe stehen."""
+        import inspect
+
+        from app.services import datenraum
+
+        assert inspect.signature(datenraum.abgleichen).parameters["vorschlaege"].default is True
+
+    def test_wer_allein_steht_wird_nur_einmal_beurteilt(self, tmp_path):
+        """Acht Modellaufrufe pro Stunde für ein Ergebnis, das feststeht, wären
+        eine Dauerlast auf derselben GPU, die alles andere braucht."""
+        import asyncio
+
+        import yaml
+
+        from app.services import kundenschluessel as ks
+
+        datei = tmp_path / "k.yaml"
+        datei.write_text("version: 1\nkundschaften: []\noffen: []\n", encoding="utf-8")
+        bestand = {
+            "bexio_kontakte": [{"kunden_id": 1, "name": "Allein AG"}],
+            "bexio_rechnungen": [{"kunden_id": 1, "ist_umsatz": True}],
+            "toggl_zeiteintraege": [],
+            "pipedrive_deals": [],
+        }
+
+        aufrufe = []
+
+        async def steht_allein(auftrag, frage):
+            aufrufe.append(frage)
+            return {"sicher": True, "allein": True}
+
+        import pytest as _pytest
+
+        _pytest.MonkeyPatch().setattr(ks, "_fragen", steht_allein)
+        asyncio.run(ks.vorschlagen(bestand, datei))
+        assert len(aufrufe) == 1
+        assert yaml.safe_load(datei.read_text(encoding="utf-8"))["ohne_gegenstueck"] == ["bexio:1"]
+
+        # Zweiter Lauf: kein weiterer Modellaufruf.
+        asyncio.run(ks.vorschlagen(bestand, datei))
+        assert len(aufrufe) == 1, "dieselbe Kundschaft wurde erneut beurteilt"

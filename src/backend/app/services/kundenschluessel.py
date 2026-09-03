@@ -384,6 +384,14 @@ def _ausgeben(inhalt: dict) -> str:
             zeilen.extend(_umbrechen(hinweis, "      "))
         zeilen.append("")
 
+    allein = inhalt.get("ohne_gegenstueck") or []
+    if allein:
+        zeilen.append("# Kommt nur in einem System vor und braucht deshalb keinen Schluessel.")
+        zeilen.append("# Festgehalten, damit der Abgleich das nicht stuendlich neu beurteilt.")
+        zeilen.append("ohne_gegenstueck:")
+        zeilen.extend(f"  - {_als_text(str(e))}" for e in allein)
+        zeilen.append("")
+
     offen = inhalt.get("offen") or []
     zeilen.append("# Was sich nicht eindeutig zuordnen laesst. Wird nicht geraten --")
     zeilen.append("# hier steht die Frage, bis ein Mensch sie beantwortet.")
@@ -604,9 +612,19 @@ async def _fragen(auftrag: str, frage: str) -> dict:
 
 
 def _luecken(tabellen: dict[str, list[dict]], inhalt: dict) -> dict[str, list[tuple[Any, str]]]:
-    """Wer relevant ist, aber weder zugeordnet noch als Frage bereits notiert."""
+    """Wer relevant ist, aber weder zugeordnet noch schon einmal beurteilt.
+
+    «Schon beurteilt» umfasst beides: eine gestellte Frage und ein bereits
+    festgestelltes «kommt nur in einem System vor». Ohne das zweite prüfte der
+    Abgleich dieselben acht Kundschaften stündlich neu -- acht Modellaufrufe pro
+    Stunde für ein Ergebnis, das feststeht.
+    """
     schon_gefragt = {
         (f.get("system"), str(f.get("kennung"))) for f in (inhalt.get("offen") or [])
+    }
+    schon_gefragt |= {
+        (str(e).split(":", 1)[0], str(e).split(":", 1)[1])
+        for e in (inhalt.get("ohne_gegenstueck") or []) if ":" in str(e)
     }
     zugeordnet = {s: set() for s in SYSTEME}
     for eintrag in inhalt.get("kundschaften") or []:
@@ -672,7 +690,16 @@ async def vorschlagen(
                 f"Bereits bekannte Kundschaften (Schlüssel — Name):\n{bekannt}\n\n{andere}"
             ))
 
-            if not vorschlag or vorschlag.get("allein"):
+            if not vorschlag:
+                continue
+            if vorschlag.get("allein"):
+                # Festhalten statt nur überspringen, sonst wird dieselbe Kundschaft
+                # bei jedem Abgleich erneut beurteilt.
+                inhalt.setdefault("ohne_gegenstueck", [])
+                marke = f"{system}:{kennung}"
+                if marke not in inhalt["ohne_gegenstueck"]:
+                    inhalt["ohne_gegenstueck"] = sorted({*inhalt["ohne_gegenstueck"], marke})
+                    _schreiben(inhalt, pfad)
                 continue
             if not vorschlag.get("sicher"):
                 frage = (vorschlag.get("frage") or "").strip()
