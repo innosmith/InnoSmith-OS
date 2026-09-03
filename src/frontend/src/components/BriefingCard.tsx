@@ -6,17 +6,24 @@ import { MarkdownView } from './MarkdownView';
 import { useSSE } from '../hooks/useSSE';
 import type { AgentJob } from '../types';
 
-const BRIEFING_TYPES = ['daily_briefing', 'weekly_briefing', 'monthly_briefing'] as const;
+/**
+ * Ohne `daily_briefing` — es wird seit dem 2. September 2026 nicht mehr erzeugt.
+ *
+ * Der Entscheid steht im Backend (`briefing.py`, `_DEFAULTS`, mit der Begründung in
+ * `briefing_data.build_daily_context`). Die Karte hielt ihn zunächst nicht mit: Sie
+ * fragte den Tagestyp weiter ab und zeigte zusammen mit `MAX_TAGE` das letzte
+ * erzeugte Briefing noch einen Tag nach der Abschaltung. Wer eines von Hand über die
+ * Einstellungen erzeugt, findet es im Archiv unter Agenten → Aufträge.
+ */
+const BRIEFING_TYPES = ['weekly_briefing', 'monthly_briefing'] as const;
 type BriefingType = (typeof BRIEFING_TYPES)[number];
 
 const TYPE_LABELS: Record<BriefingType, string> = {
-  daily_briefing: 'Tag',
   weekly_briefing: 'Woche',
   monthly_briefing: 'Monat',
 };
 
 const TYPE_BADGES: Record<BriefingType, string> = {
-  daily_briefing: 'bg-sky-100 text-sky-700 dark:bg-sky-900/40 dark:text-sky-300',
   weekly_briefing: 'bg-violet-100 text-violet-700 dark:bg-violet-900/40 dark:text-violet-300',
   monthly_briefing: 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300',
 };
@@ -70,8 +77,10 @@ export function BriefingCard({ cardClass, textPrimary, textSecondary, textMuted,
 
   const fetchBriefings = useCallback(async () => {
     try {
+      // Abgefragt wird, was auch angezeigt wird: Eine zweite Aufzählung wäre eine
+      // zweite Wahrheit darüber, welche Briefings es gibt.
       const jobs = await api.get<AgentJob[]>(
-        '/api/agent-jobs?job_type=daily_briefing,weekly_briefing,monthly_briefing&status=completed&limit=12',
+        `/api/agent-jobs?job_type=${BRIEFING_TYPES.join(',')}&status=completed&limit=12`,
       );
       const latest: Partial<Record<BriefingType, AgentJob>> = {};
       for (const job of jobs) {
