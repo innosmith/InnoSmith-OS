@@ -52,7 +52,7 @@ export default function DatenschutzPage() {
   const [bgPickerOpen, setBgPickerOpen] = useState(false);
 
   const [richtung, setRichtung] = useState<Richtung>('hin');
-  const [quelle, setQuelle] = useState<Quelle>('text');
+  const [quelle, setQuelle] = useState<Quelle>('dokument');
   const [eingabe, setEingabe] = useState('');
   const [begriffe, setBegriffe] = useState('');
   const [datei, setDatei] = useState<File | null>(null);
@@ -269,7 +269,7 @@ export default function DatenschutzPage() {
 
         {richtung === 'hin' ? (
           <div className="space-y-5">
-            <Karte titel="1. Text oder Dokument">
+            <Karte titel="1. Dokument oder Text">
               <p className="mb-4 text-sm text-gray-500 dark:text-gray-400">
                 PDF, Word, Text und Markdown. Ein Scan ohne Textebene enthält keinen lesbaren Text —
                 dann den Text von Hand einfügen.
@@ -291,28 +291,20 @@ export default function DatenschutzPage() {
                     className="mb-4 inline-flex rounded-lg border border-gray-200 p-1 dark:border-gray-600"
                   >
                     <Umschalter
-                      aktiv={quelle === 'text'}
-                      onKlick={() => setQuelle('text')}
-                      beschriftung="Text einfügen"
-                      klein
-                    />
-                    <Umschalter
                       aktiv={quelle === 'dokument'}
                       onKlick={() => setQuelle('dokument')}
                       beschriftung="Dokument ablegen"
                       klein
                     />
+                    <Umschalter
+                      aktiv={quelle === 'text'}
+                      onKlick={() => setQuelle('text')}
+                      beschriftung="Text einfügen"
+                      klein
+                    />
                   </div>
 
-                  {quelle === 'text' ? (
-                    <textarea
-                      value={eingabe}
-                      onChange={e => setEingabe(e.target.value)}
-                      rows={14}
-                      className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 font-mono text-sm text-gray-900 focus:border-indigo-500 focus:outline-none dark:border-gray-600 dark:bg-gray-800 dark:text-white"
-                      placeholder="Mandantenschreiben, Aktennotiz, Offerte …"
-                    />
-                  ) : (
+                  {quelle === 'dokument' ? (
                     <div
                       onDragOver={e => {
                         e.preventDefault();
@@ -353,6 +345,14 @@ export default function DatenschutzPage() {
                         onChange={e => setDatei(e.target.files?.[0] || null)}
                       />
                     </div>
+                  ) : (
+                    <textarea
+                      value={eingabe}
+                      onChange={e => setEingabe(e.target.value)}
+                      rows={14}
+                      className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 font-mono text-sm text-gray-900 focus:border-indigo-500 focus:outline-none dark:border-gray-600 dark:bg-gray-800 dark:text-white"
+                      placeholder="Mandantenschreiben, Aktennotiz, Offerte …"
+                    />
                   )}
                 </div>
 

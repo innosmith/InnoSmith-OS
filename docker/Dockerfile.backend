@@ -80,9 +80,13 @@ RUN if [ -d /opt/vendor/ai9 ]; then \
 # spaCy: de (Primaersprache) + en (Fallback)
 RUN python -m spacy download de_core_news_lg \
     && python -m spacy download en_core_web_sm
-# GLiNER PII-Modell in den HuggingFace-Cache laden
+# GLiNER PII-Modell in den HuggingFace-Cache laden. Welches, sagt der
+# contentConverter selbst -- er ist eine Zeile weiter oben schon installiert. Ein
+# hier eingetragener Name wäre eine Kopie, und eine veraltete Kopie erzeugt ein
+# Abbild, in dem die Anonymisierung erst beim ersten Dokument scheitert: offline,
+# ohne Zwischenspeicher, mit einem Fehler, der nach einem Netzproblem aussieht.
 ENV HF_HOME=/opt/hf-cache
-RUN python -c "from gliner import GLiNER; GLiNER.from_pretrained('urchade/gliner_multi_pii-v1')"
+RUN python -c "from gliner import GLiNER; from contentconverter.anonymize.analyzer import _GLINER_MODEL; print('Lade', _GLINER_MODEL); GLiNER.from_pretrained(_GLINER_MODEL)"
 
 # Ab hier ohne Netz. ``from_pretrained`` verweist auf den Zweig ``main``, einen
 # wandernden Zeiger -- die Bibliothek fragt darum bei jedem Laden bei HuggingFace
