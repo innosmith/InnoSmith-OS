@@ -29,6 +29,35 @@ heraus, ohne dass jemand es merkt. Dagegen zwei Waechter:
 2. **Was fehlt, wird gezaehlt und benannt.** ``nicht_zugeordnet`` nennt je System
    die Kundschaften ohne Schluessel -- dieselbe Bauart wie der Waechter gegen
    durchgehend leere Spalten.
+
+## Wer die Datei pflegt -- und wer nicht
+
+Der Mensch nicht. Eine YAML-Datei ist der Pruefpfad, nicht die Bedienoberflaeche:
+gemessen kamen seit 2023 fuenf, ein, ein und fuenf neue Rechnungskunden pro Jahr
+dazu, und nur ein Bruchteil davon heisst in zwei Systemen verschieden. Fuer zwei
+bis vier Aenderungen im Jahr jemanden YAML editieren zu lassen, waere die falsche
+Zumutung -- und eine Pflege, die als laestig empfunden wird, verfaellt.
+
+Darum drei Wege in die Datei, und nur der letzte kostet Aufmerksamkeit:
+
+1. ``vorschlagen()`` laeuft nach jedem Abgleich. Fuer jede nicht zugeordnete
+   Kundschaft schlaegt das lokale Modell einen Gegenpart vor; jede vorgeschlagene
+   Kennung wird gegen den Bestand geprueft, und was nicht existiert, faellt weg.
+   Angenommene Vorschlaege stehen unter ``vorgeschlagen`` und gelten als
+   unbestaetigt.
+2. ``zuordnen()`` schreibt eine menschliche Entscheidung fest -- aufgerufen vom
+   Werkzeug ``kundschaft_zuordnen``, damit die Antwort im Gespraech faellt und
+   nicht im Editor.
+3. ``frage_notieren()`` haelt fest, was das Modell nicht entscheiden konnte. Nur
+   das erreicht den Menschen, und zwar als Frage, nicht als Datei.
+
+Die Grenze zwischen 1 und 2 ist die tragende: **eine Maschine darf hinzufuegen,
+aber nie aendern oder entfernen.** Eine neue Kennung war noch nie Gegenstand einer
+menschlichen Entscheidung -- sie zu ergaenzen ueberschreibt nichts. Eine
+bestehende zu korrigieren hiesse, ein Urteil zu ueberstimmen, und das darf kein
+Modell. Deshalb ist ``bestaetigt`` am Eintrag *und* ``vorgeschlagen`` je Kennung
+noetig: ohne das zweite Feld wuerde eine maschinelle Ergaenzung einen bestaetigten
+Eintrag entweder still mitbestaetigen oder ihn faelschlich entwerten.
 """
 
 from __future__ import annotations
@@ -66,6 +95,53 @@ RELEVANZ: dict[str, tuple[str, str, tuple[str, object] | None]] = {
     "toggl": ("toggl_zeiteintraege", "kunden_id", None),
     "pipedrive": ("pipedrive_deals", "organisation_id", ("status", "won")),
 }
+
+# Der Kopf der Datei. Er steht hier und nicht dort, weil die Datei maschinell neu
+# geschrieben wird und ein Kommentar das nicht ueberlebt -- die Begruendung, warum
+# es diese Datei ueberhaupt gibt, waere nach der ersten Ergaenzung weg.
+KOPF = """\
+# Kundenschlüssel — welche Kennungen dieselbe Kundschaft meinen
+#
+# Bexio, Toggl und Pipedrive führen dieselbe Kundschaft unter drei Namen und drei
+# Kennungsräumen, die sich nirgends überschneiden. In Bexio heisst das Amt für
+# Grundstücke und Gebäude «Bau- und Verkehrsdirektion des Kantons Bern (BVD) Amt
+# für Grundstücke und Gebäude», in Toggl «AGG», in Pipedrive «Amt für Grundstücke
+# und Gebäude AGG». Wer wörtlich nach «AGG» sucht, findet in Bexio nichts — und
+# bekommt keine Fehlermeldung, sondern 0 CHF.
+#
+# Diese Datei hält die Zuordnung als Stammdatum fest, statt sie zur Laufzeit zu
+# raten. Kein Ähnlichkeitsmass, keine Stammformen, keine Straflisten: entweder
+# eine Kennung steht hier, oder sie gilt als nicht zugeordnet und wird als solche
+# gemeldet.
+#
+# ## Von Hand zu pflegen ist sie nicht
+#
+# Sie wird geschrieben, nicht editiert. Nach jedem Abgleich schlägt das lokale
+# Modell für nicht zugeordnete Kundschaften einen Gegenpart vor; jede Kennung wird
+# gegen den Datenraum geprüft. Was das Modell nicht entscheiden kann, steht unter
+# `offen` — und nur das erreicht einen Menschen, als Frage im Gespräch. Die
+# Antwort schreibt das Werkzeug `kundschaft_zuordnen` hierher zurück.
+#
+# ## Regeln
+#
+# * Ein Eintrag entsteht nur, wenn dieselbe Kundschaft in **mindestens zwei**
+#   Systemen vorkommt. Wer nur in Bexio steht, braucht keinen Schlüssel — dort
+#   genügt der eigene Name.
+# * Je System eine **Liste** von Kennungen, nie eine einzelne. Dieselbe Kundschaft
+#   hat regelmässig mehrere Datensätze: Gemeinde Köniz führt in Bexio zwei
+#   Direktionen, T+R steht in Pipedrive dreimal.
+# * `bestaetigt: true` heisst «von einem Menschen geprüft». `vorgeschlagen` nennt
+#   die einzelnen Kennungen, die eine Maschine ergänzt hat und die noch niemand
+#   geprüft hat — auch an einem sonst bestätigten Eintrag.
+# * Eine Maschine darf **hinzufügen, nie ändern oder entfernen**. Eine neue
+#   Kennung war noch nie Gegenstand einer menschlichen Entscheidung; eine
+#   bestehende zu korrigieren hiesse, ein Urteil zu überstimmen.
+# * Unsicherheit ist ein zulässiges Ergebnis. Was sich nicht eindeutig zuordnen
+#   lässt, steht unter `offen` und wird nicht geraten.
+# * Jede Kennung wird beim Laden gegen den Datenraum geprüft. Eine Kennung, die es
+#   dort nicht gibt, wird verworfen und gemeldet.
+"""
+
 
 def _datei_finden() -> Path:
     """Wo die gepflegte Datei liegt -- im Baum wie im Container.
@@ -193,7 +269,13 @@ def aufbauen(
             verworfen.append(f"Eintrag ohne Schluessel oder Name: {eintrag!r:.80}")
             continue
         bestaetigt = bool(eintrag.get("bestaetigt"))
-        if not bestaetigt:
+        # Maschinell ergaenzte Kennungen an einem sonst bestaetigten Eintrag. Ohne
+        # diese Liste haette eine Ergaenzung nur zwei haessliche Moeglichkeiten:
+        # still als bestaetigt gelten (ein Urteil, das niemand gefaellt hat) oder
+        # den ganzen Eintrag entwerten (ein Urteil, das jemand gefaellt hat, wird
+        # zurueckgenommen). Beides waere falsch.
+        offene_kennungen = {str(k) for k in (eintrag.get("vorgeschlagen") or [])}
+        if not bestaetigt or offene_kennungen:
             unbestaetigt.append(schluessel)
 
         for system in SYSTEME:
@@ -210,7 +292,7 @@ def aufbauen(
                     "system": system,
                     "fremd_id": kennung,
                     "fremd_name": namen[system].get(kennung, ""),
-                    "bestaetigt": bestaetigt,
+                    "bestaetigt": bestaetigt and f"{system}:{kennung}" not in offene_kennungen,
                 })
 
     befund: dict = {
@@ -239,11 +321,414 @@ def aufbauen(
         befund["nicht_zugeordnet"] = {s: len(v) for s, v in fehlend.items()}
         befund["ohne_schluessel"] = fehlend
 
+    # Mit dem Wortlaut, nicht bloss als Etikett: der Agent soll die Frage stellen
+    # koennen, wenn sie zur Sprache kommt. Stuende hier nur «pipedrive 652 (Kanton
+    # Bern)», bliebe die Frage im Katalog liegen und erreichte nie jemanden -- und
+    # eine Frage, die niemand hoert, ist so gut wie keine.
     offene_fragen = inhalt.get("offen") or []
     if offene_fragen:
         befund["offene_fragen"] = [
-            f"{f.get('system')} {f.get('kennung')} ({f.get('name')})"
+            {
+                "system": f.get("system"),
+                "kennung": f.get("kennung"),
+                "name": f.get("name"),
+                "frage": f.get("frage"),
+            }
             for f in offene_fragen
         ]
+        befund["so_wird_geantwortet"] = (
+            "Kommt eine dieser Kundschaften zur Sprache, die Frage stellen und die "
+            "Antwort mit dem Werkzeug 'kundschaft_zuordnen' eintragen. Nicht selbst "
+            "entscheiden -- eine falsche Zuordnung bleibt unbemerkt."
+        )
 
     return zeilen, befund
+
+
+# ── Schreiben ────────────────────────────────────────────────────────
+
+def _als_text(wert: str) -> str:
+    """Ein Feldwert als YAML-Skalar -- in Anfuehrungszeichen nur, wo noetig."""
+    heikel = any(z in wert for z in ":#\n'\"") or wert.strip() != wert or not wert
+    return f"'{wert.replace(chr(39), chr(39) * 2)}'" if heikel else wert
+
+
+def _ausgeben(inhalt: dict) -> str:
+    """Die Datei aus der geladenen Struktur neu schreiben.
+
+    Ein eigener Ausgeber statt ``yaml.safe_dump``, aus zwei Gruenden. Erstens
+    haelt der Kopfkommentar die Begruendung fest, warum es diese Datei gibt --
+    ``safe_dump`` wirft Kommentare weg, und die Begruendung waere nach der ersten
+    maschinellen Ergaenzung verloren. Zweitens schreibt ``safe_dump``
+    Kennungslisten als Bloecke; damit wuerde jede kleine Aenderung die ganze Datei
+    umformen und der Diff waere nicht mehr zu lesen -- ausgerechnet bei der Datei,
+    deren einziger Zweck die Nachvollziehbarkeit ist.
+    """
+    zeilen = [KOPF.strip(), "", f"version: {inhalt.get('version', 1)}",
+              f"stand: {inhalt.get('stand')}", "", "kundschaften:"]
+
+    for eintrag in inhalt.get("kundschaften") or []:
+        zeilen.append(f"  - schluessel: {eintrag['schluessel']}")
+        zeilen.append(f"    name: {_als_text(str(eintrag.get('name') or ''))}")
+        for system in SYSTEME:
+            kennungen = eintrag.get(system)
+            if kennungen:
+                zeilen.append(f"    {system}: [{', '.join(str(k) for k in kennungen)}]")
+        zeilen.append(f"    bestaetigt: {str(bool(eintrag.get('bestaetigt'))).lower()}")
+        vorgeschlagen = eintrag.get("vorgeschlagen") or []
+        if vorgeschlagen:
+            zeilen.append(f"    vorgeschlagen: [{', '.join(_als_text(str(v)) for v in vorgeschlagen)}]")
+        hinweis = (eintrag.get("hinweis") or "").strip()
+        if hinweis:
+            zeilen.append("    hinweis: >-")
+            zeilen.extend(_umbrechen(hinweis, "      "))
+        zeilen.append("")
+
+    offen = inhalt.get("offen") or []
+    zeilen.append("# Was sich nicht eindeutig zuordnen laesst. Wird nicht geraten --")
+    zeilen.append("# hier steht die Frage, bis ein Mensch sie beantwortet.")
+    zeilen.append("offen:" if offen else "offen: []")
+    for frage in offen:
+        zeilen.append(f"  - system: {frage.get('system')}")
+        zeilen.append(f"    kennung: {frage.get('kennung')}")
+        zeilen.append(f"    name: {_als_text(str(frage.get('name') or ''))}")
+        zeilen.append("    frage: >-")
+        zeilen.extend(_umbrechen(str(frage.get("frage") or "").strip(), "      "))
+        zeilen.append("")
+
+    return "\n".join(zeilen).rstrip() + "\n"
+
+
+def _umbrechen(text: str, einzug: str, breite: int = 80) -> list[str]:
+    """Fliesstext auf Zeilenbreite umbrechen, damit der Diff zeilenweise bleibt."""
+    import textwrap
+
+    return [einzug + z for z in textwrap.wrap(" ".join(text.split()), breite - len(einzug))] or [einzug + "-"]
+
+
+def _schreiben(inhalt: dict, pfad: Path | None = None) -> None:
+    """Die Datei ersetzen -- atomar, damit ein Leser nie eine halbe Datei sieht."""
+    import os
+    from datetime import date
+
+    ziel = pfad or _datei_finden()
+    inhalt["stand"] = date.today().isoformat()
+    vorlaeufig = ziel.with_suffix(".yaml.neu")
+    vorlaeufig.write_text(_ausgeben(inhalt), encoding="utf-8")
+    os.replace(vorlaeufig, ziel)
+
+
+def spalten_bedarf() -> dict[str, set[str]]:
+    """Welche Spalten je Tabelle noetig sind, um die Zuordnung zu pruefen."""
+    gebraucht: dict[str, set[str]] = {}
+    for tabelle, kennung, anzeige in SYSTEME.values():
+        gebraucht.setdefault(tabelle, set()).update((kennung, anzeige))
+    for tabelle, kennung, bedingung in RELEVANZ.values():
+        spalten = gebraucht.setdefault(tabelle, set())
+        spalten.add(kennung)
+        if bedingung is not None:
+            spalten.add(bedingung[0])
+    return gebraucht
+
+
+def tabellen_laden() -> dict[str, list[dict]]:
+    """Den aktuellen Bestand aus dem Datenraum lesen.
+
+    Spaeter Import, weil ``datenraum`` dieses Modul benutzt -- auf Modulebene
+    entstuende ein Ringschluss.
+    """
+    from app.services.datenraum import _zeilen_lesen
+
+    return {
+        name: _zeilen_lesen(name, tuple(sorted(spalten)))
+        for name, spalten in spalten_bedarf().items()
+    }
+
+
+def zuordnen(
+    schluessel: str,
+    system: str,
+    kennung: Any,
+    *,
+    name: str | None = None,
+    hinweis: str | None = None,
+    tabellen: dict[str, list[dict]] | None = None,
+    pfad: Path | None = None,
+) -> dict:
+    """Eine menschliche Entscheidung festschreiben.
+
+    Aufgerufen vom Werkzeug ``kundschaft_zuordnen``: die Antwort faellt im
+    Gespraech («WA-AUE gehoert zur Wyss Academy»), nicht im Editor. Was hier
+    ankommt, gilt als geprueft -- ``bestaetigt: true``, und die Kennung faellt aus
+    ``vorgeschlagen`` heraus.
+
+    Geprueft wird trotzdem, und zwar dasselbe wie beim Aufbau: existiert die
+    Kennung im Bestand? Ein Vertipper darf keine tote Verknuepfung erzeugen, die
+    hinterher wie eine Zuordnung aussieht.
+    """
+    if system not in SYSTEME:
+        return {"ok": False, "grund": f"Unbekanntes System '{system}'. Erlaubt: {', '.join(SYSTEME)}"}
+
+    tabellen = tabellen if tabellen is not None else tabellen_laden()
+    vorhanden = _vorhandene_kennungen(system, tabellen)
+    passend = [k for k in vorhanden if str(k) == str(kennung)]
+    if not passend:
+        return {"ok": False, "grund": (
+            f"{system} {kennung} kommt im Datenraum nicht vor. Nicht eingetragen -- "
+            "eine Kennung, die es nicht gibt, ergaebe eine Verknuepfung ueber null Zeilen."
+        )}
+    kennung = passend[0]
+
+    inhalt = _datei_lesen(pfad)
+    inhalt.setdefault("kundschaften", [])
+    for anderer in inhalt["kundschaften"]:
+        if anderer.get("schluessel") != schluessel and kennung in (anderer.get(system) or []):
+            return {"ok": False, "grund": (
+                f"{system} {kennung} gehoert bereits zu '{anderer.get('schluessel')}'. "
+                "Eine Kennung kann nur einer Kundschaft gehoeren -- sonst zaehlt jede "
+                "Summe sie doppelt."
+            )}
+
+    eintrag = next((e for e in inhalt["kundschaften"] if e.get("schluessel") == schluessel), None)
+    if eintrag is None:
+        namen = _namen(system, tabellen)
+        eintrag = {"schluessel": schluessel, "name": name or namen.get(kennung) or schluessel}
+        inhalt["kundschaften"].append(eintrag)
+        inhalt["kundschaften"].sort(key=lambda e: e.get("schluessel") or "")
+    elif name:
+        eintrag["name"] = name
+
+    eintrag.setdefault(system, [])
+    if kennung not in eintrag[system]:
+        eintrag[system].append(kennung)
+    eintrag["bestaetigt"] = True
+    eintrag["vorgeschlagen"] = [
+        v for v in (eintrag.get("vorgeschlagen") or []) if v != f"{system}:{kennung}"
+    ]
+    if hinweis:
+        eintrag["hinweis"] = hinweis
+
+    # Die Frage ist beantwortet und verschwindet aus der Liste.
+    inhalt["offen"] = [
+        f for f in (inhalt.get("offen") or [])
+        if not (f.get("system") == system and str(f.get("kennung")) == str(kennung))
+    ]
+
+    _schreiben(inhalt, pfad)
+    systeme = [s for s in SYSTEME if eintrag.get(s)]
+    return {
+        "ok": True,
+        "schluessel": schluessel,
+        "name": eintrag["name"],
+        "systeme": {s: eintrag[s] for s in systeme},
+        "hinweis": (
+            "Eingetragen und bestaetigt. Die Tabelle 'kundenschluessel' wird beim "
+            "naechsten Abgleich neu geschrieben."
+            if len(systeme) > 1 else
+            "Eingetragen. Solange nur ein System zugeordnet ist, verbindet der "
+            "Schluessel noch nichts -- er wirkt erst mit einer zweiten Kennung."
+        ),
+    }
+
+
+def frage_notieren(system: str, kennung: Any, name: str, frage: str, pfad: Path | None = None) -> bool:
+    """Eine offene Frage festhalten. Doppelte werden nicht erneut gestellt."""
+    inhalt = _datei_lesen(pfad)
+    offen = inhalt.setdefault("offen", [])
+    if any(f.get("system") == system and str(f.get("kennung")) == str(kennung) for f in offen):
+        return False
+    offen.append({"system": system, "kennung": kennung, "name": name, "frage": frage})
+    _schreiben(inhalt, pfad)
+    return True
+
+
+# ── Vorschlagen ──────────────────────────────────────────────────────
+
+AUFTRAG = """Du ordnest Kundschaften zwischen drei Geschäftssystemen einander zu.
+
+Dieselbe Organisation heisst in Bexio (Buchhaltung), Toggl (Zeiterfassung) und
+Pipedrive (CRM) oft verschieden: die Buchhaltung führt den vollen amtlichen Namen,
+die Zeiterfassung ein Kürzel, das CRM etwas dazwischen. Beispiel: «Bau- und
+Verkehrsdirektion des Kantons Bern (BVD) Amt für Grundstücke und Gebäude» in
+Bexio ist dasselbe wie «AGG» in Toggl.
+
+Vor dir steht eine Kundschaft ohne Zuordnung. Entscheide, ob sie zu einer
+bereits bekannten Kundschaft gehört, oder zu einem der aufgeführten Kandidaten
+aus den anderen Systemen.
+
+Antworte AUSSCHLIESSLICH als JSON:
+  {"schluessel": "<bekannter Schlüssel>", "sicher": true}
+  {"kandidaten": [{"system": "bexio", "kennung": 123}], "schluessel": "<neuer kurzer Schlüssel, klein, ohne Umlaute>", "name": "<Anzeigename>", "sicher": true}
+  {"sicher": false, "frage": "<eine konkrete Frage an den Menschen>"}
+
+Regeln:
+- Rate NICHT. Bist du nicht sicher, antworte mit sicher=false und einer Frage.
+  Eine falsche Zuordnung ist schlimmer als gar keine, weil sie unbemerkt bleibt.
+- Ein Kürzel, das nur zufällig in einem längeren Namen vorkommt, ist kein Treffer.
+- Verwende nur Kennungen aus den vorgelegten Listen. Erfinde keine.
+- Gehört die Kundschaft offensichtlich zu niemandem sonst (sie kommt nur in einem
+  System vor), antworte {"sicher": true, "allein": true}."""
+
+
+async def _fragen(auftrag: str, frage: str) -> dict:
+    """Das lokale Modell einmal fragen. Direkter Ollama-Aufruf, kein Agent."""
+    import json
+
+    import httpx
+
+    from app.config import get_settings
+
+    cfg = get_settings()
+    try:
+        async with httpx.AsyncClient(timeout=120) as klient:
+            antwort = await klient.post(
+                f"{cfg.ollama_base_url.rstrip('/')}/v1/chat/completions",
+                headers={"Authorization": "Bearer ollama"},
+                json={
+                    "model": cfg.triage_model.removeprefix("ollama/"),
+                    "messages": [
+                        {"role": "system", "content": auftrag},
+                        {"role": "user", "content": frage},
+                    ],
+                    "temperature": 0,
+                    "stream": False,
+                    "response_format": {"type": "json_object"},
+                },
+            )
+            antwort.raise_for_status()
+            inhalt = (((antwort.json().get("choices") or [{}])[0]).get("message") or {}).get("content") or ""
+        return json.loads(inhalt)
+    except Exception as exc:  # noqa: BLE001 -- ein Vorschlag darf den Abgleich nie reissen
+        logger.warning("Kundenschluessel: Vorschlag nicht erhalten: %s", exc)
+        return {}
+
+
+def _luecken(tabellen: dict[str, list[dict]], inhalt: dict) -> dict[str, list[tuple[Any, str]]]:
+    """Wer relevant ist, aber weder zugeordnet noch als Frage bereits notiert."""
+    schon_gefragt = {
+        (f.get("system"), str(f.get("kennung"))) for f in (inhalt.get("offen") or [])
+    }
+    zugeordnet = {s: set() for s in SYSTEME}
+    for eintrag in inhalt.get("kundschaften") or []:
+        for system in SYSTEME:
+            zugeordnet[system].update(eintrag.get(system) or [])
+
+    gefunden: dict[str, list[tuple[Any, str]]] = {}
+    for system in SYSTEME:
+        namen = _namen(system, tabellen)
+        offen = [
+            (k, namen.get(k) or "")
+            for k in _relevante_kennungen(system, tabellen) - zugeordnet[system]
+            if (system, str(k)) not in schon_gefragt
+        ]
+        if offen:
+            gefunden[system] = sorted(offen, key=lambda p: str(p[1]))
+    return gefunden
+
+
+async def vorschlagen(
+    tabellen: dict[str, list[dict]] | None = None,
+    pfad: Path | None = None,
+    grenze: int = 12,
+) -> dict:
+    """Fuer nicht zugeordnete Kundschaften einen Gegenpart vorschlagen.
+
+    Laeuft nach dem Abgleich und ist der Grund, warum niemand die Datei von Hand
+    pflegen muss. Der Ablauf ist bewusst der aus der Architekturregel «einmalig
+    erzeugen, Ausgabe versionieren»: das Modell schlaegt vor, **jede** Kennung
+    wird gegen den Bestand geprueft, das Ergebnis landet als versionierter Text
+    mit Pruefkennzeichen, und Unsicherheit ist ein zulaessiges Ergebnis.
+
+    Was das Modell nicht entscheiden kann, wird zur Frage -- und nur die erreicht
+    den Menschen. Bestaetigte Kennungen werden nie angeruehrt.
+    """
+    tabellen = tabellen if tabellen is not None else tabellen_laden()
+    inhalt = _datei_lesen(pfad)
+    luecken = _luecken(tabellen, inhalt)
+    if not luecken:
+        return {"geprueft": 0, "ergaenzt": 0, "gefragt": 0}
+
+    bekannte = {
+        e["schluessel"]: e.get("name") or e["schluessel"]
+        for e in (inhalt.get("kundschaften") or []) if e.get("schluessel")
+    }
+    ergaenzt: list[str] = []
+    gefragt: list[str] = []
+    geprueft = 0
+
+    for system, offene in luecken.items():
+        for kennung, name in offene[:grenze]:
+            geprueft += 1
+            andere = "\n\n".join(
+                f"Kandidaten aus {s} (Kennung — Name):\n" + "\n".join(
+                    f"  {k} — {n}" for k, n in sorted(_namen(s, tabellen).items(), key=lambda p: str(p[1]))
+                    if k in _relevante_kennungen(s, tabellen)
+                )
+                for s in SYSTEME if s != system
+            )
+            bekannt = "\n".join(f"  {s} — {n}" for s, n in sorted(bekannte.items()))
+            vorschlag = await _fragen(AUFTRAG, (
+                f"Nicht zugeordnet: System «{system}», Kennung {kennung}, Name «{name}».\n\n"
+                f"Bereits bekannte Kundschaften (Schlüssel — Name):\n{bekannt}\n\n{andere}"
+            ))
+
+            if not vorschlag or vorschlag.get("allein"):
+                continue
+            if not vorschlag.get("sicher"):
+                frage = (vorschlag.get("frage") or "").strip()
+                if frage and frage_notieren(system, kennung, name, frage, pfad):
+                    gefragt.append(f"{system} {kennung} ({name})")
+                    inhalt = _datei_lesen(pfad)
+                continue
+
+            # Angenommen wird nur, was sich nachweisen laesst. Jede Kennung des
+            # Vorschlags -- auch die eigene -- geht durch dieselbe Pruefung wie eine
+            # menschliche Eingabe; der einzige Unterschied ist das Pruefkennzeichen.
+            schluessel = (vorschlag.get("schluessel") or "").strip().lower()
+            if not schluessel:
+                continue
+            paare = [(system, kennung)] + [
+                (p.get("system"), p.get("kennung"))
+                for p in (vorschlag.get("kandidaten") or [])
+                if p.get("system") in SYSTEME
+            ]
+            # Vor der ersten Schreibung merken: ``zuordnen`` setzt bestaetigt=true,
+            # danach waere der Vorzustand nicht mehr feststellbar. Ein bestaetigter
+            # Eintrag, der nur ergaenzt wird, bleibt bestaetigt -- die Ergaenzung
+            # allein steht unter ``vorgeschlagen``.
+            vorher = next(
+                (e for e in (inhalt.get("kundschaften") or []) if e.get("schluessel") == schluessel),
+                None,
+            )
+            war_bestaetigt = bool(vorher and vorher.get("bestaetigt"))
+
+            angenommen = []
+            for ziel_system, ziel_kennung in paare:
+                ergebnis = zuordnen(
+                    schluessel, ziel_system, ziel_kennung,
+                    name=vorschlag.get("name") or name, tabellen=tabellen, pfad=pfad,
+                )
+                if ergebnis.get("ok"):
+                    angenommen.append(f"{ziel_system}:{ergebnis['systeme'][ziel_system][-1]}")
+                else:
+                    logger.info("Kundenschluessel: Vorschlag verworfen -- %s", ergebnis.get("grund"))
+
+            inhalt = _datei_lesen(pfad)
+            if angenommen:
+                # Der Eintrag ist gerade auf bestaetigt=true gelaufen, weil
+                # ``zuordnen`` fuer menschliche Entscheidungen gebaut ist. Hier war
+                # es aber eine Maschine -- also zurueck auf unbestaetigt.
+                eintrag = next(e for e in inhalt["kundschaften"] if e["schluessel"] == schluessel)
+                eintrag["vorgeschlagen"] = sorted(set(eintrag.get("vorgeschlagen") or []) | set(angenommen))
+                eintrag["bestaetigt"] = war_bestaetigt
+                _schreiben(inhalt, pfad)
+                bekannte[schluessel] = eintrag.get("name") or schluessel
+                ergaenzt.append(f"{schluessel}: {', '.join(angenommen)}")
+
+    befund = {"geprueft": geprueft, "ergaenzt": len(ergaenzt), "gefragt": len(gefragt)}
+    if ergaenzt:
+        befund["neue_zuordnungen"] = ergaenzt
+    if gefragt:
+        befund["neue_fragen"] = gefragt
+    logger.info("Kundenschluessel: %s", befund)
+    return befund

@@ -12,6 +12,14 @@
 # eine Kennung steht hier, oder sie gilt als nicht zugeordnet und wird als solche
 # gemeldet.
 #
+# ## Von Hand zu pflegen ist sie nicht
+#
+# Sie wird geschrieben, nicht editiert. Nach jedem Abgleich schlägt das lokale
+# Modell für nicht zugeordnete Kundschaften einen Gegenpart vor; jede Kennung wird
+# gegen den Datenraum geprüft. Was das Modell nicht entscheiden kann, steht unter
+# `offen` — und nur das erreicht einen Menschen, als Frage im Gespräch. Die
+# Antwort schreibt das Werkzeug `kundschaft_zuordnen` hierher zurück.
+#
 # ## Regeln
 #
 # * Ein Eintrag entsteht nur, wenn dieselbe Kundschaft in **mindestens zwei**
@@ -20,10 +28,12 @@
 # * Je System eine **Liste** von Kennungen, nie eine einzelne. Dieselbe Kundschaft
 #   hat regelmässig mehrere Datensätze: Gemeinde Köniz führt in Bexio zwei
 #   Direktionen, T+R steht in Pipedrive dreimal.
-# * `bestaetigt: false` heisst «von einem Modell vorgeschlagen, vom Menschen noch
-#   nicht geprüft». Solche Einträge werden verwendet, aber im Katalog gezählt.
-#   Wer einen Eintrag prüft, setzt `bestaetigt: true` — bestätigte Einträge werden
-#   nie überschrieben.
+# * `bestaetigt: true` heisst «von einem Menschen geprüft». `vorgeschlagen` nennt
+#   die einzelnen Kennungen, die eine Maschine ergänzt hat und die noch niemand
+#   geprüft hat — auch an einem sonst bestätigten Eintrag.
+# * Eine Maschine darf **hinzufügen, nie ändern oder entfernen**. Eine neue
+#   Kennung war noch nie Gegenstand einer menschlichen Entscheidung; eine
+#   bestehende zu korrigieren hiesse, ein Urteil zu überstimmen.
 # * Unsicherheit ist ein zulässiges Ergebnis. Was sich nicht eindeutig zuordnen
 #   lässt, steht unter `offen` und wird nicht geraten.
 # * Jede Kennung wird beim Laden gegen den Datenraum geprüft. Eine Kennung, die es
@@ -39,7 +49,8 @@ kundschaften:
     toggl: [58626393]
     pipedrive: [566, 736, 655]
     bestaetigt: false
-    hinweis: Pipedrive 655 trägt den englischen Namen desselben Amts
+    hinweis: >-
+      Pipedrive 655 trägt den englischen Namen desselben Amts
 
   - schluessel: agg
     name: Amt für Grundstücke und Gebäude (AGG)
@@ -48,11 +59,12 @@ kundschaften:
     pipedrive: [568, 495]
     bestaetigt: true
     hinweis: >-
-      Bexio führt zwei Kontakte. Die Rechnungen laufen alle über 114; 148 hat null
-      Rechnungen und ist die Falle: ein Agent findet dort das Kürzel «AGG», nimmt
-      die Kennung und erhält einen sauber aussehenden Join über null Franken.
-      Pipedrive 495 ist die Bau- und Verkehrsdirektion (BVD), die übergeordnete
-      Direktion des AGG — in Bexio steht sie im Kundennamen selbst.
+      Bexio führt zwei Kontakte. Die Rechnungen laufen alle über 114; 148 hat
+      null Rechnungen und ist die Falle: ein Agent findet dort das Kürzel «AGG»,
+      nimmt die Kennung und erhält einen sauber aussehenden Join über null
+      Franken. Pipedrive 495 ist die Bau- und Verkehrsdirektion (BVD), die
+      übergeordnete Direktion des AGG — in Bexio steht sie im Kundennamen
+      selbst.
 
   - schluessel: stadt-luzern
     name: Stadt Luzern
@@ -68,8 +80,8 @@ kundschaften:
     bestaetigt: true
     hinweis: >-
       Der Toggl-Kunde heisst «WA-AUE», weil das Amt für Umwelt und Energie die
-      inhaltliche Kontrolle hatte. Die Rechnung ging an die Wyss Academy, deshalb
-      zählt der Aufwand hierher und nicht zu «aue».
+      inhaltliche Kontrolle hatte. Die Rechnung ging an die Wyss Academy,
+      deshalb zählt der Aufwand hierher und nicht zu «aue».
 
   - schluessel: be-advanced
     name: be-advanced AG
@@ -79,11 +91,12 @@ kundschaften:
     bestaetigt: false
 
   - schluessel: swiss-bankers
-    name: Swiss Bankers Prepaid Services AG
+    name: Finanzidustrie
     bexio: [175]
     toggl: [68433892]
-    pipedrive: [756, 767]
+    pipedrive: [756, 767, 490]
     bestaetigt: false
+    vorgeschlagen: ['pipedrive:490']
 
   - schluessel: mobiliar
     name: Schweizerische Mobiliar Versicherungsgesellschaft AG
@@ -154,7 +167,8 @@ kundschaften:
     toggl: [67591979]
     pipedrive: [753, 750, 632]
     bestaetigt: false
-    hinweis: T+R steht in Pipedrive dreimal — dieselbe Firma, drei Datensätze
+    hinweis: >-
+      T+R steht in Pipedrive dreimal — dieselbe Firma, drei Datensätze
 
   - schluessel: gemeinde-koeniz
     name: Gemeinde Köniz
@@ -163,9 +177,9 @@ kundschaften:
     pipedrive: [572, 707]
     bestaetigt: false
     hinweis: >-
-      Bexio führt zwei Direktionen (Präsidiales und Finanzen, Planung und Verkehr).
-      Der Schlüssel fasst sie zur Gemeinde zusammen; wer die Direktionen getrennt
-      braucht, nimmt bexio_rechnungen.kunden_id.
+      Bexio führt zwei Direktionen (Präsidiales und Finanzen, Planung und
+      Verkehr). Der Schlüssel fasst sie zur Gemeinde zusammen; wer die
+      Direktionen getrennt braucht, nimmt bexio_rechnungen.kunden_id.
 
   - schluessel: artiset
     name: ARTISET
@@ -266,8 +280,8 @@ kundschaften:
     pipedrive: [359, 659]
     bestaetigt: false
     hinweis: >-
-      Bexio führt zwei Stellen (SUE sowie Präsidialdirektion). Der Schlüssel fasst
-      sie zur Stadt zusammen.
+      Bexio führt zwei Stellen (SUE sowie Präsidialdirektion). Der Schlüssel
+      fasst sie zur Stadt zusammen.
 
   - schluessel: overpar
     name: Overpar Solutions AG
@@ -311,21 +325,57 @@ kundschaften:
       Die eigene Firma, keine Kundschaft. In Toggl stehen darunter 670 Stunden
       interne, nicht verrechenbare Arbeit.
 
-# Was sich nicht eindeutig zuordnen liess. Wird NICHT geraten und NICHT verwendet;
-# der Katalog nennt diese Fälle, damit die Lücke sichtbar bleibt statt still zu sein.
+# Was sich nicht eindeutig zuordnen laesst. Wird nicht geraten --
+# hier steht die Frage, bis ein Mensch sie beantwortet.
 offen:
   - system: pipedrive
     kennung: 652
     name: Kanton Bern
     frage: >-
       155'000 CHF gewonnen unter dem Dach «Kanton Bern». Welches Amt hat den
-      Auftrag tatsächlich vergeben? Solange das offen ist, darf der Betrag keiner
-      Kundschaft zugerechnet werden.
+      Auftrag tatsächlich vergeben? Solange das offen ist, darf der Betrag
+      keiner Kundschaft zugerechnet werden.
 
   - system: pipedrive
     kennung: 724
     name: Bildung und Kultur im Kanton Bern
     frage: >-
-      191'720 CHF gewonnen. Die Bildungs- und Kulturdirektion ist die vorgesetzte
-      Stelle des Mittelschul- und Berufsbildungsamts. Derselbe Auftraggeber wie
-      «mba» oder eine eigene Kundschaft?
+      191'720 CHF gewonnen. Die Bildungs- und Kulturdirektion ist die
+      vorgesetzte Stelle des Mittelschul- und Berufsbildungsamts. Derselbe
+      Auftraggeber wie «mba» oder eine eigene Kundschaft?
+
+  - system: pipedrive
+    kennung: 552
+    name: Beyond Civic
+    frage: >-
+      Kannst du mir die passende Kennung aus Bexio oder Toggl nennen, oder
+      handelt es sich um einen neuen Kunden ohne Alias in den anderen Systemen?
+
+  - system: bexio
+    kennung: 96
+    name: Schlossberg Thun AG
+    frage: >-
+      Gehört 'Schlossberg Thun AG' zu einem der bereits bekannten Schlüssel
+      (z.B. stadt-thun) oder ist es ein neuer Kunde? Bitte nennen Sie die
+      passende Toggl- oder Pipedrive-Kennung, falls bekannt.
+
+  - system: bexio
+    kennung: 108
+    name: Zentrum Xung macht Yung
+    frage: >-
+      Gehört 'Zentrum Xung macht Yung' zu einem der bekannten Partner (z.B.
+      Stadt Bern) oder ist es ein neuer, unabhängiger Kunde?
+
+  - system: bexio
+    kennung: 138
+    name: decidim.swiss
+    frage: >-
+      Handelt es sich bei «decidim.swiss» um die Firma Beyond Civic GmbH
+      (Pipedrive ID 552) oder um ein eigenes Kundenkonto/Projekt?
+
+  - system: pipedrive
+    kennung: 667
+    name: Sourcing Partner
+    frage: >-
+      Handelt es sich bei 'Sourcing Partner' um einen neuen Kunden oder gehört
+      er zu einer der bereits bekannten Kundschaften? Bitte um kurze Klärung.

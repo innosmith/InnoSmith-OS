@@ -704,6 +704,24 @@ def _zeilen_lesen(name: str, spalten: tuple[str, ...]) -> list[dict]:
         return []
 
 
+async def _kundschaften_vorschlagen() -> None:
+    """Neue Kundschaften zuordnen lassen, bevor die Tabelle geschrieben wird.
+
+    Läuft vor ``kundenschluessel_schreiben``, damit ein angenommener Vorschlag
+    noch in denselben Abgleich einfliesst statt erst eine Stunde später zu wirken.
+
+    Best-effort und bewusst still: ein nicht erreichbares Modell ist kein Grund,
+    einen Abgleich scheitern zu lassen. Der Schlüssel bleibt dann so gut, wie er
+    schon war -- die Lücke steht ohnehin im Katalog.
+    """
+    from app.services import kundenschluessel as ks
+
+    try:
+        await ks.vorschlagen()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Datenraum: Kundschaften nicht vorschlagbar: %s", exc)
+
+
 def kundenschluessel_schreiben(katalog: dict) -> None:
     """Die gepflegte Kundenzuordnung als Tabelle ablegen und ihre Lücken melden.
 
@@ -792,6 +810,7 @@ async def abgleichen(quellen: list[str] | None = None) -> dict:
             for name in namen:
                 await quelle_abgleichen(name, settings, katalog)
 
+            await _kundschaften_vorschlagen()
             kundenschluessel_schreiben(katalog)
             katalog["stand"] = datetime.now(timezone.utc).isoformat()
             katalog["verzeichnis_in_der_sandbox"] = "/daten"

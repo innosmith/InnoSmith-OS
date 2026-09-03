@@ -127,11 +127,53 @@ wird nicht gelesen — und wirkt damit wie gar keine. Mit ihr sind es 17, und di
 sind einzeln prüfbar.
 
 Was sich nicht eindeutig zuordnen liess, steht unter `offen` und wird **nicht
-geraten**: der Toggl-Kunde `WA-AUE` etwa, dessen einziges Projekt zur Wyss Academy
-oder zum Amt für Umwelt und Energie gehören kann, und die CRM-Organisation
-`Kanton Bern` mit 155'000 CHF gewonnenen Aufträgen, hinter der ein Amt steht, das
-niemand benannt hat. Unsicherheit ist ein zulässiges Ergebnis; ein geratener
-Schlüssel wäre ein Fehler mit Zinseszins.
+geraten**: die CRM-Organisation `Kanton Bern` etwa, mit 155'000 CHF gewonnenen
+Aufträgen, hinter der ein Amt steht, das niemand benannt hat. Unsicherheit ist ein
+zulässiges Ergebnis; ein geratener Schlüssel wäre ein Fehler mit Zinseszins.
+
+Der Toggl-Kunde `WA-AUE` stand ebenfalls dort und ist inzwischen beantwortet: das
+Kürzel trägt den Namen des Amts für Umwelt und Energie, weil dieses die inhaltliche
+Kontrolle hatte — die Rechnung ging an die Wyss Academy, also zählt der Aufwand
+dorthin. Genau diese Art Wissen steht in keinem der drei Systeme.
+
+### Die Datei ist der Prüfpfad, nicht die Bedienoberfläche
+
+Die erste Fassung verlangte, 40 Einträge von Hand zu bestätigen. Das war die
+falsche Zumutung, und die Zahlen zeigen warum: seit 2023 kamen 5, 1, 1 und 5 neue
+Rechnungskunden pro Jahr dazu, und nur ein Bruchteil davon heisst in zwei Systemen
+verschieden. Für zwei bis vier Änderungen im Jahr einen Menschen YAML editieren zu
+lassen, heisst eine Pflege einzurichten, die verfällt.
+
+Seither führen drei Wege in die Datei, und nur der letzte kostet Aufmerksamkeit:
+
+| Weg | Wer | Ergebnis |
+|---|---|---|
+| `vorschlagen()` nach jedem Abgleich | lokales Modell | Kennung unter `vorgeschlagen`, gilt als ungeprüft |
+| Werkzeug `kundschaft_zuordnen` | Mensch, im Gespräch | `bestaetigt: true` |
+| `frage_notieren()` | Modell, wenn unsicher | Eintrag unter `offen` |
+
+Die tragende Grenze verläuft zwischen den ersten beiden: **eine Maschine darf
+hinzufügen, nie ändern oder entfernen.** Eine neue Kennung war noch nie Gegenstand
+einer menschlichen Entscheidung — sie zu ergänzen überschreibt nichts. Eine
+bestehende zu korrigieren hiesse, ein Urteil zu überstimmen.
+
+Daraus folgt, dass `bestaetigt` am Eintrag nicht genügt. Ergänzt eine Maschine
+eine Kennung an einem geprüften Eintrag, gäbe es ohne ein zweites Feld nur zwei
+hässliche Möglichkeiten: die Ergänzung gilt still als bestätigt (ein Urteil, das
+niemand gefällt hat), oder der ganze Eintrag verliert seine Bestätigung (ein
+Urteil, das jemand gefällt hat, wird zurückgenommen). Deshalb nennt
+`vorgeschlagen` die einzelnen Kennungen, und `aufbauen` setzt genau für diese
+Zeilen `bestaetigt = false`.
+
+Beim ersten Lauf gegen die echten Daten schlug das Modell **eine** Zuordnung vor —
+Pipedrive 490 heisst wörtlich «Finanzidustrie» wie der Eintrag, den es traf — und
+stellte für den Rest sieben Fragen. Das ist das erwünschte Verhältnis: es ordnet
+zu, wo der Name es hergibt, und fragt, wo er es nicht hergibt.
+
+Die Fragen erreichen den Menschen im Katalog, und zwar **im Wortlaut**. Der erste
+Entwurf schrieb dort nur ein Etikett («pipedrive 652 (Kanton Bern)») — damit wäre
+die Frage im Katalog liegengeblieben und hätte nie jemanden erreicht. Eine Frage,
+die niemand hört, ist so gut wie keine.
 
 ### Die zweite Hälfte desselben Fehlers
 

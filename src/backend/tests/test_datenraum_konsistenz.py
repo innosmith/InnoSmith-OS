@@ -57,7 +57,8 @@ class TestWerkzeugnamen:
 
     def test_datenraum_werkzeuge_existieren(self):
         namen = _werkzeugnamen(os.path.join(SRC, "mcp-datenraum", "server.py"))
-        assert namen == {"datenraum_katalog", "datenraum_auffrischen"}
+        assert namen == {"datenraum_katalog", "datenraum_auffrischen",
+                         "kundschaft_zuordnen"}
 
     def test_beschreibungen_nennen_nur_echte_bexio_werkzeuge(self):
         from app.routers.chat import MCP_SERVER_DESCRIPTIONS
@@ -602,3 +603,242 @@ class TestSandboxWeissVomDatenraum:
             quelle = f.read()
         assert '"-v", f"{DATENRAUM_DIR}:/daten:ro"' in quelle
         assert "CONV_TTL_SECONDS" in quelle, "persistente Scopes brauchen eine Frist"
+
+
+class TestPflegeOhneEditor:
+    """Der Schlüssel muss sich selbst pflegen, sonst verfällt er.
+
+    Gemessen kamen seit 2023 fünf, ein, ein und fünf neue Rechnungskunden pro
+    Jahr dazu. Für so wenig jemanden YAML editieren zu lassen ist die falsche
+    Zumutung -- und eine Pflege, die als lästig empfunden wird, unterbleibt.
+    Geprüft wird deshalb, dass die drei Wege in die Datei halten, was sie
+    versprechen: schreiben ohne Verlust, hinzufügen ohne Überstimmen, und
+    Unsicherheit als Frage statt als Rateschluss.
+    """
+
+    @pytest.fixture
+    def bestand(self):
+        """Ein kleiner, künstlicher Datenbestand -- unabhängig vom echten Datenraum."""
+        return {
+            "bexio_kontakte": [{"kunden_id": 1, "name": "Beispiel AG"},
+                               {"kunden_id": 2, "name": "Zweite AG"}],
+            "bexio_rechnungen": [{"kunden_id": 1, "ist_umsatz": True},
+                                 {"kunden_id": 2, "ist_umsatz": True}],
+            "toggl_zeiteintraege": [{"kunden_id": 90, "kunde": "BSP"}],
+            "pipedrive_deals": [{"organisation_id": 7, "organisation": "Beispiel", "status": "won"}],
+        }
+
+    @pytest.fixture
+    def datei(self, tmp_path):
+        pfad = tmp_path / "kundenschluessel.yaml"
+        pfad.write_text(
+            "version: 1\nstand: 2026-09-03\nkundschaften:\n"
+            "  - schluessel: bsp\n    name: Beispiel AG\n    bexio: [1]\n"
+            "    toggl: [90]\n    bestaetigt: true\noffen: []\n",
+            encoding="utf-8",
+        )
+        return pfad
+
+    def test_die_datei_uebersteht_das_neuschreiben(self):
+        """Sie wird maschinell neu geschrieben. Ginge dabei etwas verloren, wäre
+        der Prüfpfad nach der ersten Ergänzung wertlos."""
+        import yaml
+        from app.services.kundenschluessel import DATEI, _ausgeben, _datei_lesen
+
+        if not DATEI.exists():
+            pytest.skip("docs/kundenschluessel.yaml fehlt")
+
+        vorher = _datei_lesen()
+        nachher = yaml.safe_load(_ausgeben(vorher))
+
+        def ohne_leere(eintraege):
+            return sorted(
+                ({k: v for k, v in e.items() if v not in (None, [], "")} for e in eintraege),
+                key=lambda e: str(e.get("schluessel") or e.get("kennung")),
+            )
+
+        assert ohne_leere(vorher["kundschaften"]) == ohne_leere(nachher["kundschaften"])
+        assert ohne_leere(vorher.get("offen") or []) == ohne_leere(nachher.get("offen") or [])
+
+    def test_der_kopf_ueberlebt_das_neuschreiben(self):
+        """Die Begründung, warum es die Datei gibt, steht im Kopfkommentar --
+        und ``yaml.safe_dump`` hätte ihn weggeworfen."""
+        from app.services.kundenschluessel import _ausgeben
+
+        text = _ausgeben({"version": 1, "stand": "2026-09-03", "kundschaften": [], "offen": []})
+        assert text.startswith("# Kundenschlüssel")
+        assert "Von Hand zu pflegen ist sie nicht" in text
+
+    def test_eine_kennung_die_es_nicht_gibt_wird_abgelehnt(self, datei, bestand):
+        """Eine tote Verknüpfung sieht aus wie eine Zuordnung und trägt keine."""
+        from app.services.kundenschluessel import zuordnen
+
+        ergebnis = zuordnen("bsp", "bexio", 999, tabellen=bestand, pfad=datei)
+        assert ergebnis["ok"] is False
+        assert "kommt im Datenraum nicht vor" in ergebnis["grund"]
+
+    def test_eine_kennung_gehoert_nur_einer_kundschaft(self, datei, bestand):
+        """Sonst zählt jede Summe dieselbe Rechnung doppelt."""
+        from app.services.kundenschluessel import zuordnen
+
+        ergebnis = zuordnen("andere", "bexio", 1, tabellen=bestand, pfad=datei)
+        assert ergebnis["ok"] is False
+        assert "gehoert bereits zu 'bsp'" in ergebnis["grund"]
+
+    def test_ein_unbekanntes_system_wird_abgelehnt(self, datei, bestand):
+        from app.services.kundenschluessel import zuordnen
+
+        assert zuordnen("bsp", "salesforce", 1, tabellen=bestand, pfad=datei)["ok"] is False
+
+    def test_eine_menschliche_antwort_gilt_als_bestaetigt(self, datei, bestand):
+        """Der Weg über das Gespräch ersetzt das Editieren -- was hier ankommt,
+        hat ein Mensch entschieden."""
+        import yaml
+        from app.services.kundenschluessel import zuordnen
+
+        ergebnis = zuordnen("bsp", "pipedrive", 7, tabellen=bestand, pfad=datei)
+        assert ergebnis["ok"] is True
+        eintrag = yaml.safe_load(datei.read_text(encoding="utf-8"))["kundschaften"][0]
+        assert eintrag["pipedrive"] == [7]
+        assert eintrag["bestaetigt"] is True
+
+    def test_eine_zuordnung_beantwortet_die_offene_frage(self, datei, bestand):
+        """Sonst stünde die Frage weiter da und würde erneut gestellt."""
+        import yaml
+        from app.services.kundenschluessel import frage_notieren, zuordnen
+
+        assert frage_notieren("pipedrive", 7, "Beispiel", "Wer ist das?", datei) is True
+        assert frage_notieren("pipedrive", 7, "Beispiel", "Wer ist das?", datei) is False, (
+            "dieselbe Frage darf nicht zweimal gestellt werden"
+        )
+        zuordnen("bsp", "pipedrive", 7, tabellen=bestand, pfad=datei)
+        assert yaml.safe_load(datei.read_text(encoding="utf-8"))["offen"] == []
+
+    def test_eine_maschinelle_ergaenzung_bestaetigt_nichts_mit(self, bestand, datei):
+        """Die tragende Grenze: hinzufügen darf eine Maschine, überstimmen nicht.
+
+        Ohne die Liste ``vorgeschlagen`` hätte eine Ergänzung nur zwei hässliche
+        Möglichkeiten -- still als bestätigt gelten, oder den ganzen Eintrag
+        entwerten. Beides wäre falsch.
+        """
+        from app.services.kundenschluessel import aufbauen
+
+        datei.write_text(
+            "version: 1\nstand: 2026-09-03\nkundschaften:\n"
+            "  - schluessel: bsp\n    name: Beispiel AG\n    bexio: [1]\n"
+            "    pipedrive: [7]\n    bestaetigt: true\n"
+            "    vorgeschlagen: ['pipedrive:7']\noffen: []\n",
+            encoding="utf-8",
+        )
+        zeilen, befund = aufbauen(bestand, datei)
+        nach_system = {z["system"]: z["bestaetigt"] for z in zeilen}
+        assert nach_system["bexio"] is True, "die geprüfte Kennung bleibt bestätigt"
+        assert nach_system["pipedrive"] is False, "die ergänzte gilt als ungeprüft"
+        assert befund["unbestaetigt"] == 1
+
+    def test_unsicherheit_wird_zur_frage_statt_zum_rateschluss(self, datei, bestand, monkeypatch):
+        """Eine falsche Zuordnung bleibt unbemerkt und verfälscht danach jede
+        Zahl dieser Kundschaft. Deshalb ist «weiss nicht» ein zulässiges
+        Ergebnis -- und das einzige, das den Menschen erreicht."""
+        import asyncio
+
+        import yaml
+
+        from app.services import kundenschluessel as ks
+
+        async def unsicher(auftrag, frage):
+            return {"sicher": False, "frage": "Gehört BSP zur Beispiel AG?"}
+
+        monkeypatch.setattr(ks, "_fragen", unsicher)
+        befund = asyncio.run(ks.vorschlagen(bestand, datei))
+
+        # Zwei Lücken im Bestand: Bexio 2 und Pipedrive 7. Beide werden zur Frage,
+        # keine zur Zuordnung.
+        assert befund["gefragt"] == 2
+        assert befund["ergaenzt"] == 0
+        offen = yaml.safe_load(datei.read_text(encoding="utf-8"))["offen"]
+        assert {(f["system"], f["kennung"]) for f in offen} == {("bexio", 2), ("pipedrive", 7)}
+        assert all(f["frage"] == "Gehört BSP zur Beispiel AG?" for f in offen)
+
+    def test_ein_vorschlag_mit_erfundener_kennung_wird_verworfen(self, datei, bestand, monkeypatch):
+        """Dieselbe Prüfung wie bei einer menschlichen Eingabe -- der einzige
+        Unterschied ist das Prüfkennzeichen."""
+        import asyncio
+
+        import yaml
+
+        from app.services import kundenschluessel as ks
+
+        async def erfindet(auftrag, frage):
+            return {"sicher": True, "schluessel": "neu", "name": "Erfunden",
+                    "kandidaten": [{"system": "bexio", "kennung": 4242}]}
+
+        monkeypatch.setattr(ks, "_fragen", erfindet)
+        asyncio.run(ks.vorschlagen(bestand, datei))
+
+        inhalt = yaml.safe_load(datei.read_text(encoding="utf-8"))
+        neu = [e for e in inhalt["kundschaften"] if e["schluessel"] == "neu"]
+        assert not neu or 4242 not in (neu[0].get("bexio") or []), (
+            "eine erfundene Kennung darf nie in die Datei"
+        )
+
+    def test_ein_angenommener_vorschlag_bleibt_ungeprueft(self, datei, bestand, monkeypatch):
+        """Er wirkt sofort, zählt aber als unbestätigt -- sonst wäre nicht mehr
+        unterscheidbar, was ein Mensch entschieden hat."""
+        import asyncio
+
+        import yaml
+
+        from app.services import kundenschluessel as ks
+
+        async def ordnet_zu(auftrag, frage):
+            return {"sicher": True, "schluessel": "bsp"}
+
+        monkeypatch.setattr(ks, "_fragen", ordnet_zu)
+        befund = asyncio.run(ks.vorschlagen(bestand, datei))
+
+        assert befund["ergaenzt"] >= 1
+        eintrag = yaml.safe_load(datei.read_text(encoding="utf-8"))["kundschaften"][0]
+        assert eintrag["bestaetigt"] is True, "der geprüfte Teil bleibt geprüft"
+        assert "pipedrive:7" in eintrag["vorgeschlagen"]
+
+    def test_ein_ausfall_des_modells_reisst_den_abgleich_nicht(self, datei, bestand, monkeypatch):
+        """Ein nicht erreichbares Modell ist kein Grund, einen Abgleich zu
+        verlieren. Die Lücke steht ohnehin im Katalog."""
+        import asyncio
+
+        from app.services import kundenschluessel as ks
+
+        async def faellt_aus(auftrag, frage):
+            return {}
+
+        monkeypatch.setattr(ks, "_fragen", faellt_aus)
+        befund = asyncio.run(ks.vorschlagen(bestand, datei))
+        assert befund["ergaenzt"] == 0 and befund["gefragt"] == 0
+
+
+class TestDasWerkzeugFuerDieAntwort:
+    """Die Antwort fällt im Gespräch, nicht im Editor."""
+
+    def test_der_datenraum_server_kennt_das_werkzeug(self):
+        with open(os.path.join(SRC, "mcp-datenraum", "server.py"), encoding="utf-8") as f:
+            quelle = f.read()
+        assert 'name="kundschaft_zuordnen"' in quelle
+        assert 'if name == "kundschaft_zuordnen":' in quelle
+
+    def test_es_verbietet_dem_agenten_das_raten(self):
+        """Ein Werkzeug, das schreibt, ohne dass jemand gefragt hat, wäre genau
+        die Laufzeitheuristik, die der Schlüssel ersetzen soll."""
+        with open(os.path.join(SRC, "mcp-datenraum", "server.py"), encoding="utf-8") as f:
+            quelle = f.read()
+        anfang = quelle.index('name="kundschaft_zuordnen"')
+        beschreibung = quelle[anfang:anfang + 2000]
+        assert "Selbst raten" in beschreibung and "verboten" in beschreibung
+
+    def test_die_tabelle_wird_sofort_neu_geschrieben(self):
+        """Sonst bekäme die nächste Frage noch die alte Antwort -- und die
+        Eintragung sähe wie ein Fehlschlag aus."""
+        with open(os.path.join(SRC, "mcp-datenraum", "server.py"), encoding="utf-8") as f:
+            quelle = f.read()
+        anfang = quelle.index('if name == "kundschaft_zuordnen":')
+        assert "kundenschluessel_schreiben" in quelle[anfang:]

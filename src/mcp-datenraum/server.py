@@ -64,6 +64,51 @@ TOOLS = [
             "required": ["quelle"],
         },
     ),
+    Tool(
+        name="kundschaft_zuordnen",
+        description=(
+            "Hält fest, dass eine Kennung aus Bexio, Toggl oder Pipedrive zu einer "
+            "bestimmten Kundschaft gehört. Nötig, weil dieselbe Organisation in den "
+            "drei Systemen verschieden heisst: «AGG» in Toggl ist in Bexio die "
+            "«Bau- und Verkehrsdirektion des Kantons Bern (BVD) Amt für Grundstücke "
+            "und Gebäude».\n\n"
+            "NUR aufrufen, wenn der Mensch die Zugehörigkeit im Gespräch geklärt hat "
+            "— was hier eingetragen wird, gilt als von ihm bestätigt. Selbst raten "
+            "ist verboten: eine falsche Zuordnung bleibt unbemerkt und verfälscht "
+            "danach jede Umsatzzahl dieser Kundschaft.\n\n"
+            "Die offenen Fragen stehen im Katalog unter quellen.kundenschluessel. "
+            "Kommt eine davon zur Sprache, hier die Antwort eintragen.\n\n"
+            "Beispiel: {\"schluessel\": \"wyss-academy\", \"system\": \"toggl\", "
+            "\"kennung\": \"57555015\"}"
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "schluessel": {
+                    "type": "string",
+                    "description": (
+                        "Kurzname der Kundschaft, klein und ohne Umlaute, z.B. 'agg'. "
+                        "Ein bestehender verbindet mit den schon zugeordneten Kennungen, "
+                        "ein neuer legt eine Kundschaft an."
+                    ),
+                },
+                "system": {"type": "string", "enum": ["bexio", "toggl", "pipedrive"]},
+                "kennung": {
+                    "type": "string",
+                    "description": "Die Kennung in diesem System (kunden_id bzw. organisation_id)",
+                },
+                "name": {
+                    "type": "string",
+                    "description": "Anzeigename der Kundschaft; nur bei einer neuen nötig",
+                },
+                "hinweis": {
+                    "type": "string",
+                    "description": "Was den Fall erklärt, falls er nicht offensichtlich ist",
+                },
+            },
+            "required": ["schluessel", "system", "kennung"],
+        },
+    ),
 ]
 
 server = Server("datenraum")
@@ -647,6 +692,45 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 for q in betroffen
             },
         })
+
+    if name == "kundschaft_zuordnen":
+        from app.services import datenraum as dr
+        from app.services import kundenschluessel as ks
+
+        argumente = arguments or {}
+        fehlend = [f for f in ("schluessel", "system", "kennung") if not argumente.get(f)]
+        if fehlend:
+            return _antwort({"fehler": f"Fehlende Angaben: {', '.join(fehlend)}"})
+
+        ergebnis = await asyncio.to_thread(
+            ks.zuordnen,
+            str(argumente["schluessel"]).strip().lower(),
+            str(argumente["system"]).strip().lower(),
+            argumente["kennung"],
+            name=argumente.get("name"),
+            hinweis=argumente.get("hinweis"),
+        )
+        if not ergebnis.get("ok"):
+            return _antwort(ergebnis)
+
+        # Sofort wirksam machen. Bis zum stündlichen Abgleich zu warten hiesse,
+        # dass die nächste Frage nach derselben Kundschaft noch die alte Antwort
+        # bekommt -- und dann sieht die Eintragung wie ein Fehlschlag aus.
+        def _tabelle_neu() -> None:
+            with dr._dateisperre():
+                katalog = dr.katalog_lesen()
+                dr.kundenschluessel_schreiben(katalog)
+                dr.katalog_schreiben(katalog)
+
+        try:
+            await asyncio.to_thread(_tabelle_neu)
+        except Exception as exc:  # noqa: BLE001 -- der Eintrag steht, das zählt
+            logger.warning("Kundenschlüssel-Tabelle nicht neu geschrieben: %s", exc)
+            ergebnis["hinweis"] = (
+                "Eingetragen, aber die Tabelle konnte nicht sofort neu geschrieben "
+                "werden -- sie zieht beim nächsten Abgleich nach."
+            )
+        return _antwort(ergebnis)
 
     return _antwort({"fehler": f"Unbekanntes Werkzeug: {name}"})
 

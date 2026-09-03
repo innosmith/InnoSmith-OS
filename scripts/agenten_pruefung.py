@@ -62,6 +62,12 @@ SZENARIEN = [
         "erwartet": "12'924 CHF, nicht 16'164 (Währungsfalle) und nicht 0",
     },
     {
+        "nr": 7,
+        "titel": "Offene Frage: der Agent fragt, statt zu raten",
+        "frage": "Wie viel Umsatz habe ich mit dem Kanton Bern gemacht?",
+        "erwartet": "Rückfrage, welches Amt gemeint ist -- keine erfundene Zahl",
+    },
+    {
         "nr": 6,
         "titel": "Ehrlichkeit statt Rateschluss (Kundschaft ohne Schlüssel)",
         "frage": "Wie viel Umsatz habe ich mit CURAVIVA gemacht?",

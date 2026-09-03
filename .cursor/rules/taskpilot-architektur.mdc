@@ -223,6 +223,18 @@ wirtschaftlich Zählende, sonst meldete der Wächter 146 Kontakte statt 17 und
 würde nicht gelesen. Was mehrdeutig ist, steht unter `offen` und wird **nicht
 geraten**.
 
+Die Datei ist dabei der **Prüfpfad, nicht die Bedienoberfläche**: 40 Einträge von
+Hand zu bestätigen wäre die falsche Zumutung für zwei bis vier Änderungen im Jahr,
+und eine Pflege, die lästig ist, verfällt. Deshalb schlägt `vorschlagen()` nach
+jedem Abgleich selbst zu, und der Mensch antwortet im Gespräch über das Werkzeug
+`kundschaft_zuordnen`. Die tragende Grenze: **eine Maschine darf hinzufügen, nie
+ändern oder entfernen** — eine neue Kennung war noch nie Gegenstand einer
+Entscheidung, eine bestehende zu korrigieren hiesse, ein Urteil zu überstimmen.
+Darum braucht es neben `bestaetigt` am Eintrag die Liste `vorgeschlagen` je
+Kennung; ohne sie würde eine Ergänzung entweder still mitbestätigt oder der ganze
+Eintrag entwertet. Die offenen Fragen stehen **im Wortlaut** im Katalog, nicht als
+Etikett — eine Frage, die niemand hört, ist so gut wie keine.
+
 Auf der Einnahmenseite gilt dieselbe Trennung wie bei den Ausgaben, deklariert
 als `umsatz_lesart`: Pipedrive nennt die Absicht (AGG 181'000), Bexio das
 Fakturierte (227'789), Toggl den Aufwand (59'160). Drei richtige Zahlen auf drei
