@@ -45,12 +45,14 @@ kundschaften:
     name: Amt für Grundstücke und Gebäude (AGG)
     bexio: [114, 148]
     toggl: [57641058]
-    pipedrive: [568]
-    bestaetigt: false
+    pipedrive: [568, 495]
+    bestaetigt: true
     hinweis: >-
       Bexio führt zwei Kontakte. Die Rechnungen laufen alle über 114; 148 hat null
       Rechnungen und ist die Falle: ein Agent findet dort das Kürzel «AGG», nimmt
       die Kennung und erhält einen sauber aussehenden Join über null Franken.
+      Pipedrive 495 ist die Bau- und Verkehrsdirektion (BVD), die übergeordnete
+      Direktion des AGG — in Bexio steht sie im Kundennamen selbst.
 
   - schluessel: stadt-luzern
     name: Stadt Luzern
@@ -61,8 +63,13 @@ kundschaften:
   - schluessel: wyss-academy
     name: Wyss Academy for Nature
     bexio: [121]
+    toggl: [57555015]
     pipedrive: [571]
-    bestaetigt: false
+    bestaetigt: true
+    hinweis: >-
+      Der Toggl-Kunde heisst «WA-AUE», weil das Amt für Umwelt und Energie die
+      inhaltliche Kontrolle hatte. Die Rechnung ging an die Wyss Academy, deshalb
+      zählt der Aufwand hierher und nicht zu «aue».
 
   - schluessel: be-advanced
     name: be-advanced AG
@@ -307,14 +314,6 @@ kundschaften:
 # Was sich nicht eindeutig zuordnen liess. Wird NICHT geraten und NICHT verwendet;
 # der Katalog nennt diese Fälle, damit die Lücke sichtbar bleibt statt still zu sein.
 offen:
-  - system: toggl
-    kennung: 57555015
-    name: WA-AUE
-    frage: >-
-      Einziges Projekt «MS4 Kontinuierliche Unterstützung», 184 Stunden von
-      September 2024 bis Dezember 2025. Gehört das zur Wyss Academy, zum Amt für
-      Umwelt und Energie, oder ist es ein gemeinsames Vorhaben beider?
-
   - system: pipedrive
     kennung: 652
     name: Kanton Bern
@@ -330,11 +329,3 @@ offen:
       191'720 CHF gewonnen. Die Bildungs- und Kulturdirektion ist die vorgesetzte
       Stelle des Mittelschul- und Berufsbildungsamts. Derselbe Auftraggeber wie
       «mba» oder eine eigene Kundschaft?
-
-  - system: pipedrive
-    kennung: 495
-    name: Bau- und Verkehrsdirektion des Kantons Bern
-    frage: >-
-      Die vorgesetzte Direktion des AGG. In Bexio heisst der Kunde «Bau- und
-      Verkehrsdirektion ... Amt für Grundstücke und Gebäude» — gehört diese
-      Pipedrive-Organisation zu «agg» oder ist sie eine eigene Kundschaft?
