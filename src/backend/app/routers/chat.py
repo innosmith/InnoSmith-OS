@@ -1164,7 +1164,10 @@ MCP_SERVER_DESCRIPTIONS: dict[str, dict[str, str]] = {
             "Ausgewertet wird danach mit execute_code über /daten/<tabelle>.parquet. "
             "Für AUSGABEN und Kosten ist bexio_journal zuständig (WHERE ist_aufwand, "
             "gruppiert nach soll_konto), nicht bexio_kreditoren — letztere enthält nur "
-            "die als Lieferantenrechnung erfassten rund 20 Prozent."
+            "die als Lieferantenrechnung erfassten rund 20 Prozent. "
+            "Für eine BESTIMMTE Kundschaft immer über kundenschluessel verbinden statt "
+            "über den Namen zu filtern — Kürzel wie AGG oder MBA kommen in der "
+            "Buchhaltung nicht vor und ergeben lautlos 0 CHF."
         ),
     },
     "sandbox": {
@@ -1321,8 +1324,11 @@ Nutze deine Tools aktiv. Behaupte niemals, du hättest keinen Zugriff.
 - Bei Fragen zu Firmendaten: Sofort passende Tools aufrufen
 - Dateien: search_files → download_file
 - ZAHLEN AUS FACHSYSTEMEN (Umsatz, Ausgaben, offene Posten, Kunden, Stunden, Projekte, Deals): Immer über den Datenraum. Er spiegelt die Buchhaltung, die Belegauswertung, Toggl und Pipedrive lokal als Tabellen. Zuerst `datenraum_katalog()`, dann EIN `execute_code` mit duckdb über `/daten/<tabelle>.parquet`. Das ist vollständig und in einer Runde erledigt — Einzelabfragen der Fachsysteme liefern nur die erste Seite und brauchen ein Dutzend Runden.
-  Beispiel: `duckdb.sql("SELECT kunde, sum(netto) AS umsatz FROM '/daten/bexio_rechnungen.parquet' WHERE ist_umsatz AND kunde ILIKE '%GSW%' GROUP BY kunde")`
-  Unscharfe Namen mit ILIKE über die echten Daten auflösen, nicht raten und nicht vorher `search_contact` aufrufen. Den Stand aus dem Katalog in der Antwort nennen. Nie ganze Tabellen ausgeben — nur das Ergebnis.
+  Den Stand aus dem Katalog in der Antwort nennen. Nie ganze Tabellen ausgeben — nur das Ergebnis.
+- EINE BESTIMMTE KUNDSCHAFT (Kürzel wie AGG, MBA, BFH, GSW): NIE mit ILIKE auf den Kundennamen filtern. Die drei Systeme benennen dieselbe Kundschaft verschieden — „AGG" heisst in der Buchhaltung „Bau- und Verkehrsdirektion des Kantons Bern (BVD) Amt für Grundstücke und Gebäude". Eine Namenssuche findet dort NULL Zeilen und meldet keinen Fehler, sondern 0 CHF. Immer über `/daten/kundenschluessel.parquet` gehen:
+  `duckdb.sql("SELECT k.name, count(*) AS rechnungen, round(sum(r.netto),2) AS netto FROM '/daten/bexio_rechnungen.parquet' r JOIN '/daten/kundenschluessel.parquet' k ON k.system='bexio' AND k.fremd_id=r.kunden_id WHERE r.ist_umsatz AND k.schluessel='agg' GROUP BY 1")`
+  Den Schlüssel zuerst nachschlagen (`SELECT DISTINCT schluessel, name, fremd_name FROM '/daten/kundenschluessel.parquet' WHERE fremd_name ILIKE '%AGG%' OR name ILIKE '%AGG%'`). Findet er die Kundschaft nicht, ist genau das zu sagen — nicht auf einen Namensvergleich ausweichen. Der Katalog erklärt es unter `umsatz_lesart`.
+- UMSATZ ist, was fakturiert wurde: `bexio_rechnungen` mit `WHERE ist_umsatz`. Ein gewonnener Pipedrive-Deal ist eine Absicht, erfasste Toggl-Zeit ist Aufwand. Für AGG stehen 181'000 (CRM), 227'789 (Buchhaltung) und 59'160 (Zeit) nebeneinander — drei richtige Zahlen auf drei Fragen. Nie über zwei davon summieren.
 - AUSGABEN und KOSTEN: `/daten/bexio_journal.parquet` mit `WHERE ist_aufwand`, gruppiert nach `soll_konto`. Das ist das vollständige Bild. `bexio_kreditoren` enthält nur die als Lieferantenrechnung erfassten rund 20 Prozent — mit Karte bezahlte Abos fehlen dort und stehen im Journal gegen Konto 2120. Der Katalog erklärt das unter `ausgaben_lesart`.
 - JAHRESVERGLEICHE: vorher `/daten/bexio_geschaeftsjahre.parquet` prüfen. Ein laufendes Jahr (`ist_abgeschlossen = false`) ist ein Teiljahr; es gegen ein volles Jahr zu stellen zeigt einen Einbruch, wo bloss Monate fehlen. Das gehört in die Antwort.
 - Buchhaltung im Einzelfall (eine bestimmte Rechnung, ein Konto, das Journal): get_invoice, get_journal, list_accounts, search_invoices

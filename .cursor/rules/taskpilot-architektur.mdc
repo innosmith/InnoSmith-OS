@@ -201,6 +201,44 @@ Fragen, die tatsächlich gestellt werden: eine lauffähige Abfrage abzuwandeln
 gelingt einem lokalen Modell zuverlässig, eine aus einer Beschreibung zu bauen
 nicht.
 
+Die teuerste Falle betrifft am Ende keine Spalte, sondern einen **Namen**. Die
+drei Systeme benennen dieselbe Kundschaft verschieden, und über den Namen finden
+nur 8 von 16 Toggl-Kunden ihr Gegenstück in Bexio — es gelingt bei kurzen
+Firmennamen und scheitert bei Kürzeln, also ausgerechnet bei den grössten Kunden.
+`%AGG%` ergibt in `bexio_rechnungen` **null** Zeilen; der Kunde heisst dort «Bau-
+und Verkehrsdirektion des Kantons Bern (BVD) Amt für Grundstücke und Gebäude» und
+hat 227'789 CHF. Schlimmer ist der Beinahe-Treffer: Bexio führt einen zweiten
+AGG-Kontakt ohne Rechnungen, und wer über dessen `kunden_id` verknüpft, hat alles
+richtig gemacht und bekommt 0 CHF.
+
+Eine Ähnlichkeitssuche verschiebt das nur — `LIKE '%agg%'` trifft auch «Jaggi
+Lorenz». Die Menge der Benennungen ist offen, also ist die Zuordnung ein
+**Stammdatum**: `docs/kundenschluessel.yaml`, vom Modell einmal vorgeschlagen,
+vom Menschen bestätigt, versioniert; der Worker macht daraus die Tabelle
+`kundenschluessel` (lang statt breit, damit der Join eine gewöhnliche Verknüpfung
+bleibt). Dagegen, dass die Pflege verfällt, stehen zwei Wächter: **jede Kennung
+wird gegen den Bestand geprüft** (eine tote Verknüpfung sieht aus wie eine
+Zuordnung und trägt keine), und **was fehlt, wird benannt** — beschränkt auf das
+wirtschaftlich Zählende, sonst meldete der Wächter 146 Kontakte statt 17 und
+würde nicht gelesen. Was mehrdeutig ist, steht unter `offen` und wird **nicht
+geraten**.
+
+Auf der Einnahmenseite gilt dieselbe Trennung wie bei den Ausgaben, deklariert
+als `umsatz_lesart`: Pipedrive nennt die Absicht (AGG 181'000), Bexio das
+Fakturierte (227'789), Toggl den Aufwand (59'160). Drei richtige Zahlen auf drei
+Fragen; über zwei davon zu summieren ergibt eine, die es nicht gibt. Die falschen
+600'000 entstanden aus beidem zugleich — falsche Tabelle **und** ein Filter auf
+den Freitext des Deal-Titels, wo «AGG» im Titel eines Deals der Organisation
+«Kanton Bern» steht. Darum verbietet ein Test, dass ein Rezept auf `kunde`,
+`lieferant` oder `organisation` mit `LIKE` filtert: ein Rezept ist die geprüfte
+Referenz, und eines mit Namensfilter lehrt genau das Falsche.
+
+Der Wächter gegen leere Spalten fing zunächst nur `NULL` und übersah
+`bexio_kreditoren.offen_betrag` — bei allen 435 Rechnungen 0.00, auch bei den drei
+offenen über 4'496 CHF. Seither zählt bei Zahlen die **durchgehende Null** wie
+leer, mit zwei Abgrenzungen: ein einziger abweichender Wert rettet die Spalte, und
+Wahrheitsspalten sind ausgenommen («überall false» ist eine Aussage, keine Lücke).
+
 Der Weg der InvoiceInsight-Daten folgt der Multi-Repo-Regel jenes Projekts: der
 blätterbare Vollexport liegt generisch im Kern (`invoiceInsight/app/export_service.py`,
 `export_page()`), die Instanz `InnoSmithInvoices` legt nur ein dünnes MCP-Werkzeug

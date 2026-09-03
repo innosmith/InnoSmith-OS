@@ -52,6 +52,113 @@ Zahl. Aus acht Runden wird eine, und die Rohdaten erreichen das Modell nie.
 | `pipedrive_personen` | CRM | nächtlich |
 | `pipedrive_organisationen` | CRM | nächtlich |
 | `invoiceinsight_rechnungen` | Belegauswertung der Kreditoren | nächtlich |
+| `kundenschluessel` | gepflegte Zuordnung: welche Kennungen dieselbe Kundschaft meinen | nach jedem Abgleich |
+
+## Drei Systeme, drei Namen, keine gemeinsame Kennung
+
+Die teuerste Falle des Datenraums betrifft keine Spalte, sondern einen Namen. In
+Toggl heisst die Kundschaft `AGG`. In der Buchhaltung heisst dieselbe Kundschaft
+`Bau- und Verkehrsdirektion des Kantons Bern (BVD) Amt für Grundstücke und
+Gebäude`. Im CRM `Amt für Grundstücke und Gebäude AGG`. Die Kennungsräume
+überschneiden sich ohnehin nicht — eine Toggl-Kennung ist achtstellig, eine
+Bexio-Kennung dreistellig —, und über den Namen finden nur **8 von 16**
+Toggl-Kunden ihr Gegenstück in der Buchhaltung.
+
+Und das ist die schlechtere Hälfte, denn wer in `bexio_rechnungen` nach `%AGG%`
+sucht, bekommt null Zeilen. Nicht null als Fehler, sondern null als Ergebnis:
+**0 CHF Umsatz**, sauber formatiert, ohne Warnung. Tatsächlich sind es 227'789 CHF
+auf 49 Rechnungen. Es trifft ausgerechnet die grössten Kunden, weil gerade deren
+Namen zu Kürzeln werden: MBA (676'880 CHF), BFH, AUE, WA-AUE. Was funktioniert,
+sind die kurzen Firmennamen — `T+R`, `GSW`, `be-advanced`. Ein Verfahren, das bei
+GSW klappt und bei MBA lautlos versagt, ist unbrauchbar, weil man ihm den
+Unterschied nicht ansieht.
+
+Schlimmer als die Null ist der Beinahe-Treffer. Bexio führt einen **zweiten**
+Kontakt namens `Amt für Grundstücke und Gebäude (AGG` — mit null Rechnungen. Wer
+brav die Kontakte nach dem Kürzel durchsucht, die `kunden_id` nimmt und sauber
+verknüpft, hat alles richtig gemacht und bekommt trotzdem 0 CHF. Der Join ist
+fehlerfrei, das Ergebnis falsch, und nichts daran sieht verdächtig aus. 138 der
+188 Kontakte haben überhaupt keine Rechnung: einen Kontakt zu finden heisst nicht,
+Umsatz gefunden zu haben.
+
+Eine Ähnlichkeitssuche löst das nicht, sie verschiebt es nur. `LIKE '%agg%'`
+trifft auch `Jaggi Lorenz`, und keine Stammform bringt `AGG` mit einer
+Direktionsbezeichnung zusammen. Die Menge der Arten, wie drei Systeme dieselbe
+Organisation benennen, ist offen — sie hat keine endliche Regel.
+
+Deshalb ist die Zuordnung ein **Stammdatum**: `docs/kundenschluessel.yaml`, von
+einem Modell einmal vorgeschlagen, vom Menschen bestätigt, versioniert. 40
+Kundschaften, 102 Kennungen. Der Sync-Worker macht daraus die Tabelle
+`kundenschluessel`, und der Join läuft über sie:
+
+```sql
+SELECT k.name, round(sum(r.netto), 2) AS umsatz
+FROM '/daten/bexio_rechnungen.parquet' r
+JOIN '/daten/kundenschluessel.parquet' k
+  ON k.system = 'bexio' AND k.fremd_id = r.kunden_id
+WHERE r.ist_umsatz AND k.schluessel = 'agg'
+GROUP BY 1
+```
+
+Die Zeilenform ist lang statt breit — eine Zeile je Kennung —, damit der Join
+eine gewöhnliche Verknüpfung bleibt und kein Entpacken einer Liste verlangt. Die
+`1:n`-Fälle sind dabei kein Sonderfall, sondern der Normalfall: Gemeinde Köniz
+führt in Bexio zwei Direktionen, T+R steht im CRM dreimal, MBA zweimal plus
+einmal auf Englisch.
+
+### Der Preis ist Pflege, und dagegen stehen zwei Wächter
+
+Eine gepflegte Datei verfällt, und ihr Verfall wäre wieder ein stilles Versagen:
+eine nicht zugeordnete Kundschaft fällt aus jedem Join heraus, ohne dass jemand
+es merkt. Zwei Prüfungen halten dagegen.
+
+**Jede Kennung wird gegen die Daten geprüft.** Steht in der Datei eine
+`kunden_id`, die es im Bestand nicht gibt, wird sie verworfen und gemeldet statt
+eine tote Verknüpfung zu erzeugen — die sähe aus wie eine Zuordnung und trüge
+keine.
+
+**Was fehlt, wird benannt.** `nicht_zugeordnet` nennt je System die
+Kundschaften ohne Schlüssel. Entscheidend war hier die Einschränkung auf das, was
+wirtschaftlich zählt: gemeldet wird in Bexio, wer eine gestellte Rechnung hat, im
+CRM, wer einen Auftrag gewonnen hat. Ohne diese Einschränkung meldete der Wächter
+146 Bexio-Kontakte, überwiegend Lieferanten, die richtigerweise nie einen
+Schlüssel bekommen. Eine Warnliste, die zu neunzig Prozent aus Rauschen besteht,
+wird nicht gelesen — und wirkt damit wie gar keine. Mit ihr sind es 17, und die
+sind einzeln prüfbar.
+
+Was sich nicht eindeutig zuordnen liess, steht unter `offen` und wird **nicht
+geraten**: der Toggl-Kunde `WA-AUE` etwa, dessen einziges Projekt zur Wyss Academy
+oder zum Amt für Umwelt und Energie gehören kann, und die CRM-Organisation
+`Kanton Bern` mit 155'000 CHF gewonnenen Aufträgen, hinter der ein Amt steht, das
+niemand benannt hat. Unsicherheit ist ein zulässiges Ergebnis; ein geratener
+Schlüssel wäre ein Fehler mit Zinseszins.
+
+### Die zweite Hälfte desselben Fehlers
+
+Die 600'000 CHF, die das System für AGG einmal meldete, hatten noch eine zweite
+Ursache. Der Filter lief nicht nur über den Organisationsnamen, sondern über den
+**Freitext des Deal-Titels** — und ein Deal der Organisation `Kanton Bern` trägt
+`AGG` im Titel. So kamen 150'000 CHF dazu, die einer anderen Kundschaft gehören.
+
+Darum verbietet ein Test, dass ein Rezept auf `kunde`, `lieferant` oder
+`organisation` mit `LIKE` filtert. Ein Rezept ist die geprüfte Referenz; eines,
+das den Namensfilter vorführt, lehrt genau das Falsche.
+
+### Umsatz-Lesart: drei Zahlen, drei Fragen
+
+Bleibt der Fehler darunter — die falsche Tabelle. Für dieselbe Kundschaft stehen
+drei richtige Zahlen nebeneinander:
+
+| Frage | Tabelle | AGG am 03.09.2026 |
+|---|---|---|
+| Was steht im Verkaufstrichter? | `pipedrive_deals`, gewonnen | 181'000 CHF |
+| Was wurde fakturiert? | `bexio_rechnungen`, `ist_umsatz` | **227'789 CHF** |
+| Wie viel Aufwand steckt drin? | `toggl_zeiteintraege`, verrechenbar | 59'160 CHF |
+
+Umsatz ist die mittlere. Ein gewonnener Deal ist eine Absicht, erfasste Zeit ist
+Aufwand. Über zwei davon zu summieren ergibt eine Zahl, die es nicht gibt — das
+Gegenstück zur `ausgaben_lesart` auf der Einnahmenseite, und aus demselben Grund
+im Katalog als `umsatz_lesart` deklariert.
 
 ## Die Entscheidung steht in der Spalte, nicht in der Abfrage
 
@@ -379,6 +486,30 @@ auf Spalten, die über den **ganzen** Bestand leer sind, protokolliert sie und
 führt sie im Katalog als `unbrauchbar_weil_durchgehend_leer`. Einzelne Fehlwerte
 sind normal und werden nicht gemeldet. Dass eine Spalte nirgends etwas trägt, ist
 es nie: entweder wird sie falsch befüllt oder sie gehört nicht in die Tabelle.
+
+### Null zählt wie leer
+
+Der Wächter fing zunächst nur `NULL` und leeren Text — und ging deshalb an
+`bexio_kreditoren.offen_betrag` vorbei. Bexio füllt `pending_amount` an dieser
+Schnittstelle nicht: die Spalte steht bei **allen 435 Lieferantenrechnungen auf
+0.00**, auch bei den drei tatsächlich offenen über 4'496 CHF. Auf die Frage «wie
+viel schulde ich meinen Lieferanten» hätte `sum(offen_betrag)` geantwortet: nichts.
+
+Fachlich ist das derselbe Fehler wie eine leere Spalte — eine Auskunft, die
+versprochen und nicht gegeben wird —, technisch war es einer zu wenig. Seit dem
+03.09.2026 gilt eine Zahlspalte auch dann als unbrauchbar, wenn **kein einziger**
+Wert von null abweicht. Zwei Abgrenzungen gehören dazu, sonst würde der Wächter
+selbst zur Fehlerquelle:
+
+- Ein einziger abweichender Wert rettet die Spalte. Sonst verschwände `offen`
+  aus dem Katalog, sobald einmal alle Rechnungen bezahlt sind.
+- Wahrheitsspalten sind ausgenommen. «Überall `false`» ist eine Aussage und keine
+  Lücke: dass gerade nichts überfällig ist, will man wissen und nicht als Defekt
+  gemeldet bekommen.
+
+Weil der Wächter erst beim nächsten Abgleich anschlägt, steht die Warnung
+zusätzlich in der Deklaration — mitsamt dem richtigen Weg,
+`WHERE ist_offen` über `betrag_chf`.
 
 Zwei weitere Befunde derselben Gattung, beide behoben:
 

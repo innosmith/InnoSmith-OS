@@ -84,6 +84,14 @@ RUN python -m spacy download de_core_news_lg \
 ENV HF_HOME=/opt/hf-cache
 RUN python -c "from gliner import GLiNER; GLiNER.from_pretrained('urchade/gliner_multi_pii-v1')"
 
+# Ab hier ohne Netz. ``from_pretrained`` verweist auf den Zweig ``main``, einen
+# wandernden Zeiger -- die Bibliothek fragt darum bei jedem Laden bei HuggingFace
+# nach, ob der zwischengespeicherte Stand noch der aktuelle ist. Sinnlos, weil
+# das Modell seit der Zeile darüber fest im Abbild liegt, und teuer: Gemessen im
+# Cockpit-Backend kostet der Kaltstart der Erkennung mit Netz 13.1 s, ohne 8.5 s.
+# Die 4.5 Sekunden schwanken mit der Netzlatenz.
+ENV HF_HUB_OFFLINE=1
+
 # Backend-Quellcode
 COPY src/backend/app/ /app/app/
 
@@ -111,6 +119,11 @@ COPY src/bexio/ /app/bexio/
 COPY src/toggl/ /app/toggl/
 COPY src/signa/ /app/signa/
 COPY src/capacity/ /app/capacity/
+
+# Gepflegte Stammdaten: welche Kennungen in Bexio, Toggl und Pipedrive dieselbe
+# Kundschaft meinen. Ohne diese Datei findet der Datenraum zu keiner Kundschaft
+# etwas -- und zwar lautlos, weil eine fehlende Zuordnung eine leere Menge ergibt.
+COPY docs/kundenschluessel.yaml /app/docs/kundenschluessel.yaml
 
 ENV PYTHONPATH=/app:/app/email-graph:/app/pipedrive:/app/bexio:/app/toggl:/app/signa:/app/capacity
 

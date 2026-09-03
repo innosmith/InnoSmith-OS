@@ -122,6 +122,24 @@ SPALTEN_BEDEUTUNG = {
         "wo bloss noch Monate fehlen."
     ),
     "bexio_geschaeftsjahre.abgeschlossen_am": "Tag des Abschlusses; leer bei offenen Jahren",
+    # ── Der Kundenschlüssel: die einzige Brücke zwischen den Systemen ──
+    "kundenschluessel.schluessel": (
+        "stabile Kennung der Kundschaft über alle Systeme, z.B. 'agg'. Danach "
+        "gruppieren, wenn eine Frage mehr als ein System berührt."
+    ),
+    "kundenschluessel.name": "Anzeigename der Kundschaft -- den in der Antwort nennen, nicht den Schlüssel",
+    "kundenschluessel.system": "bexio | toggl | pipedrive -- zu welchem System die Kennung gehört",
+    "kundenschluessel.fremd_id": (
+        "die Kennung IN diesem System. Verbindet mit bexio_rechnungen.kunden_id, "
+        "toggl_zeiteintraege.kunden_id bzw. pipedrive_deals.organisation_id. Beim "
+        "Verbinden IMMER auch auf 'system' filtern -- die Kennungsräume überschneiden "
+        "sich zufällig."
+    ),
+    "kundenschluessel.fremd_name": "wie das jeweilige System die Kundschaft nennt -- gut zum Anzeigen, nie zum Verbinden",
+    "kundenschluessel.bestaetigt": (
+        "true = von Hand geprüft. false = vom Modell vorgeschlagen und noch nicht "
+        "bestätigt; die Zuordnung wird trotzdem verwendet."
+    ),
     # ── Bexio: Debitoren, die Einnahmenseite ──
     "bexio_rechnungen.datum": "Rechnungsdatum",
     "bexio_rechnungen.faellig_am": "Zahlungsfrist der Rechnung",
@@ -130,11 +148,31 @@ SPALTEN_BEDEUTUNG = {
     "bexio_rechnungen.mwst": "ausgewiesene Mehrwertsteuer",
     "bexio_rechnungen.brutto": "Rechnungsbetrag inklusive Mehrwertsteuer (netto + mwst)",
     "bexio_rechnungen.bezahlt": "davon eingegangen, brutto",
-    "bexio_rechnungen.offen": "davon noch ausstehend, brutto",
+    "bexio_rechnungen.offen": (
+        "davon noch ausstehend, brutto. IMMER zusammen mit 'ist_umsatz' filtern: ein "
+        "Entwurf trägt seinen vollen Betrag in dieser Spalte, obwohl er nie versandt "
+        "wurde und niemand ihn schuldet. Am 03.09.2026 ergibt sum(offen) 53'593 CHF, "
+        "davon 8'000 aus einem einzigen Entwurf -- tatsächlich offen sind 45'593 CHF "
+        "auf 11 Rechnungen."
+    ),
+    "bexio_rechnungen.waehrung": (
+        "Währung der Rechnung. Zurzeit stehen alle 652 Rechnungen auf CHF, weshalb es "
+        "hier -- anders als bei bexio_journal und bexio_kreditoren -- KEINE "
+        "CHF-Spalte gibt. Sobald eine Fremdwährungsrechnung auftaucht, summiert "
+        "sum(netto) gemischte Währungen ohne Fehlermeldung. Bei Umsatzfragen deshalb "
+        "prüfen, ob wirklich nur CHF im Bestand ist."
+    ),
     "bexio_rechnungen.ist_umsatz": "true bei gestellten Rechnungen (offen und bezahlt), false bei Entwürfen -- für Umsatzfragen immer filtern",
     "bexio_rechnungen.kunde": "Kundenname als Text; es gibt keine Spalte 'kundenname'. Für Gruppierungen ist 'kunden_id' die stabile Kennung",
     "bexio_rechnungen.status": "entwurf | offen | bezahlt",
-    "bexio_kontakte.name": "Kundenname; 'kunden_id' verbindet mit bexio_rechnungen",
+    "bexio_kontakte.name": (
+        "Kundenname; 'kunden_id' verbindet mit bexio_rechnungen. ACHTUNG: ein Kontakt "
+        "zu finden heisst NICHT, dass er Umsatz trägt -- 138 der 188 Kontakte haben "
+        "keine einzige Rechnung. Bei AGG gibt es sogar zwei Kontakte, und ausgerechnet "
+        "der mit dem Kürzel im Namen (148) ist der ohne Rechnungen: eine Suche nach "
+        "'AGG' findet ihn, der Join darauf ist syntaktisch fehlerfrei und ergibt 0 CHF. "
+        "Für Umsatzfragen immer über 'kundenschluessel' gehen."
+    ),
     "bexio_kontakte.ist_lead": "true bei Interessenten ohne Kundenstatus",
     "bexio_kontakte.geaendert_am": "letzte Änderung in Bexio -- kein fachliches Datum",
     # ── Bexio: Kreditoren, die Teilmenge mit Fälligkeit ──
@@ -144,7 +182,14 @@ SPALTEN_BEDEUTUNG = {
     "bexio_kreditoren.betrag": "Rechnungsbetrag in Rechnungswährung -- über mehrere Währungen NICHT summierbar",
     "bexio_kreditoren.betrag_chf": "Rechnungsbetrag in CHF; das ist die Spalte für jede Summe",
     "bexio_kreditoren.kurs": "Umrechnungskurs bei Fremdwährung; leer bei CHF",
-    "bexio_kreditoren.offen_betrag": "noch nicht bezahlter Teil, in Rechnungswährung",
+    "bexio_kreditoren.offen_betrag": (
+        "UNBRAUCHBAR -- die Spalte ist bei ALLEN 435 Rechnungen 0.00, auch bei den "
+        "offenen. Bexio füllt 'pending_amount' an dieser Schnittstelle nicht. Wer sie "
+        "summiert, meldet «ich schulde niemandem etwas», und das kommt ohne "
+        "Fehlermeldung. Die offene Schuld ist: "
+        "SELECT sum(betrag_chf) FROM bexio_kreditoren WHERE ist_offen -- am 03.09.2026 "
+        "4'496 CHF auf drei Rechnungen."
+    ),
     "bexio_kreditoren.positionen": "Anzahl Positionen der Rechnung; 'konto' nennt das Konto der grössten",
     "bexio_kreditoren.status": "entwurf | offen | bezahlt",
     "bexio_kreditoren.ist_offen": "true bei noch nicht bezahlten Rechnungen",
@@ -205,7 +250,13 @@ SPALTEN_BEDEUTUNG = {
         "trägt. 0.00 ist KEIN Fehler: der Einzahlungsschein liess den Betrag offen."
     ),
     "invoiceinsight_rechnungen.qr_kreditor": "Zahlungsempfänger laut QR-Code -- die zuverlässigste Schreibweise des Lieferanten",
-    "invoiceinsight_rechnungen.beleg_datei": "Dateiname des PDF, damit eine Zahl auf ihren Beleg zeigt",
+    "invoiceinsight_rechnungen.beleg_datei": (
+        "Dateiname des PDF -- und die EINZIGE eindeutige Kennung dieser Tabelle: "
+        "1111 Belege, 1111 verschiedene Dateinamen, keiner leer. 'rechnungsnummer' "
+        "taugt dafür NICHT: sie kommt nur 965-mal verschieden vor, weil Lieferanten "
+        "ihre Nummern je Kunde zählen. Wer nach ihr entdoppelt oder zählt, verliert "
+        "146 Belege."
+    ),
     # ── Toggl ──
     "toggl_zeiteintraege.datum": "Tag der Zeitbuchung",
     "toggl_zeiteintraege.beginn": "Startzeitpunkt der Buchung",
@@ -289,6 +340,36 @@ KREDITOREN_LESART = (
     "zählt doppelt. Immer eine Tabelle wählen und dazusagen, welche."
 )
 
+# Das Gegenstück zur Ausgaben-Lesart, auf der Einnahmenseite. Anlass war eine
+# falsche Demo-Zahl: nach «Umsatz mit AGG» gefragt, meldete das System 600'000 CHF
+# aus dem CRM. Fakturiert wurden 227'789. Zwei Fehler wirkten zusammen -- die
+# falsche Tabelle, und ein Filter auf den Freitext des Deal-Titels.
+UMSATZ_LESART = (
+    "Drei Tabellen berühren Kundschaften, und sie beantworten DREI Fragen:\n\n"
+    "1. «Wie viel Umsatz mit X?» -> 'bexio_rechnungen' mit WHERE ist_umsatz. NUR "
+    "das ist Umsatz -- was fakturiert wurde.\n"
+    "2. «Was steht im Verkaufstrichter?» -> 'pipedrive_deals'. Ein gewonnener Deal "
+    "ist eine Absicht, keine Rechnung.\n"
+    "3. «Wie viel Aufwand steckt drin?» -> 'toggl_zeiteintraege' mit "
+    "WHERE verrechenbar. Erfasste Zeit ist nicht fakturierte Zeit.\n\n"
+    "Am 03.09.2026 für dieselbe Kundschaft gemessen -- AGG: Pipedrive 181'000 "
+    "(3 gewonnene Deals), Bexio 227'789 (49 Rechnungen), Toggl 59'160. Drei "
+    "richtige Zahlen auf drei verschiedene Fragen. NIE über zwei davon summieren.\n\n"
+    "DIE NAMENSFALLE, und sie ist die teuerste im ganzen Datenraum: die drei "
+    "Systeme benennen dieselbe Kundschaft verschieden, und ihre Kennungsräume "
+    "überschneiden sich NICHT. In Toggl heisst sie 'AGG', in Bexio 'Bau- und "
+    "Verkehrsdirektion des Kantons Bern (BVD) Amt für Grundstücke und Gebäude'. "
+    "Wer in 'bexio_rechnungen' nach '%AGG%' sucht, findet NULL Zeilen -- und keine "
+    "Fehlermeldung. Dasselbe bei MBA (676'880 CHF), BFH und WA-AUE.\n\n"
+    "DESHALB: bei jeder Frage nach einer Kundschaft ZUERST 'kundenschluessel' "
+    "abfragen und von dort die 'fremd_id' des gewünschten Systems holen. Nie mit "
+    "LIKE auf einen Kundennamen filtern und nie auf 'pipedrive_deals.titel' -- ein "
+    "Deal der Organisation 'Kanton Bern' trägt 'AGG' im Titel und hat die falschen "
+    "150'000 CHF beigesteuert. Findet der Schlüssel die Kundschaft nicht, ist das "
+    "zu sagen, statt auf einen Namensvergleich auszuweichen."
+)
+
+
 # Fertige Abfragen für die Fragen, die tatsächlich gestellt werden.
 #
 # Der Grund ist gemessen: das lokale Modell erfand Spaltennamen, liess die
@@ -349,6 +430,64 @@ REZEPTE = {
         "       round(sum(offen),2) AS offen\n"
         "FROM '/daten/bexio_rechnungen.parquet'\n"
         "WHERE ist_umsatz GROUP BY 1 ORDER BY netto DESC LIMIT 20"
+    ),
+    "Umsatz einer bestimmten Kundschaft (Kürzel wie AGG, MBA, BFH)": (
+        "-- NIE mit LIKE auf den Kundennamen: 'AGG' kommt in bexio_rechnungen\n"
+        "-- nicht vor, der Kunde heisst dort 'Bau- und Verkehrsdirektion ...'.\n"
+        "-- Der Schlüssel ist die einzige Brücke. 'agg' unten ersetzen.\n"
+        "SELECT k.name, count(*) AS rechnungen, round(sum(r.netto),2) AS netto,\n"
+        "       round(sum(r.offen),2) AS offen\n"
+        "FROM '/daten/bexio_rechnungen.parquet' r\n"
+        "JOIN '/daten/kundenschluessel.parquet' k\n"
+        "  ON k.system = 'bexio' AND k.fremd_id = r.kunden_id\n"
+        "WHERE r.ist_umsatz AND k.schluessel = 'agg'\n"
+        "GROUP BY 1"
+    ),
+    "welche Kundschaft ist gemeint (Kürzel auflösen)": (
+        "SELECT schluessel, name, system, fremd_id, fremd_name\n"
+        "FROM '/daten/kundenschluessel.parquet'\n"
+        "WHERE lower(name) LIKE lower('%AGG%')\n"
+        "   OR lower(fremd_name) LIKE lower('%AGG%')\n"
+        "   OR lower(schluessel) LIKE lower('%AGG%')\n"
+        "ORDER BY schluessel, system"
+    ),
+    "Stunden gegen Umsatz je Kundschaft": (
+        "-- Der Join läuft über den Schlüssel, nicht über Namen. Beide Seiten\n"
+        "-- werden VOR dem Verbinden verdichtet, sonst vervielfacht jede\n"
+        "-- Rechnung jeden Zeiteintrag.\n"
+        "WITH umsatz AS (\n"
+        "  SELECT k.schluessel, k.name, round(sum(r.netto),2) AS netto\n"
+        "  FROM '/daten/bexio_rechnungen.parquet' r\n"
+        "  JOIN '/daten/kundenschluessel.parquet' k\n"
+        "    ON k.system = 'bexio' AND k.fremd_id = r.kunden_id\n"
+        "  WHERE r.ist_umsatz GROUP BY 1, 2\n"
+        "), zeit AS (\n"
+        "  SELECT k.schluessel, round(sum(t.stunden),1) AS stunden,\n"
+        "         round(sum(t.betrag),2) AS verrechenbar_chf\n"
+        "  FROM '/daten/toggl_zeiteintraege.parquet' t\n"
+        "  JOIN '/daten/kundenschluessel.parquet' k\n"
+        "    ON k.system = 'toggl' AND k.fremd_id = t.kunden_id\n"
+        "  WHERE t.verrechenbar GROUP BY 1\n"
+        ")\n"
+        "SELECT u.name, u.netto, z.stunden, z.verrechenbar_chf,\n"
+        "       round(u.netto / nullif(z.stunden,0), 2) AS chf_je_stunde\n"
+        "FROM umsatz u JOIN zeit z USING (schluessel)\n"
+        "ORDER BY u.netto DESC"
+    ),
+    "wie viel schulde ich meinen Lieferanten": (
+        "-- NICHT sum(offen_betrag): die Spalte ist bei allen 435 Zeilen 0.00.\n"
+        "SELECT lieferant, nummer, datum, faellig_am,\n"
+        "       round(betrag_chf,2) AS chf, ueberfaellig\n"
+        "FROM '/daten/bexio_kreditoren.parquet'\n"
+        "WHERE ist_offen ORDER BY faellig_am"
+    ),
+    "wer schuldet mir Geld": (
+        "-- ist_umsatz schliesst Entwürfe aus: ein Entwurf trägt seinen vollen\n"
+        "-- Betrag in 'offen', obwohl ihn niemand erhalten hat.\n"
+        "SELECT kunde, nummer, datum, faellig_am, round(offen,2) AS offen_chf,\n"
+        "       date_diff('day', faellig_am, current_date) AS tage_ueberfaellig\n"
+        "FROM '/daten/bexio_rechnungen.parquet'\n"
+        "WHERE ist_umsatz AND offen > 0 ORDER BY faellig_am"
     ),
 }
 
@@ -469,6 +608,10 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             # der Katalog eine Beziehung zwischen einer Tabelle und nichts.
             **({"ausgaben_lesart": KREDITOREN_LESART}
                if {"bexio_journal", "bexio_kreditoren", "invoiceinsight_rechnungen"}
+               <= set(katalog.get("tabellen", {}))
+               else {}),
+            **({"umsatz_lesart": UMSATZ_LESART}
+               if {"bexio_rechnungen", "pipedrive_deals", "kundenschluessel"}
                <= set(katalog.get("tabellen", {}))
                else {}),
             "quellen": {

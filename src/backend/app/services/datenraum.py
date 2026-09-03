@@ -115,6 +115,13 @@ def durchgehend_leere_spalten(tabelle) -> list[str]:
     Ein einzelner Fehlwert ist normal und wird nicht gemeldet. Dass eine Spalte über
     den ganzen Bestand nichts trägt, ist es nie: entweder wird sie falsch befüllt
     oder sie gehört nicht in die Tabelle.
+
+    **Null zählt wie leer.** Der Wächter fing zunächst nur ``NULL`` und übersah
+    damit ``bexio_kreditoren.offen_betrag``: Bexios ``pending_amount`` ist bei
+    allen 435 Lieferantenrechnungen 0.0, auch bei den drei tatsächlich offenen
+    über 4'496 CHF. Fachlich ist das derselbe Fehler -- eine Spalte, die eine
+    Auskunft verspricht und keine gibt --, technisch war es einer zu wenig. Die
+    Frage «wie viel schulde ich meinen Lieferanten» hätte 0 CHF ergeben.
     """
     import pyarrow as pa
     import pyarrow.compute as pc
@@ -127,6 +134,15 @@ def durchgehend_leere_spalten(tabelle) -> list[str]:
         elif pa.types.is_string(spalte.type):
             # Bei Text zählt "" genauso als leer wie NULL.
             if not pc.sum(pc.binary_length(spalte.fill_null(""))).as_py():
+                leer.append(spaltenname)
+        elif pa.types.is_integer(spalte.type) or pa.types.is_floating(spalte.type):
+            # Bei Zahlen zählt 0 wie leer -- aber nur, wenn KEIN Wert abweicht.
+            # Eine Wahrheitsspalte ist ausgenommen: «überall false» ist eine
+            # Aussage, keine Lücke.
+            spanne = pc.max_element_wise(
+                pc.abs(pc.min(spalte)), pc.abs(pc.max(spalte))
+            ).as_py()
+            if spanne == 0:
                 leer.append(spaltenname)
     return leer
 
@@ -666,6 +682,80 @@ async def quelle_abgleichen(name: str, settings: dict, katalog: dict) -> dict:
     return eintrag
 
 
+def _zeilen_lesen(name: str, spalten: tuple[str, ...]) -> list[dict]:
+    """Wenige Spalten einer bestehenden Tabelle zurücklesen.
+
+    Der Kundenschlüssel muss den **Gesamtstand** sehen, nicht die eben abgeglichene
+    Quelle: er verbindet Bexio, Toggl und Pipedrive, und die drei werden getrennt
+    aufgefrischt. Gelesen wird deshalb aus den Dateien und nicht aus dem Lauf.
+    """
+    import pyarrow.parquet as pq
+
+    pfad = datenraum_pfad() / f"{name}.parquet"
+    if not pfad.exists():
+        return []
+    try:
+        vorhanden = set(pq.read_schema(pfad).names)
+        return pq.read_table(
+            pfad, columns=[s for s in spalten if s in vorhanden]
+        ).to_pylist()
+    except Exception as exc:  # noqa: BLE001 -- eine kaputte Datei darf nicht alles reissen
+        logger.warning("Datenraum: '%s' nicht lesbar: %s", name, exc)
+        return []
+
+
+def kundenschluessel_schreiben(katalog: dict) -> None:
+    """Die gepflegte Kundenzuordnung als Tabelle ablegen und ihre Lücken melden.
+
+    Läuft nach jedem Abgleich, weil sich der Bestand der drei Systeme geändert
+    haben kann. Scheitert sie, bleibt der alte Stand stehen und der Rest des
+    Abgleichs gilt trotzdem -- eine fehlende Zuordnung ist ärgerlich, ein
+    verlorener Abgleich wäre schlimmer.
+    """
+    from app.services import kundenschluessel as ks
+
+    try:
+        gebraucht: dict[str, set[str]] = {}
+        for tabelle, kennung, anzeige in ks.SYSTEME.values():
+            gebraucht.setdefault(tabelle, set()).update((kennung, anzeige))
+        for tabelle, kennung, bedingung in ks.RELEVANZ.values():
+            spalten = gebraucht.setdefault(tabelle, set())
+            spalten.add(kennung)
+            if bedingung is not None:
+                spalten.add(bedingung[0])
+        tabellen = {
+            name: _zeilen_lesen(name, tuple(sorted(spalten)))
+            for name, spalten in gebraucht.items()
+        }
+        zeilen, befund = ks.aufbauen(tabellen)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Datenraum: Kundenschlüssel nicht aufbaubar: %s", exc)
+        return
+
+    eintrag = katalog.setdefault("quellen", {}).setdefault("kundenschluessel", {})
+    eintrag.update({
+        "beschreibung": (
+            "Gepflegte Zuordnung: welche Kennungen in Bexio, Toggl und Pipedrive "
+            "dieselbe Kundschaft meinen (docs/kundenschluessel.yaml)"
+        ),
+        "stand": datetime.now(timezone.utc).isoformat(),
+        "letzter_fehler": None,
+        "hinweise": befund,
+    })
+
+    if not zeilen:
+        logger.info("Datenraum: Kundenschlüssel ist leer -- keine Tabelle geschrieben")
+        return
+    try:
+        beschreibung = tabelle_schreiben("kundenschluessel", zeilen)
+    except ValueError as exc:
+        logger.warning("Datenraum: %s", exc)
+        return
+    beschreibung.update({"quelle": "kundenschluessel", "stand": eintrag["stand"]})
+    katalog.setdefault("tabellen", {})["kundenschluessel"] = beschreibung
+    eintrag["tabellen"] = {"kundenschluessel": beschreibung["zeilen"]}
+
+
 @contextmanager
 def _dateisperre():
     """Prozessübergreifende Sperre für den Abgleich.
@@ -702,6 +792,7 @@ async def abgleichen(quellen: list[str] | None = None) -> dict:
             for name in namen:
                 await quelle_abgleichen(name, settings, katalog)
 
+            kundenschluessel_schreiben(katalog)
             katalog["stand"] = datetime.now(timezone.utc).isoformat()
             katalog["verzeichnis_in_der_sandbox"] = "/daten"
             katalog_schreiben(katalog)

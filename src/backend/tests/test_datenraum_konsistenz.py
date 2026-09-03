@@ -186,16 +186,25 @@ class TestQuellenUndWegweiserPassenZusammen:
 
     def test_fertige_abfragen_zeigen_auf_vorhandene_tabellen(self, server_quelltext):
         """Ein Rezept, das eine Tabelle nennt, die niemand schreibt, scheitert erst
-        in der Sandbox -- und dort sieht es aus wie ein Fehler des Modells."""
-        from app.services.datenraum import ZEITSPALTEN
+        in der Sandbox -- und dort sieht es aus wie ein Fehler des Modells.
+
+        Geprüft wird gegen den echten Katalog. Vorher stand hier ``ZEITSPALTEN`` als
+        Ersatzverzeichnis, was es nicht ist: eine Tabelle ohne Datumsspalte fehlte
+        dort und brauchte eine Ausnahme von Hand -- eine Liste, die bei jeder neuen
+        Tabelle nachzupflegen gewesen wäre.
+        """
+        from app.services.datenraum import katalog_lesen
+
+        vorhanden = set(katalog_lesen().get("tabellen", {}))
+        if not vorhanden:
+            pytest.skip("kein Datenraum vorhanden -- Tabellennamen nicht prüfbar")
 
         rezepte = server_quelltext[server_quelltext.index("REZEPTE = {"):]
         genannt = set(re.findall(r"/daten/(\w+)\.parquet", rezepte))
         assert genannt, "keine einzige fertige Abfrage vorhanden"
-        # Tabellen ohne Zeitspalte gibt es (bexio_konten); geprüft wird die
-        # Gegenrichtung: keine erfundenen Namen.
-        bekannt = set(ZEITSPALTEN) | {"bexio_konten"}
-        assert genannt <= bekannt, f"unbekannte Tabellen in den Rezepten: {sorted(genannt - bekannt)}"
+        assert genannt <= vorhanden, (
+            f"unbekannte Tabellen in den Rezepten: {sorted(genannt - vorhanden)}"
+        )
 
 
 # Spaltentypen, bei denen ein Missverständnis still bleibt.
@@ -295,6 +304,260 @@ class TestErklaerungspflicht:
             and schluessel not in gewollte_ausnahmen
         ]
         assert not verwaist, f"Erklärungen ohne Spalte: {sorted(verwaist)}"
+
+
+class TestWaechterGegenStilleSpalten:
+    """Eine Spalte, die es gibt und die nichts trägt, ist die teuerste Fehlerart.
+
+    ``bexio_kreditoren.offen_betrag`` ist der Anlass: Bexio füllt ``pending_amount``
+    nicht, die Spalte steht bei allen 435 Zeilen auf 0.00 -- auch bei den drei
+    offenen Rechnungen über 4'496 CHF. Der Wächter fing bis zum 03.09.2026 nur
+    ``NULL`` und ging an dieser Spalte vorbei.
+    """
+
+    def test_eine_durchgehende_null_gilt_als_leer(self):
+        import pyarrow as pa
+        from app.services.datenraum import durchgehend_leere_spalten
+
+        tabelle = pa.Table.from_pylist([
+            {"offen_betrag": 0.0, "betrag_chf": 1200.0},
+            {"offen_betrag": 0.0, "betrag_chf": 3295.5},
+        ])
+        assert durchgehend_leere_spalten(tabelle) == ["offen_betrag"]
+
+    def test_ein_einziger_wert_rettet_die_spalte(self):
+        """Sonst verschwände eine Spalte aus dem Katalog, sobald ein Bestand gerade
+        ausgeglichen ist -- etwa alle Rechnungen bezahlt."""
+        import pyarrow as pa
+        from app.services.datenraum import durchgehend_leere_spalten
+
+        tabelle = pa.Table.from_pylist([
+            {"offen_betrag": 0.0}, {"offen_betrag": 0.0}, {"offen_betrag": 4495.5},
+        ])
+        assert durchgehend_leere_spalten(tabelle) == []
+
+    def test_eine_wahrheitsspalte_darf_durchgehend_falsch_sein(self):
+        """«überall false» ist eine Aussage, keine Lücke: dass gerade nichts
+        überfällig ist, will man wissen und nicht als Defekt gemeldet bekommen."""
+        import pyarrow as pa
+        from app.services.datenraum import durchgehend_leere_spalten
+
+        tabelle = pa.Table.from_pylist([
+            {"ueberfaellig": False}, {"ueberfaellig": False},
+        ])
+        assert durchgehend_leere_spalten(tabelle) == []
+
+    def test_negative_werte_zaehlen_nicht_als_leer(self):
+        """Eine Summe aus +100 und -100 ist 0, die Spalte trägt aber sehr wohl."""
+        import pyarrow as pa
+        from app.services.datenraum import durchgehend_leere_spalten
+
+        tabelle = pa.Table.from_pylist([{"saldo": 100.0}, {"saldo": -100.0}])
+        assert durchgehend_leere_spalten(tabelle) == []
+
+    def test_offen_betrag_ist_als_unbrauchbar_deklariert(self):
+        """Der Wächter meldet die Spalte, aber erst beim nächsten Abgleich. Die
+        Deklaration muss sie unabhängig davon als unbrauchbar ausweisen und den
+        richtigen Weg nennen."""
+        with open(os.path.join(SRC, "mcp-datenraum", "server.py"), encoding="utf-8") as f:
+            quelle = f.read()
+        erklaerung = re.search(
+            r'"bexio_kreditoren\.offen_betrag":\s*\((.*?)\n    \),', quelle, re.S
+        )
+        assert erklaerung, "offen_betrag ist nicht erklärt"
+        text = erklaerung.group(1)
+        assert "UNBRAUCHBAR" in text
+        assert "ist_offen" in text, "die Deklaration nennt den richtigen Weg nicht"
+
+
+class TestKundenschluessel:
+    """Die einzige Brücke zwischen drei Kennungsräumen, die sich nicht überschneiden.
+
+    Ohne sie ergibt «Umsatz mit AGG» null Franken statt 227'789 -- ohne
+    Fehlermeldung, weil das Kürzel in Bexio schlicht nicht vorkommt.
+    """
+
+    @pytest.fixture(scope="class")
+    def datei(self):
+        import yaml
+        from app.services.kundenschluessel import DATEI
+
+        if not DATEI.exists():
+            pytest.skip("docs/kundenschluessel.yaml fehlt")
+        with open(DATEI, encoding="utf-8") as f:
+            return yaml.safe_load(f)
+
+    def test_die_datei_liegt_auch_im_container(self):
+        """Im Image steht das Modul unter ``/app/app/services`` -- ein fester
+        ``parents[4]`` zeigte dort auf ``/docs`` und damit ins Leere. Weil eine
+        fehlende Datei bloss eine leere Zuordnung ergibt, wäre daraus ein stiller
+        Ausfall geworden: alle Kundenfragen ohne Treffer, ohne Fehlermeldung."""
+        with open(os.path.join(SRC, "..", "docker", "Dockerfile.backend"),
+                  encoding="utf-8") as f:
+            dockerfile = f.read()
+        assert "docs/kundenschluessel.yaml" in dockerfile, (
+            "die Datei wird nicht ins Backend-Image kopiert"
+        )
+
+        from app.services.kundenschluessel import _datei_finden
+
+        gesucht = _datei_finden().parts
+        assert gesucht[-2:] == ("docs", "kundenschluessel.yaml")
+
+    def test_jeder_schluessel_kommt_nur_einmal_vor(self, datei):
+        schluessel = [k["schluessel"] for k in datei["kundschaften"]]
+        doppelte = {s for s in schluessel if schluessel.count(s) > 1}
+        assert not doppelte, f"doppelte Schlüssel: {sorted(doppelte)}"
+
+    def test_keine_kennung_gehoert_zwei_kundschaften(self, datei):
+        """Sonst zählt dieselbe Rechnung bei zwei Kundschaften -- und die Summe
+        über alle übersteigt den tatsächlichen Umsatz."""
+        from app.services.kundenschluessel import SYSTEME
+
+        for system in SYSTEME:
+            gesehen: dict[int, str] = {}
+            for eintrag in datei["kundschaften"]:
+                for kennung in eintrag.get(system) or []:
+                    assert kennung not in gesehen, (
+                        f"{system} {kennung} steht bei '{gesehen.get(kennung)}' "
+                        f"und bei '{eintrag['schluessel']}'"
+                    )
+                    gesehen[kennung] = eintrag["schluessel"]
+
+    def test_ein_eintrag_verbindet_mindestens_zwei_systeme(self, datei):
+        """Wer nur in einem System vorkommt, braucht keinen Schlüssel -- dort genügt
+        der eigene Name. Ein einsamer Eintrag wäre Pflegeaufwand ohne Nutzen."""
+        from app.services.kundenschluessel import SYSTEME
+
+        einsam = [
+            k["schluessel"] for k in datei["kundschaften"]
+            if sum(1 for s in SYSTEME if k.get(s)) < 2
+        ]
+        assert not einsam, f"Einträge mit nur einem System: {einsam}"
+
+    def test_eine_erfundene_kennung_wird_verworfen_und_gemeldet(self, tmp_path):
+        """Eine tote Verknüpfung ist schlimmer als eine fehlende: sie sieht aus wie
+        eine Zuordnung und trägt keine."""
+        from app.services.kundenschluessel import aufbauen
+
+        datei = tmp_path / "k.yaml"
+        datei.write_text(
+            "kundschaften:\n"
+            "  - schluessel: agg\n"
+            "    name: Amt für Grundstücke\n"
+            "    bexio: [114, 999999]\n"
+            "    toggl: [57641058]\n",
+            encoding="utf-8",
+        )
+        zeilen, befund = aufbauen({
+            "bexio_kontakte": [{"kunden_id": 114, "name": "BVD AGG"}],
+            "toggl_zeiteintraege": [{"kunden_id": 57641058, "kunde": "AGG"}],
+        }, pfad=datei)
+
+        assert {z["fremd_id"] for z in zeilen} == {114, 57641058}
+        assert any("999999" in v for v in befund["verworfen"])
+
+    def test_wer_keinen_schluessel_hat_wird_benannt(self, tmp_path):
+        """Eine nicht zugeordnete Kundschaft fällt aus jedem Join heraus. Still ist
+        das nicht hinnehmbar -- gemeldet schon."""
+        from app.services.kundenschluessel import aufbauen
+
+        datei = tmp_path / "k.yaml"
+        datei.write_text("kundschaften: []\n", encoding="utf-8")
+        _, befund = aufbauen({
+            "bexio_kontakte": [{"kunden_id": 114, "name": "BVD AGG"}],
+            "bexio_rechnungen": [{"kunden_id": 114, "ist_umsatz": True}],
+        }, pfad=datei)
+
+        assert befund["nicht_zugeordnet"]["bexio"] == 1
+        assert "114 (BVD AGG)" in befund["ohne_schluessel"]["bexio"]
+
+    def test_ein_interessent_ohne_abschluss_wird_nicht_gemeldet(self, tmp_path):
+        """Sonst bestünde die Warnliste zu neunzig Prozent aus Rauschen -- und würde
+        damit gar nicht gelesen."""
+        from app.services.kundenschluessel import aufbauen
+
+        datei = tmp_path / "k.yaml"
+        datei.write_text("kundschaften: []\n", encoding="utf-8")
+        _, befund = aufbauen({
+            "pipedrive_deals": [
+                {"organisation_id": 1, "organisation": "Interessent", "status": "lost"},
+                {"organisation_id": 2, "organisation": "Kundschaft", "status": "won"},
+            ],
+        }, pfad=datei)
+
+        assert befund["ohne_schluessel"]["pipedrive"] == ["2 (Kundschaft)"]
+
+
+class TestRezepteLaufen:
+    """Ein Rezept ist eine Behauptung über die Daten, kein Kommentar.
+
+    Am 03.09.2026 fand ein Rezept den Fehler, den die Deklaration danebenlegte: die
+    Summe über ``betrag`` statt ``betrag_chf``. Rezepte sind deshalb die geprüfte
+    Referenz und nicht bloss Hilfe für schwache Modelle -- was hier nicht läuft,
+    läuft beim Agenten auch nicht.
+    """
+
+    @pytest.fixture(scope="class")
+    def rezepte(self):
+        import importlib.util
+
+        pfad = os.path.join(SRC, "mcp-datenraum", "server.py")
+        spec = importlib.util.spec_from_file_location("datenraum_server", pfad)
+        modul = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(modul)
+        return modul.REZEPTE
+
+    @pytest.fixture(scope="class")
+    def verbindung(self):
+        duckdb = pytest.importorskip("duckdb")
+        from app.services.datenraum import datenraum_pfad, katalog_lesen
+
+        if not katalog_lesen().get("tabellen"):
+            pytest.skip("kein Datenraum vorhanden -- Rezepte nicht ausführbar")
+        return duckdb.connect(), datenraum_pfad()
+
+    def test_jedes_rezept_laeuft_gegen_die_echten_daten(self, rezepte, verbindung):
+        c, verzeichnis = verbindung
+        gescheitert = []
+        for name, sql in rezepte.items():
+            try:
+                c.sql(sql.replace("/daten/", f"{verzeichnis}/")).fetchall()
+            except Exception as exc:  # noqa: BLE001
+                gescheitert.append(f"{name}: {type(exc).__name__}: {exc}")
+        assert not gescheitert, "Rezepte scheitern:\n" + "\n".join(gescheitert)
+
+    def test_der_kuerzel_join_findet_den_gemessenen_umsatz(self, rezepte, verbindung):
+        """Die Zahl, an der die Demo scheiterte: 'AGG' ergibt in bexio_rechnungen
+        keinen Treffer, über den Schlüssel aber 227'789 CHF auf 49 Rechnungen."""
+        c, verzeichnis = verbindung
+        sql = rezepte["Umsatz einer bestimmten Kundschaft (Kürzel wie AGG, MBA, BFH)"]
+        zeilen = c.sql(sql.replace("/daten/", f"{verzeichnis}/")).fetchall()
+
+        assert len(zeilen) == 1, "der Schlüssel löst 'agg' nicht eindeutig auf"
+        _, rechnungen, netto, _ = zeilen[0]
+        assert rechnungen == 49
+        assert round(netto) == 227789
+
+        direkt = c.sql(
+            f"SELECT count(*) FROM '{verzeichnis}/bexio_rechnungen.parquet' "
+            "WHERE kunde ILIKE '%AGG%'"
+        ).fetchone()[0]
+        assert direkt == 0, (
+            "Die Namenssuche findet neuerdings etwas -- dann ist die Begründung des "
+            "Schlüssels zu prüfen, nicht der Test anzupassen."
+        )
+
+    def test_kein_rezept_filtert_auf_einen_kundennamen(self, rezepte):
+        """Der Namensfilter ist die Fehlerquelle, die der Schlüssel ablöst. Ein
+        Rezept, das ihn vorführt, lehrt genau das Falsche."""
+        for name, sql in rezepte.items():
+            for zeile in sql.splitlines():
+                if zeile.lstrip().startswith("--"):
+                    continue
+                assert not re.search(r"(kunde|lieferant|organisation)\s+I?LIKE", zeile), (
+                    f"Rezept '{name}' filtert auf einen Namen: {zeile.strip()}"
+                )
 
 
 class TestPromptLeitplanken:

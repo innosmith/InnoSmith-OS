@@ -1,0 +1,340 @@
+# Kundenschlüssel — welche Kennungen dieselbe Kundschaft meinen
+#
+# Bexio, Toggl und Pipedrive führen dieselbe Kundschaft unter drei Namen und drei
+# Kennungsräumen, die sich nirgends überschneiden. In Bexio heisst das Amt für
+# Grundstücke und Gebäude «Bau- und Verkehrsdirektion des Kantons Bern (BVD) Amt
+# für Grundstücke und Gebäude», in Toggl «AGG», in Pipedrive «Amt für Grundstücke
+# und Gebäude AGG». Wer wörtlich nach «AGG» sucht, findet in Bexio nichts — und
+# bekommt keine Fehlermeldung, sondern 0 CHF.
+#
+# Diese Datei hält die Zuordnung als Stammdatum fest, statt sie zur Laufzeit zu
+# raten. Kein Ähnlichkeitsmass, keine Stammformen, keine Straflisten: entweder
+# eine Kennung steht hier, oder sie gilt als nicht zugeordnet und wird als solche
+# gemeldet.
+#
+# ## Regeln
+#
+# * Ein Eintrag entsteht nur, wenn dieselbe Kundschaft in **mindestens zwei**
+#   Systemen vorkommt. Wer nur in Bexio steht, braucht keinen Schlüssel — dort
+#   genügt der eigene Name.
+# * Je System eine **Liste** von Kennungen, nie eine einzelne. Dieselbe Kundschaft
+#   hat regelmässig mehrere Datensätze: Gemeinde Köniz führt in Bexio zwei
+#   Direktionen, T+R steht in Pipedrive dreimal.
+# * `bestaetigt: false` heisst «von einem Modell vorgeschlagen, vom Menschen noch
+#   nicht geprüft». Solche Einträge werden verwendet, aber im Katalog gezählt.
+#   Wer einen Eintrag prüft, setzt `bestaetigt: true` — bestätigte Einträge werden
+#   nie überschrieben.
+# * Unsicherheit ist ein zulässiges Ergebnis. Was sich nicht eindeutig zuordnen
+#   lässt, steht unter `offen` und wird nicht geraten.
+# * Jede Kennung wird beim Laden gegen den Datenraum geprüft. Eine Kennung, die es
+#   dort nicht gibt, wird verworfen und gemeldet.
+
+version: 1
+stand: 2026-09-03
+
+kundschaften:
+  - schluessel: mba
+    name: Mittelschul- und Berufsbildungsamt
+    bexio: [123]
+    toggl: [58626393]
+    pipedrive: [566, 736, 655]
+    bestaetigt: false
+    hinweis: Pipedrive 655 trägt den englischen Namen desselben Amts
+
+  - schluessel: agg
+    name: Amt für Grundstücke und Gebäude (AGG)
+    bexio: [114, 148]
+    toggl: [57641058]
+    pipedrive: [568]
+    bestaetigt: false
+    hinweis: >-
+      Bexio führt zwei Kontakte. Die Rechnungen laufen alle über 114; 148 hat null
+      Rechnungen und ist die Falle: ein Agent findet dort das Kürzel «AGG», nimmt
+      die Kennung und erhält einen sauber aussehenden Join über null Franken.
+
+  - schluessel: stadt-luzern
+    name: Stadt Luzern
+    bexio: [62]
+    pipedrive: [115]
+    bestaetigt: false
+
+  - schluessel: wyss-academy
+    name: Wyss Academy for Nature
+    bexio: [121]
+    pipedrive: [571]
+    bestaetigt: false
+
+  - schluessel: be-advanced
+    name: be-advanced AG
+    bexio: [28]
+    toggl: [46850127]
+    pipedrive: [382]
+    bestaetigt: false
+
+  - schluessel: swiss-bankers
+    name: Swiss Bankers Prepaid Services AG
+    bexio: [175]
+    toggl: [68433892]
+    pipedrive: [756, 767]
+    bestaetigt: false
+
+  - schluessel: mobiliar
+    name: Schweizerische Mobiliar Versicherungsgesellschaft AG
+    bexio: [83]
+    pipedrive: [154]
+    bestaetigt: false
+
+  - schluessel: advis
+    name: ADVIS AG
+    bexio: [67]
+    pipedrive: [446]
+    bestaetigt: false
+
+  - schluessel: bfh
+    name: Berner Fachhochschule
+    bexio: [98]
+    toggl: [55999062]
+    pipedrive: [363]
+    bestaetigt: false
+
+  - schluessel: ast-fischer
+    name: AST & FISCHER AG
+    bexio: [2]
+    pipedrive: [129]
+    bestaetigt: false
+
+  - schluessel: stadt-zuerich
+    name: Stadt Zürich Stadtentwicklung
+    bexio: [92]
+    pipedrive: [501]
+    bestaetigt: false
+
+  - schluessel: spie
+    name: SPIE ICS AG
+    bexio: [140]
+    toggl: [61709098]
+    pipedrive: [582]
+    bestaetigt: false
+
+  - schluessel: sublime-esthetics
+    name: Sublime Esthetics
+    bexio: [134]
+    toggl: [60859694]
+    pipedrive: [575]
+    bestaetigt: false
+
+  - schluessel: stadt-thun
+    name: Stadt Thun
+    bexio: [53]
+    pipedrive: [298]
+    bestaetigt: false
+
+  - schluessel: hauptstadtregion
+    name: Hauptstadtregion Schweiz
+    bexio: [47]
+    pipedrive: [284]
+    bestaetigt: false
+
+  - schluessel: puzzle-itc
+    name: Puzzle ITC GmbH
+    bexio: [5]
+    pipedrive: [153]
+    bestaetigt: false
+
+  - schluessel: t-r
+    name: T+R AG
+    bexio: [23]
+    toggl: [67591979]
+    pipedrive: [753, 750, 632]
+    bestaetigt: false
+    hinweis: T+R steht in Pipedrive dreimal — dieselbe Firma, drei Datensätze
+
+  - schluessel: gemeinde-koeniz
+    name: Gemeinde Köniz
+    bexio: [146, 137]
+    toggl: [61566288]
+    pipedrive: [572, 707]
+    bestaetigt: false
+    hinweis: >-
+      Bexio führt zwei Direktionen (Präsidiales und Finanzen, Planung und Verkehr).
+      Der Schlüssel fasst sie zur Gemeinde zusammen; wer die Direktionen getrennt
+      braucht, nimmt bexio_rechnungen.kunden_id.
+
+  - schluessel: artiset
+    name: ARTISET
+    bexio: [125]
+    pipedrive: [516]
+    bestaetigt: false
+
+  - schluessel: uni-fribourg
+    name: Université de Fribourg, Human-IST Institute
+    bexio: [20]
+    pipedrive: [119]
+    bestaetigt: false
+
+  - schluessel: gsw
+    name: GSW Treuhand AG
+    bexio: [185]
+    toggl: [68681690]
+    pipedrive: [765]
+    bestaetigt: false
+
+  - schluessel: rueedu
+    name: Rüedu AG
+    bexio: [135]
+    pipedrive: [580]
+    bestaetigt: false
+
+  - schluessel: aue
+    name: Amt für Umwelt und Energie des Kantons Bern (AUE)
+    bexio: [116]
+    toggl: [68357681]
+    pipedrive: [543]
+    bestaetigt: false
+
+  - schluessel: bekb
+    name: Berner Kantonalbank (BEKB)
+    bexio: [42]
+    pipedrive: [391]
+    bestaetigt: false
+
+  - schluessel: zebbra
+    name: zebbra AG
+    bexio: [65]
+    pipedrive: [438]
+    bestaetigt: false
+
+  - schluessel: fhnw
+    name: Hochschule für Wirtschaft FHNW
+    bexio: [37]
+    pipedrive: [158]
+    bestaetigt: false
+
+  - schluessel: energie-thun
+    name: Energie Thun AG
+    bexio: [88]
+    pipedrive: [617]
+    bestaetigt: false
+
+  - schluessel: oekowatt
+    name: OekoWatt AG
+    bexio: [104]
+    pipedrive: [540]
+    bestaetigt: false
+
+  - schluessel: enfk-zentralschweiz
+    name: Energiefachstellenkonferenz Zentralschweiz
+    bexio: [152]
+    pipedrive: [666]
+    bestaetigt: false
+
+  - schluessel: matrics
+    name: MATRICS Consult Ltd
+    bexio: [60]
+    pipedrive: [444]
+    bestaetigt: false
+
+  - schluessel: treuhand-suisse-bern
+    name: TREUHAND|SUISSE Sektion Bern
+    bexio: [172]
+    toggl: [68316116]
+    bestaetigt: false
+
+  - schluessel: bernapark
+    name: Bernapark AG
+    bexio: [15]
+    pipedrive: [134]
+    bestaetigt: false
+
+  - schluessel: rb-baumgartner
+    name: RB Baumgartner AG
+    bexio: [119]
+    pipedrive: [553]
+    bestaetigt: false
+
+  - schluessel: stadt-bern
+    name: Stadt Bern
+    bexio: [94, 177]
+    toggl: [68572379]
+    pipedrive: [359, 659]
+    bestaetigt: false
+    hinweis: >-
+      Bexio führt zwei Stellen (SUE sowie Präsidialdirektion). Der Schlüssel fasst
+      sie zur Stadt zusammen.
+
+  - schluessel: overpar
+    name: Overpar Solutions AG
+    bexio: [136]
+    toggl: [62716485]
+    bestaetigt: false
+
+  - schluessel: post
+    name: Die Schweizerische Post AG
+    bexio: [40]
+    pipedrive: [331]
+    bestaetigt: false
+    hinweis: >-
+      Nur die Post selbst. PostFinance (Pipedrive 109) und PostAuto (108) sind
+      eigene Gesellschaften und gehören NICHT hierher.
+
+  - schluessel: recircle
+    name: reCIRCLE AG
+    bexio: [55]
+    pipedrive: [428]
+    bestaetigt: false
+
+  - schluessel: zeilenwerk
+    name: Zeilenwerk GmbH
+    bexio: [132]
+    pipedrive: [561]
+    bestaetigt: false
+
+  - schluessel: bambit
+    name: bambit GmbH
+    bexio: [49]
+    pipedrive: [165]
+    bestaetigt: false
+
+  - schluessel: innosmith
+    name: InnoSmith GmbH (intern)
+    toggl: [51714639]
+    pipedrive: [214]
+    bestaetigt: false
+    hinweis: >-
+      Die eigene Firma, keine Kundschaft. In Toggl stehen darunter 670 Stunden
+      interne, nicht verrechenbare Arbeit.
+
+# Was sich nicht eindeutig zuordnen liess. Wird NICHT geraten und NICHT verwendet;
+# der Katalog nennt diese Fälle, damit die Lücke sichtbar bleibt statt still zu sein.
+offen:
+  - system: toggl
+    kennung: 57555015
+    name: WA-AUE
+    frage: >-
+      Einziges Projekt «MS4 Kontinuierliche Unterstützung», 184 Stunden von
+      September 2024 bis Dezember 2025. Gehört das zur Wyss Academy, zum Amt für
+      Umwelt und Energie, oder ist es ein gemeinsames Vorhaben beider?
+
+  - system: pipedrive
+    kennung: 652
+    name: Kanton Bern
+    frage: >-
+      155'000 CHF gewonnen unter dem Dach «Kanton Bern». Welches Amt hat den
+      Auftrag tatsächlich vergeben? Solange das offen ist, darf der Betrag keiner
+      Kundschaft zugerechnet werden.
+
+  - system: pipedrive
+    kennung: 724
+    name: Bildung und Kultur im Kanton Bern
+    frage: >-
+      191'720 CHF gewonnen. Die Bildungs- und Kulturdirektion ist die vorgesetzte
+      Stelle des Mittelschul- und Berufsbildungsamts. Derselbe Auftraggeber wie
+      «mba» oder eine eigene Kundschaft?
+
+  - system: pipedrive
+    kennung: 495
+    name: Bau- und Verkehrsdirektion des Kantons Bern
+    frage: >-
+      Die vorgesetzte Direktion des AGG. In Bexio heisst der Kunde «Bau- und
+      Verkehrsdirektion ... Amt für Grundstücke und Gebäude» — gehört diese
+      Pipedrive-Organisation zu «agg» oder ist sie eine eigene Kundschaft?

@@ -34,6 +34,9 @@ docker/sandbox/
 docs/
 *.md
 !src/backend/app/**/*.md
+# Ausnahme: kein Dokument, sondern ein Stammdatum. Der Datenraum braucht die
+# Zuordnung zur Laufzeit, sonst findet er zu keiner Kundschaft etwas.
+!docs/kundenschluessel.yaml
 
 # Tests
 src/backend/tests/
