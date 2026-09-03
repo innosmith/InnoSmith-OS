@@ -12,6 +12,11 @@ Aufruf im Container:
 
     python /app/scripts/agenten_pruefung.py            # alle Szenarien
     python /app/scripts/agenten_pruefung.py 1 3        # nur die genannten
+    python /app/scripts/agenten_pruefung.py 1 --modell anthropic/claude-sonnet-5
+
+Bei einem Cloud-Modell ist ein anderes Ergebnis zu erwarten und kein Fehler: der
+Cloud-Pfad laeuft unter Default-Deny -- kein Gedaechtnis, keine Kontextdateien, und
+nur ausdruecklich freigegebene MCP-Server (siehe ``build_chat_agent``).
 """
 
 import asyncio
@@ -22,8 +27,8 @@ import uuid
 from pathlib import Path
 
 # Mit Praefix, sonst gilt das Modell laut ``_is_local_model`` als Cloud-Modell und
-# wird ueber den LiteLLM-Proxy geleitet -- der auf dieser Maschine seit Tagen nicht
-# laeuft. Das kostete den ersten Probelauf: «Connection error» statt einer Antwort.
+# wird ueber den LiteLLM-Proxy geleitet. Das kostete den ersten Probelauf, als der
+# Proxy nicht lief: «Connection error» statt einer Antwort.
 MODELL = "ollama/qwen3.6:latest"
 DENKMODUS = "kurz"
 SERVER = ["datenraum", "sandbox"]
@@ -76,7 +81,7 @@ SZENARIEN = [
 ]
 
 
-async def _lauf(szenario: dict) -> dict:
+async def _lauf(szenario: dict, modell: str = MODELL) -> dict:
     from app.routers.chat import _build_agent_prompt
     from app.services.hermes_worker import build_chat_agent, ensure_runtime_ready
 
@@ -101,7 +106,7 @@ async def _lauf(szenario: dict) -> dict:
     prompt = await _build_agent_prompt(szenario["frage"])
     agent = await asyncio.to_thread(
         build_chat_agent,
-        MODELL,
+        modell,
         enabled_servers=SERVER,
         include_memory=False,
         on_tool_start=on_tool_start,
@@ -110,7 +115,7 @@ async def _lauf(szenario: dict) -> dict:
 
     from app.services import denkstufen
 
-    overrides = denkstufen.request_overrides(DENKMODUS, MODELL)
+    overrides = denkstufen.request_overrides(DENKMODUS, modell)
     if overrides:
         agent.request_overrides = {**(getattr(agent, "request_overrides", None) or {}), **overrides}
 
@@ -137,9 +142,17 @@ async def _lauf(szenario: dict) -> dict:
 
 
 async def main() -> None:
-    gewuenscht = {int(a) for a in sys.argv[1:] if a.isdigit()}
+    argumente = sys.argv[1:]
+    modell = MODELL
+    if "--modell" in argumente:
+        stelle = argumente.index("--modell")
+        modell = argumente[stelle + 1]
+        argumente = argumente[:stelle] + argumente[stelle + 2:]
+    gewuenscht = {int(a) for a in argumente if a.isdigit()}
+
     ziel = Path("/tmp/agenten_pruefung.jsonl")
     ziel.unlink(missing_ok=True)
+    print(f"Modell: {modell} | Denkmodus: {DENKMODUS}", flush=True)
 
     for szenario in SZENARIEN:
         if gewuenscht and szenario["nr"] not in gewuenscht:
@@ -148,8 +161,8 @@ async def main() -> None:
         print(f"    Frage:    {szenario['frage']}", flush=True)
         print(f"    Erwartet: {szenario['erwartet']}", flush=True)
 
-        ergebnis = await _lauf(szenario)
-        ergebnis.update({"nr": szenario["nr"], "titel": szenario["titel"],
+        ergebnis = await _lauf(szenario, modell)
+        ergebnis.update({"nr": szenario["nr"], "titel": szenario["titel"], "modell": modell,
                          "frage": szenario["frage"], "erwartet": szenario["erwartet"]})
         with ziel.open("a", encoding="utf-8") as f:
             f.write(json.dumps(ergebnis, ensure_ascii=False) + "\n")

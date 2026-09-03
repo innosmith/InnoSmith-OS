@@ -136,7 +136,9 @@ health: ## Health-Checks ausfuehren
 	@echo "PING" | nc -w 2 localhost 3310 2>/dev/null || echo "  nicht erreichbar"
 	@echo ""
 	@echo "=== LiteLLM ==="
-	@curl -sf http://localhost:4000/health 2>/dev/null || echo "  nicht erreichbar"
+	@curl -sf http://localhost:4000/health/readiness >/dev/null 2>&1 \
+		&& echo "  erreichbar" \
+		|| echo "  NICHT ERREICHBAR -- alle Cloud-Modelle fallen aus"
 	@echo ""
 	@echo "=== Ollama ==="
 	@curl -sf http://localhost:11434/api/tags 2>/dev/null | head -c 100 || echo "  nicht erreichbar"

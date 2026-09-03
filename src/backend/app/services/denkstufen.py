@@ -63,7 +63,15 @@ teurer als die Wiederholung.
 """
 
 _ANTHROPIC_BUDGET: dict[str, int] = {"kurz": 2048, "lang": 8192}
-"""Denkbudget in Tokens. Anthropic kennt keine Stufen, nur Zahlen."""
+"""Denkbudget in Tokens -- die alte Form, bis Claude 4.5."""
+
+_ANTHROPIC_EFFORT: dict[str, str] = {"kurz": "low", "lang": "high"}
+"""Denkstaerke als Stufe -- die neue Form, ab Claude 4.6.
+
+Am 03.09.2026 gegen den Proxy gemessen: 4.5 und aelter nehmen nur die alte Form,
+4.7 und neuer nur die neue, 4.6 beide. Die Grenze liegt also zwischen 4.5 und 4.6,
+nicht beim Generationswechsel -- opus-4-7 verhaelt sich wie opus-5.
+"""
 
 
 def _anbieter(modell: str) -> str:
@@ -77,6 +85,20 @@ def _anbieter(modell: str) -> str:
     if "/" not in name:
         return "ollama"
     return name.split("/", 1)[0].lower()
+
+
+def _anthropic_version(modell: str) -> tuple[int, int]:
+    """Version aus ``claude-opus-4-7`` bzw. ``claude-sonnet-5``.
+
+    Unbekanntes gilt als neu: die neue Form nehmen alle aktuellen Modelle an, die
+    alte nur die auslaufenden. Wer raet, raet damit in die haltbare Richtung.
+    """
+    import re
+
+    treffer = re.search(r"claude-[a-z]+-(\d+)(?:-(\d+))?", modell or "")
+    if not treffer:
+        return (99, 0)
+    return (int(treffer.group(1)), int(treffer.group(2) or 0))
 
 
 def normalisiere(stufe: str | None) -> Stufe:
@@ -118,10 +140,19 @@ def request_overrides(stufe: str | None, modell: str) -> dict:
             return {}
         # Extended Thinking verlangt temperature=1 -- ein anderer Wert wird mit
         # einem Fehler quittiert, nicht ignoriert.
-        return {
-            "temperature": 1.0,
-            "thinking": {"type": "enabled", "budget_tokens": _ANTHROPIC_BUDGET[gewaehlt]},
-        }
+        #
+        # Beides muss in ``extra_body``: Der Weg zu Anthropic fuehrt ueber den
+        # LiteLLM-Proxy und damit ueber das OpenAI-SDK, dessen
+        # ``Completions.create()`` nur bekannte Schluesselwoerter annimmt. Stand
+        # ``thinking`` oben, brach jeder Lauf sofort ab -- vor dem ersten
+        # Werkzeugaufruf, also genau bei einer Vorfuehrung.
+        if _anthropic_version(modell) >= (4, 6):
+            zusatz = {"thinking": {"type": "adaptive"},
+                      "output_config": {"effort": _ANTHROPIC_EFFORT[gewaehlt]}}
+        else:
+            zusatz = {"thinking": {"type": "enabled",
+                                   "budget_tokens": _ANTHROPIC_BUDGET[gewaehlt]}}
+        return {"temperature": 1.0, "extra_body": zusatz}
 
     if anbieter == "openai":
         if gewaehlt == "aus":
