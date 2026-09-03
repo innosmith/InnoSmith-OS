@@ -745,6 +745,27 @@ Bexio-Tabellen ihren Stand; der Fehler landet im Katalog unter
 `quellen.<name>.letzter_fehler`. Eine leer zurückgekommene Tabelle ersetzt nie
 eine vorhandene.
 
+### Der Agent darf nicht auf sich selbst warten
+
+Die Zuordnungsvorschläge kosten je Lücke einen Aufruf auf dem lokalen Modell. Das
+ist im Hintergrundtakt richtig und im Werkzeugpfad falsch: ruft ein Agent mitten
+im Gespräch `datenraum_auffrischen`, belegt er dieses Modell bereits selbst. Am
+3. September 2026 dauerte der Aufruf dadurch **276 statt 13 Sekunden** und trieb
+einen Chat-Lauf in sein Zeitlimit von 600 Sekunden — der Agent wartete
+minutenlang auf seine eigene Auffrischung, während beide um dieselbe GPU
+kämpften. Darum setzt der Werkzeugpfad `vorschlaege=False`.
+
+Der zweite Teil desselben Problems war die Wiederholung. Acht Kundschaften kommen
+nur in einem System vor; das Modell stellte das jede Stunde neu fest. Seither hält
+`ohne_gegenstueck` das Ergebnis fest, und der Takt fiel von 276 auf **10 Sekunden**.
+Was einmal beurteilt wurde, wird nicht erneut beurteilt.
+
+Damit das Gelernte hält, ist `docs/kundenschluessel.yaml` **schreibend
+eingehängt**. Läge sie nur im Abbild, wäre jeder Vorschlag und jedes
+`ohne_gegenstueck` beim nächsten `make prod` weg — die Pflege liefe stündlich und
+käme nie an. So landet die Ergänzung im Arbeitsbaum und ist über `git diff`
+prüfbar, wie es der Prüfpfad-Gedanke vorsieht.
+
 ## Grenzen
 
 - Der Stand ist bis zu eine Stunde alt. Für taggenaue Fragen gibt es

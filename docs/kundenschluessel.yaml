@@ -325,6 +325,18 @@ kundschaften:
       Die eigene Firma, keine Kundschaft. In Toggl stehen darunter 670 Stunden
       interne, nicht verrechenbare Arbeit.
 
+# Kommt nur in einem System vor und braucht deshalb keinen Schluessel.
+# Festgehalten, damit der Abgleich das nicht stuendlich neu beurteilt.
+ohne_gegenstueck:
+  - 'bexio:142'
+  - 'bexio:25'
+  - 'bexio:51'
+  - 'bexio:69'
+  - 'bexio:73'
+  - 'bexio:75'
+  - 'pipedrive:133'
+  - 'pipedrive:730'
+
 # Was sich nicht eindeutig zuordnen laesst. Wird nicht geraten --
 # hier steht die Frage, bis ein Mensch sie beantwortet.
 offen:

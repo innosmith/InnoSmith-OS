@@ -59,6 +59,12 @@ services:
       - ${HOME}/.hermes:/home/taskpilot/.hermes
       - ${HOME}/OneDrive/Finanzen/Kreditoren:${HOME}/OneDrive/Finanzen/Kreditoren:ro
       - ${HOME}/.local/share/taskpilot/datenraum:${HOME}/.local/share/taskpilot/datenraum
+      # Schreibend, und das ist der Zweck: der Abgleich ergänzt Vorschläge, offene
+      # Fragen und «kommt nur in einem System vor» selbst. Läge die Datei nur im
+      # Abbild, wäre jede dieser Erkenntnisse beim nächsten Bauen weg -- die
+      # Pflege liefe stündlich neu und käme nie an. So landet sie im
+      # Arbeitsbaum und wird über `git diff` prüfbar, wie vorgesehen.
+      - ../docs/kundenschluessel.yaml:/app/docs/kundenschluessel.yaml
     # no-new-privileges deaktiviert: Kernel 6.17-nvidia blockt jede exec mit diesem Flag
     # Security durch non-root User (taskpilot) + Cloudflare Zero Trust gewaehrleistet
     depends_on:

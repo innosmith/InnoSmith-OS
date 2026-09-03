@@ -19,6 +19,7 @@ import pytest
 
 BACKEND = os.path.join(os.path.dirname(__file__), "..")
 SRC = os.path.join(BACKEND, "..")
+WURZEL = os.path.join(SRC, "..")
 sys.path.insert(0, BACKEND)
 
 
@@ -901,3 +902,17 @@ class TestDerAgentWartetNichtAufSichSelbst:
         # Zweiter Lauf: kein weiterer Modellaufruf.
         asyncio.run(ks.vorschlagen(bestand, datei))
         assert len(aufrufe) == 1, "dieselbe Kundschaft wurde erneut beurteilt"
+
+    def test_die_pflege_ueberlebt_den_neubau(self):
+        """Läge die Datei nur im Abbild, wäre jede maschinelle Ergänzung beim
+        nächsten `make prod` weg -- und die Pflege liefe ewig ohne anzukommen."""
+        compose = os.path.join(WURZEL, "docker", "docker-compose.prod.yml")
+        with open(compose, encoding="utf-8") as f:
+            inhalt = f.read()
+        assert "../docs/kundenschluessel.yaml:/app/docs/kundenschluessel.yaml" in inhalt
+        assert ":ro" not in inhalt[inhalt.index("kundenschluessel.yaml:/app"):][:80], (
+            "schreibend eingehaengt sein, sonst schlaegt der Abgleich fehl"
+        )
+        assert os.path.exists(os.path.join(WURZEL, "docs", "kundenschluessel.yaml")), (
+            "fehlt die Quelle, legt Docker ein Verzeichnis an -- so starb der LiteLLM-Proxy"
+        )
