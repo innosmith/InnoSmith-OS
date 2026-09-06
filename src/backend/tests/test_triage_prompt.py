@@ -1334,3 +1334,99 @@ class TestTriageLabels:
         )
         assert block, "TRIAGE_LABELS-Block im Frontend nicht gefunden"
         assert tuple(re.findall(r"'([^']+)'", block.group(1))) == TRIAGE_LABELS
+
+
+class TestPromptWidersprichtDemSkillNicht:
+    """Prompt und Skill müssen dieselbe Stufenleiter und dieselben Werkzeuge nennen.
+
+    Befund vom 06.09.2026: Der Prompt lehrte drei Stufen mit **System an Stelle 2**,
+    der Skill vier Stufen mit **Finanzen an Stelle 2**. Beide Seiten waren für sich
+    plausibel, und kein Test las sie gemeinsam -- genau die Lage, vor der
+    ``testing-konventionen.mdc`` warnt.
+
+    Die Wirkung ist gemessen: in zehn Wochen landeten sechs echte
+    Lieferantenrechnungen als ``System`` im Postfach-Unterordner und damit aus dem
+    Blick -- Metanet (2x), Salt, Microsoft, Cloudflare und Cursor. Wer zuerst
+    "automatisiert?" fragt, beantwortet bei einer Rechnung von ``invoice@metanet.ch``
+    mit ja und hört auf, bevor die Geldfrage überhaupt gestellt ist. Die Reihenfolge
+    ist deshalb keine Formsache, sondern die Entscheidung selbst.
+
+    Der Skill wurde am 30.08.2026 korrigiert, der Prompt blieb sieben Tage falsch.
+    Dass danach keine Rechnung mehr falsch lag, ist kein Beweis für Harmlosigkeit:
+    für Metanet und Salt griffen inzwischen deterministische Regeln.
+    """
+
+    async def _build_prompt(self, job, two_pass=False):
+        from app.services.hermes_worker import get_settings
+        with patch("app.services.hermes_worker._load_projects_context", new_callable=AsyncMock) as mock_projects, \
+             patch("app.services.hermes_worker._load_style_profile", return_value="(Stil)"), \
+             patch("app.services.hermes_worker._load_triage_skill", return_value="(Skill)"), \
+             patch("app.services.hermes_worker._triage_skill_available", return_value=True), \
+             patch("app.services.hermes_worker._style_skill_available", return_value=True), \
+             patch.object(get_settings(), "two_pass_draft", two_pass):
+            mock_projects.return_value = "## VERFÜGBARE PROJEKTE\n- \"TestProjekt\" (id: 123)"
+            from app.services.hermes_worker import _build_triage_prompt
+            return await _build_triage_prompt(job)
+
+    @pytest.mark.asyncio
+    async def test_finanzen_is_asked_before_system(self, fake_job):
+        """Die Geldfrage kommt vor der Automatenfrage -- sonst gewinnt der Automat."""
+        prompt = await self._build_prompt(fake_job)
+        assert "Stufe 2 (Finanzen)" in prompt, (
+            "Der Prompt nennt Finanzen nicht als Stufe 2. Genau diese Umkehrung liess "
+            "sechs Lieferantenrechnungen als 'System' aus dem Posteingang verschwinden."
+        )
+        assert "Stufe 2 (System)" not in prompt
+        assert prompt.index("Stufe 2 (Finanzen)") < prompt.index("Stufe 3 (System)")
+
+    @pytest.mark.asyncio
+    async def test_prompt_level_order_matches_the_rolled_out_skill(self, fake_job):
+        """Gegenprobe am ausgerollten Skill, nicht an einer Kopie im Test.
+
+        Ohne diesen Vergleich prüft der Test nur, dass der Prompt zu sich selbst
+        passt -- und die nächste Skill-Änderung reisst denselben Graben wieder auf.
+        """
+        skill = Path.home() / ".hermes/skills/email-triage/references/triage-rules.md"
+        if not skill.is_file():
+            pytest.skip("Triage-Skill nicht ausgerollt")
+        text = skill.read_text(encoding="utf-8")
+        prompt = await self._build_prompt(fake_job)
+        for stufe, thema in ((1, "Signale"), (2, "Finanzen"), (3, "System")):
+            assert f"Stufe {stufe} -- {thema}" in text, (
+                f"Der Skill nennt Stufe {stufe} nicht mehr '{thema}' -- dann muss der "
+                "Prompt mitgeändert werden."
+            )
+            assert f"Stufe {stufe} ({thema})" in prompt
+
+    @pytest.mark.asyncio
+    async def test_prompt_does_not_order_impossible_actions(self, fake_job):
+        """Der Triage-Agent kann Kategorie und Move gar nicht setzen.
+
+        ``mcp-graph`` läuft für ihn im Modus ``safe``, und ``set_email_categories``
+        wie ``move_email_to_folder`` stehen in ``_MUTATING_TOOLS``. Eine Anweisung,
+        die ein fehlendes Werkzeug verlangt, kostet Werkzeugsuchen und erzeugt ein
+        falsches Weltmodell -- dieselbe Gattung Fehler wie der Platzhalter-Entwurf
+        vom 03.08.2026, wo Prompt und Skill Verschiedenes verlangten.
+        """
+        prompt = await self._build_prompt(fake_job, two_pass=True)
+        assert "Setze die Outlook-Kategorie" not in prompt
+        assert "Verschiebe bei Bedarf" not in prompt
+
+    @pytest.mark.asyncio
+    async def test_prompt_names_callable_tools(self, fake_job):
+        """Die genannten Werkzeugnamen müssen die aufrufbaren sein.
+
+        Hermes präfixt MCP-Werkzeuge mit dem Server-Schlüssel. Die kurzen Formen
+        existieren nicht; der Agent musste sie über ``tool_search`` erraten und hielt
+        die Übersetzung als Lektion im Gedächtnis -- eine Notiz, die eine falsche
+        Anleitung ausgleicht, statt sie zu beheben.
+        """
+        prompt = await self._build_prompt(fake_job)
+        for tool in (
+            "mcp_graph_get_email(",
+            "mcp_graph_get_email_categories(",
+            "mcp_graph_get_thread(",
+            "mcp_graph_search_sender_history(",
+            "mcp_taskpilot_get_sender_profile(",
+        ):
+            assert tool in prompt, f"{tool} fehlt -- Prompt nennt vermutlich die Kurzform"

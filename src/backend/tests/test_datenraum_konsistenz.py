@@ -550,6 +550,43 @@ class TestRezepteLaufen:
             "Schlüssels zu prüfen, nicht der Test anzupassen."
         )
 
+    def test_der_aufwand_im_rezept_ist_der_aufwand_der_finanzansicht(self, rezepte, verbindung):
+        """Die eine Zahl, die zweimal existierte -- bis zum 06.09.2026.
+
+        Bei der Kreuzprobe der Finanzumstellung fiel auf: die Ansicht rechnete Soll
+        minus Haben und nannte für 2025 335'982 CHF, das Rezept empfahl ``WHERE
+        ist_aufwand`` und lieferte 401'459. Beide waren erklärbar, beide standen im
+        selben System, und der Anwender hätte sie in derselben Sitzung nebeneinander
+        gesehen -- der Fall, für den dieses ganze Regelwerk existiert.
+
+        Richtig ist netto: von der Differenz sind 43'335 CHF Umbuchungen von einem
+        Aufwandskonto auf ein anderes, die brutto zweimal zählen, und 22'142 CHF
+        Rückerstattungen, die brutto ganz fehlen.
+
+        Der Test hält nicht die Zahl fest, sondern die **Gleichheit** -- sonst
+        müsste er bei jeder neuen Buchung nachgezogen werden und würde entfernt.
+        """
+        c, verzeichnis = verbindung
+        from app.routers.finance import _compute_expenses_by_month
+
+        sql = rezepte["Aufwand total je Jahr (netto, die Zahl der Finanzansicht)"]
+        aus_rezept = {
+            int(jahr): float(betrag)
+            for jahr, betrag in c.sql(sql.replace("/daten/", f"{verzeichnis}/")).fetchall()
+        }
+        assert aus_rezept, "das Rezept liefert keine Zeile"
+
+        # Nur abgeschlossene Jahre: das laufende hängt am heutigen Datum, und die
+        # Ansicht schneidet dort ab, das Rezept nicht.
+        for jahr in sorted(aus_rezept)[:-1]:
+            aus_ansicht = round(
+                sum(_compute_expenses_by_month(f"{jahr}-01-01", f"{jahr}-12-31").values()), 2
+            )
+            assert abs(aus_rezept[jahr] - aus_ansicht) < 0.02, (
+                f"{jahr}: Rezept {aus_rezept[jahr]:,.2f} gegen Ansicht {aus_ansicht:,.2f} -- "
+                "Agent und Finanzansicht nennen verschiedene Ausgabenzahlen"
+            )
+
     def test_kein_rezept_filtert_auf_einen_kundennamen(self, rezepte):
         """Der Namensfilter ist die Fehlerquelle, die der Schlüssel ablöst. Ein
         Rezept, das ihn vorführt, lehrt genau das Falsche."""

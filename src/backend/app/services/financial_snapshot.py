@@ -430,17 +430,35 @@ def _md_creditors(d: dict) -> str:
         lines.append("**KPIs (InvoiceInsight)**")
         for k, v in kpis.items():
             lines.append(f"- {k}: {v}")
+    # Diese Resource antwortet je nach InvoiceInsight-Version mit Datensätzen oder
+    # mit einem fertigen Textblock. Beides muss durchgehen: am 06.09.2026 lieferte sie
+    # Text, und der Zugriff darauf wie auf einen Datensatz liess die **ganze**
+    # Kreditoren-Sektion ausfallen. Der Snapshot zeigte dann «(Daten nicht verfügbar)»,
+    # obwohl KPIs und Lieferanten vorlagen -- und die Totalzeile hätte davor
+    # «CHF None» behauptet, was schlimmer ist als eine fehlende Zeile.
     rec = d.get("recurring_vs_onetime") or {}
     if isinstance(rec, dict) and rec:
-        lines.append("")
-        lines.append(
-            f"**Wiederkehrend vs. einmalig**: wiederkehrend {_chf(rec.get('recurring_total'))}, "
-            f"einmalig {_chf(rec.get('onetime_total'))}"
-        )
-        for r in (rec.get("recurring") or [])[:15]:
-            name = r.get("name") or r.get("Kreditor") or r.get("Kategorie") or "?"
-            total = r.get("Total_CHF") or r.get("total_chf") or r.get("Total") or 0
-            lines.append(f"- (wiederkehrend) {name}: {_chf(total)}")
+        summen = [
+            f"wiederkehrend {_chf(rec['recurring_total'])}" if "recurring_total" in rec else "",
+            f"einmalig {_chf(rec['onetime_total'])}" if "onetime_total" in rec else "",
+        ]
+        if any(summen):
+            lines.append("")
+            lines.append("**Wiederkehrend vs. einmalig**: " + ", ".join(s for s in summen if s))
+
+        for art, beschriftung in (("recurring", "wiederkehrend"), ("onetime", "einmalig")):
+            inhalt = rec.get(art)
+            if isinstance(inhalt, list):
+                for r in inhalt[:15]:
+                    if not isinstance(r, dict):
+                        lines.append(f"- ({beschriftung}) {r}")
+                        continue
+                    name = r.get("name") or r.get("Kreditor") or r.get("Kategorie") or "?"
+                    total = r.get("Total_CHF") or r.get("total_chf") or r.get("Total") or 0
+                    lines.append(f"- ({beschriftung}) {name}: {_chf(total)}")
+            elif isinstance(inhalt, str) and inhalt.strip():
+                lines.append("")
+                lines.append(f"**{beschriftung.capitalize()} (roh)**: {inhalt.strip()[:1500]}")
     cd = d.get("cost_distribution")
     if cd:
         lines.append("")
@@ -474,6 +492,39 @@ def _md_creditors(d: dict) -> str:
         lines.append(f"**Lieferanten-Übersicht (roh)**: {str(vendors)[:1500]}")
 
     return "\n".join(lines) if lines else "(Keine InvoiceInsight-Daten verfügbar)"
+
+
+# ── Ausgaben-Lesart ──────────────────────────────────────
+#
+# Drei Bestände berühren Ausgaben, und nur einer beantwortet «wie viel». Stehen die
+# Kreditoren- und die Journal-Sektion zusammen im Snapshot, sieht das Modell zwei
+# Ausgabensummen ohne Hinweis darauf, dass sie verschiedene Fragen beantworten -- und
+# die naheliegende Handlung, sie zu addieren, ergibt eine Zahl, die es nicht gibt.
+#
+# Die Zahlen sind gemessen (03.09.2026, Geschäftsjahr 2025) und stehen bewusst dabei:
+# eine Warnung ohne Zahl wirkt nicht. Dieselbe Lesart steht als ``KREDITOREN_LESART``
+# im MCP-Server des Datenraums -- sie gilt für Mensch und Maschine gleich.
+AUSGABEN_LESART = """**Lesart der Ausgabenzahlen -- vor jeder Aussage beachten**
+
+Die beiden Ausgaben-Sektionen dieses Snapshots stammen aus verschiedenen Beständen
+und beantworten verschiedene Fragen. **Nie über beide summieren** -- das zählt doppelt.
+
+- *Aufwand nach Kategorie / nach Konto* kommt aus dem Buchungsjournal und beantwortet
+  «was hat uns X gekostet». Das ist die vollständige Sicht. Die Zahlen sind **netto** --
+  Gegenbuchungen im Haben eines Aufwandskontos sind abgezogen. Wer das Journal selbst
+  abfragt und nur die Sollseite summiert, erhält für 2025 401'459 statt 335'982 CHF:
+  43'335 davon sind Umbuchungen zwischen zwei Aufwandskonten, also derselbe Betrag
+  zweimal, und 22'142 CHF Rückerstattungen fehlen. Weicht eine selbst gerechnete Zahl
+  um diese Grössenordnung ab, ist das der Grund.
+- *Kreditoren (InvoiceInsight)* beantwortet «wofür genau, welcher Lieferant, welches
+  Abo». Als Ausgabensumme ist es **ungeeignet**: 2025 liefen nur 88'177 von 335'982
+  CHF Aufwand über den Kreditorenweg, also 26 Prozent. Kartenbezahlte Abos erreichen
+  die Buchhaltung anders (Soll Aufwandskonto / Haben Kontokorrent Gesellschafter) und
+  fehlen dort vollständig -- Cursor stand 2026 mit 12'924 CHF im Journal und mit null
+  in den Kreditoren.
+
+Für «was ist offen und fällig» ist umgekehrt der Kreditorenbestand richtig und das
+Journal ungeeignet."""
 
 
 _RENDERERS: dict[str, Callable[[dict], str]] = {
@@ -530,9 +581,35 @@ async def build_snapshot(user: User, sections: list[str]) -> dict:
         ctx_parts.append(f"Zivilstand: {fset.civil_status}")
     ctx_line = (" | " + " | ".join(ctx_parts)) if ctx_parts else ""
 
+    # Die Lesart nur dann, wenn beide Ausgabenbestände nebeneinander stehen. Ein
+    # Hinweis auf eine Verwechslung, die im vorliegenden Snapshot nicht möglich ist,
+    # wäre Rauschen -- und Rauschen entwertet auch die Hinweise, die tragen.
+    journal_sektionen = {"expenses_by_category", "expenses_by_account", "overview",
+                         "cashflow_forecast"}
+    lesart = ""
+    if "creditors" in result_sections and journal_sektionen & set(result_sections):
+        lesart = f"{AUSGABEN_LESART}\n\n"
+
+    # Datenstand statt Abrufdatum: die Zahlen sind so alt wie der letzte Abgleich,
+    # nicht so alt wie diese Anfrage. Der Unterschied entscheidet darüber, ob eine
+    # Aussage über «den laufenden Monat» belastbar ist.
+    from app.services import datenraum_lesen as dl
+
+    try:
+        datenstand = dl.stand()
+    except Exception as e:  # noqa: BLE001 -- ein fehlender Stand darf keine Analyse verhindern
+        logger.warning("Datenstand nicht lesbar: %s", e)
+        datenstand = {}
+    stand_text = (
+        f"Datenstand: {datenstand['stand'][:16].replace('T', ' ')} UTC "
+        f"({datenstand['alter_stunden']} h alt)"
+        if datenstand.get("stand") else f"Stand: {today.isoformat()}"
+    )
+
     markdown = (
         f"# Finanz-Snapshot\n\n"
-        f"Stand: {today.isoformat()} | Währung: CHF | Rechtsform: GmbH{ctx_line}\n\n"
+        f"{stand_text} | Währung: CHF | Rechtsform: GmbH{ctx_line}\n\n"
+        + lesart
         + "\n\n".join(md_parts)
     )
 
@@ -543,5 +620,6 @@ async def build_snapshot(user: User, sections: list[str]) -> dict:
             "generated_at": today.isoformat(),
             "sections": list(result_sections.keys()),
             "currency": "CHF",
+            "datenstand": datenstand,
         },
     }

@@ -87,8 +87,12 @@ pymupdf>=1.27
 openpyxl>=3.1
 
 # ── Datenraum (lokal materialisierte Tabellen der Fachsysteme) ──
-# Nur pyarrow, bewusst ohne pandas: das Backend schreibt Parquet, es rechnet nicht
-# damit. Gerechnet wird in der Sandbox.
+# Nur pyarrow, bewusst ohne pandas und ohne duckdb: das Backend schreibt die
+# Tabellen und liest sie seit dem 06.09.2026 für die Finanzansicht auch selbst
+# (app/services/datenraum_lesen.py). Die grösste Tabelle hat 5262 Zeilen und passt
+# als Python-Liste in den Speicher -- eine Abfragemaschine dafür wäre ein zweiter
+# Dialekt neben dem der Sandbox, ohne dass sie etwas könnte, was hier gebraucht
+# wird. Analytische Fragen rechnet weiterhin die Sandbox mit DuckDB.
 pyarrow>=18.0
 
 # ── Web Search ──

@@ -1,9 +1,24 @@
 """FastAPI Router für Finanz-Controlling (Cashflow-Historie + Prognose).
 
-Aggregiert Daten aus Bexio (Buchhaltung) und Toggl Track (Zeiterfassung).
-Einnahmen-Historie: Bexio = Master (gestellte Rechnungen).
-Einnahmen laufender Monat: Toggl Track (Stunden x Rate).
-Ausgaben + Banksaldo: Bexio Journal-API (Buchungen aggregiert).
+Alle Zahlen kommen aus dem **Datenraum** (``services/datenraum_lesen.py``), nicht
+mehr live aus den Schnittstellen von Bexio und Toggl. Der Grund ist nicht
+Geschwindigkeit, sondern dass diese Datei bis zum 06.09.2026 ein zweites Mal
+entschied, was Umsatz und was Aufwand ist -- und dabei drei Mal leise falsch lag
+(Fremdwährung, Entwurfsrechnungen, offene Posten). Die Fehler und ihre gemessenen
+Beträge stehen im Modulkopf von ``datenraum_lesen.py``; hier zählt nur, dass die
+Entscheidung jetzt an einer Stelle getroffen wird.
+
+Woher welche Grösse kommt:
+
+* Umsatz-Historie: ``bexio_rechnungen``, gefiltert auf ``ist_umsatz``
+* Ausgaben, Banksaldo, Bilanz: ``bexio_journal`` mit ``betrag_chf``
+* Bankkonten: ``bexio_bankkonten`` -- nie über einen Nummernbereich geraten
+* Laufender Monat: ``toggl_zeiteintraege``
+* Prognose zugesagter Arbeit: Kapazitätsplanung aus der TaskPilot-Datenbank
+
+Die Live-Clients bleiben im Modul, aber **nur** für ``/validate``: die Kreuzprobe
+stellt Datenraum und Schnittstelle nebeneinander und ist der einzige Beleg dafür,
+dass die Umstellung nichts verschoben hat.
 """
 
 import logging
@@ -20,6 +35,8 @@ from sqlalchemy import select
 from app.auth.deps import get_current_user, require_role
 from app.database import async_session
 from app.models import CapacityAllocation, CapacityProject, User
+from app.services import datenraum_lesen as dl
+from app.services.datenraum_lesen import DatenraumUnbrauchbar
 from app.services.finance_settings import (
     ForecastSettings,
     get_forecast_settings_from_settings,
@@ -28,18 +45,24 @@ from app.services.finance_settings import (
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "bexio"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "toggl"))
 from bexio_client import BexioClient, BexioConfig  # noqa: E402
-from toggl_client import TogglClient, TogglConfig  # noqa: E402
 
 logger = logging.getLogger("taskpilot.finance")
 
 router = APIRouter(prefix="/api/finance", tags=["finance"])
 
 # ── Cache ────────────────────────────────────────────────
+# Die TTL ist nur noch das Sicherheitsnetz. Ausschlaggebend ist der Stand des
+# Datenraums im Schlüssel (siehe ``_schluessel``): nach einem Abgleich trifft keine
+# gemerkte Antwort mehr. Ohne das zeigte die Ansicht einen frischen Stand über
+# alten Zahlen -- schlimmer als ein alter Stand, weil es nicht auffällt.
 _overview_cache: TTLCache = TTLCache(maxsize=10, ttl=300)
-_cashflow_cache: TTLCache = TTLCache(maxsize=10, ttl=900)
-_journal_cache: TTLCache = TTLCache(maxsize=5, ttl=600)
-_accounts_cache: TTLCache = TTLCache(maxsize=2, ttl=3600)
+_cashflow_cache: TTLCache = TTLCache(maxsize=20, ttl=900)
 _toggl_rate_cache: TTLCache = TTLCache(maxsize=4, ttl=3600)
+
+
+def _schluessel(basis: str) -> str:
+    """Cache-Schlüssel, an den Stand des Datenraums gebunden."""
+    return f"{basis}@{dl.stand_kennung()}"
 
 # ── Schweizer KMU-Kontenrahmen Kategorien ────────────────
 # Ranges muessen disjunkt sein; _categorize_account iteriert in dict-Order.
@@ -72,6 +95,7 @@ def _is_expense_account(acc_no: int) -> bool:
 # ── Client-Helfer ────────────────────────────────────────
 
 def _get_bexio_client(user: User) -> BexioClient:
+    """Live-Client -- ausschliesslich für die Kreuzprobe in ``/validate``."""
     settings = user.settings or {}
     token = settings.get("bexio_api_token") or ""
     if not token:
@@ -82,18 +106,18 @@ def _get_bexio_client(user: User) -> BexioClient:
     return BexioClient(BexioConfig(api_token=token))
 
 
-def _get_toggl_client(user: User) -> TogglClient:
-    settings = user.settings or {}
-    token = settings.get("toggl_api_token") or ""
-    ws_id = settings.get("toggl_workspace_id") or 0
-    if not token:
-        from app.config import get_settings
-        app_cfg = get_settings()
-        token = app_cfg.toggl_api_token
-        ws_id = ws_id or app_cfg.toggl_workspace_id
-    if not token:
-        raise HTTPException(status_code=400, detail="Toggl API-Token nicht konfiguriert")
-    return TogglClient(TogglConfig(api_token=token, workspace_id=int(ws_id or 0)))
+def _datenraum_fehler(exc: DatenraumUnbrauchbar) -> HTTPException:
+    """Einen Datenraum-Mangel als Fehler weitergeben, nicht als Null.
+
+    503 und nicht 500: der Zustand ist vorübergehend und behebt sich mit dem
+    nächsten Abgleich. Der Text nennt die Ursache, damit im Cockpit nicht «etwas ist
+    schiefgelaufen» steht, während in Wahrheit eine Tabelle fehlt.
+    """
+    logger.warning("Finanzansicht: Datenraum unbrauchbar -- %s", exc)
+    return HTTPException(
+        status_code=503,
+        detail=f"Finanzdaten nicht auswertbar: {exc}",
+    )
 
 
 # ── Hilfs-Funktionen ─────────────────────────────────────
@@ -223,49 +247,24 @@ def _seasonal_forecast(
     return result
 
 
-async def _get_toggl_effective_rates(user: User, since_months: int = 12) -> dict[int, float]:
+def _get_toggl_effective_rates(since_months: int = 12) -> dict[int, float]:
     """Effektive Stundensaetze (CHF/h) pro Toggl-Projekt aus den letzten Monaten.
 
     Quelle der Wahrheit fuer zugesagte Arbeit: der tatsaechlich abgerechnete
-    Satz = Umsatz / Stunden je Projekt (aus dem billable Summary-Report).
+    Satz = Betrag / Stunden je Projekt.
     """
-    cached = _toggl_rate_cache.get("eff_rates")
+    schluessel = _schluessel(f"eff_rates:{since_months}")
+    cached = _toggl_rate_cache.get(schluessel)
     if cached is not None:
         return cached
 
     try:
-        toggl = _get_toggl_client(user)
-    except HTTPException:
-        return {}
-
-    today = date.today()
-    start = (today.replace(day=1) - timedelta(days=30 * since_months)).isoformat()
-    end = today.isoformat()
-    try:
-        summary = await toggl.get_summary_by_project(start, end, billable=True)
-    except Exception as e:  # noqa: BLE001
+        rates = dl.effektive_stundensaetze(since_months)
+    except DatenraumUnbrauchbar as e:
         logger.warning("Toggl-Effektivsaetze nicht verfuegbar: %s", e)
         return {}
 
-    rates: dict[int, float] = {}
-    for group in summary:
-        pid = group.get("id")
-        if not pid:
-            continue
-        sub_groups = group.get("sub_groups") or group.get("items") or []
-        rev = 0.0
-        hrs = 0.0
-        for item in sub_groups:
-            for rate_info in (item.get("rates") or []):
-                secs = rate_info.get("billable_seconds", 0) or 0
-                cents = rate_info.get("hourly_rate_in_cents", 0) or 0
-                h = secs / 3600
-                hrs += h
-                rev += h * (cents / 100)
-        if hrs > 0 and rev > 0:
-            rates[int(pid)] = rev / hrs
-
-    _toggl_rate_cache["eff_rates"] = rates
+    _toggl_rate_cache[schluessel] = rates
     return rates
 
 
@@ -327,7 +326,7 @@ async def _compute_capacity_monthly(
         logger.warning("Kapazitaetsdaten nicht verfuegbar: %s", e)
         return result
 
-    toggl_rates = await _get_toggl_effective_rates(user)
+    toggl_rates = _get_toggl_effective_rates()
 
     for alloc, proj in rows:
         mk = alloc.week_start.strftime("%Y-%m")
@@ -343,159 +342,57 @@ async def _compute_capacity_monthly(
     return result
 
 
-def _parse_toggl_revenue(summary: list[dict]) -> tuple[float, float]:
-    """Berechne Revenue und Stunden aus Toggl v3 Summary Response."""
-    total_revenue = 0.0
-    total_hours = 0.0
-    for group in summary:
-        sub_groups = group.get("sub_groups") or group.get("items") or []
-        for item in sub_groups:
-            rates = item.get("rates") or []
-            for rate_info in rates:
-                billable_secs = rate_info.get("billable_seconds", 0) or 0
-                hourly_cents = rate_info.get("hourly_rate_in_cents", 0) or 0
-                hours = billable_secs / 3600
-                total_hours += hours
-                total_revenue += hours * (hourly_cents / 100)
-            if not rates:
-                secs = item.get("seconds", 0) or item.get("time", 0) or 0
-                total_hours += secs / 3600
-    return total_revenue, total_hours
+def _toggl_monat(monat: str) -> tuple[float, float]:
+    """Verrechenbarer Betrag (netto) und Stunden eines Monats aus der Zeiterfassung.
+
+    Der Betrag ist ohne Mehrwertsteuer, weil Toggl Satz mal Zeit führt. Wer ihn
+    neben fakturierte Beträge stellt, rechnet ihn vorher brutto.
+    """
+    beginn = date.fromisoformat(f"{monat}-01")
+    ende = min(date.today(), _monatsende(beginn))
+    if ende < beginn:
+        return 0.0, 0.0
+    eintraege = dl.zeiteintraege(beginn.isoformat(), ende.isoformat())
+    return (
+        sum(e["betrag"] for e in eintraege),
+        sum(e["stunden"] for e in eintraege),
+    )
 
 
-async def _fetch_recent_invoices(bexio: BexioClient, months: int = 13) -> list[dict]:
-    """Lade Rechnungen der letzten N Monate via Suchfilter."""
-    from_date = (date.today().replace(day=1) - timedelta(days=30 * months)).strftime("%Y-%m-%d")
-    try:
-        results = await bexio.search_invoices(from_date=from_date)
-        if results:
-            return results
-    except Exception as e:
-        logger.warning("Bexio Rechnungssuche fehlgeschlagen: %s -- Fallback auf list", e)
-    return await bexio.list_invoices(limit=500)
-
-
-def _parse_bexio_invoice_total(inv: dict) -> float:
-    """Rechnungsbetrag als float (total inkl. MwSt)."""
-    for field in ("total", "total_gross"):
-        val = inv.get(field)
-        if val is not None:
-            try:
-                return float(val)
-            except (ValueError, TypeError):
-                continue
-    return 0.0
-
-
-def _invoice_is_open(inv: dict) -> bool:
-    """Rechnung ist offen wenn total_remaining_payments > 0."""
-    remaining = inv.get("total_remaining_payments")
-    if remaining is not None:
-        try:
-            return float(remaining) > 0.01
-        except (ValueError, TypeError):
-            pass
-    return inv.get("kb_item_status_id") in (7, 8, 9)
-
-
-def _revenue_by_month_from_invoices(invoices: list[dict]) -> dict[str, float]:
-    """Rechnungen nach Monat gruppieren und Umsatz summieren."""
-    revenue: dict[str, float] = defaultdict(float)
-    for inv in invoices:
-        inv_date = inv.get("is_valid_from") or ""
-        if len(inv_date) >= 7:
-            mk = inv_date[:7]
-            total = _parse_bexio_invoice_total(inv)
-            if total > 0:
-                revenue[mk] += total
-    return dict(revenue)
+def _monatsende(tag: date) -> date:
+    """Letzter Tag des Monats, in dem ``tag`` liegt."""
+    if tag.month == 12:
+        return date(tag.year, 12, 31)
+    return date(tag.year, tag.month + 1, 1) - timedelta(days=1)
 
 
 # ── Journal-Aggregation ──────────────────────────────────
-
-async def _get_accounts_map(bexio: BexioClient) -> dict[int, int]:
-    """Kontenplan laden und id -> account_no Mapping erstellen (gecacht)."""
-    cached = _accounts_cache.get("map")
-    if cached is not None:
-        return cached
-    accounts = await bexio.list_accounts(limit=500)
-    id_to_no = {a.get("id"): int(a.get("account_no", 0) or 0) for a in accounts}
-    _accounts_cache["map"] = id_to_no
-    logger.info("Kontenplan geladen: %d Konten", len(id_to_no))
-    return id_to_no
+#
+# Ab hier wird durchgehend mit der **Kontonummer** gerechnet, nicht mit der
+# Bexio-Kennung. Der Datenraum löst sie beim Schreiben auf, womit die frühere
+# Zwischenschicht (``accounts_map``: id -> Nummer) entfällt -- und mit ihr die
+# Möglichkeit, dass ein Konto nicht auflösbar ist und stumm aus der Summe fällt.
 
 
-async def _get_journal_data(
-    bexio: BexioClient,
-    from_date: str,
-    to_date: str,
-) -> list[dict]:
-    """Journal-Daten laden (gecacht nach Zeitraum)."""
-    cache_key = f"{from_date}:{to_date}"
-    cached = _journal_cache.get(cache_key)
-    if cached is not None:
-        return cached
-    entries = await bexio.get_journal(from_date, to_date)
-    _journal_cache[cache_key] = entries
-    return entries
+def _journal(von: str, bis: str) -> list[dict]:
+    """Buchungen eines Zeitraums; Beträge in Franken (``betrag_chf``)."""
+    return dl.journal(von, bis)
 
 
-async def _compute_bank_balances_by_account(
-    bexio: BexioClient,
-    bank_account_ids: set[int],
-) -> dict[int, float]:
-    """Banksaldo pro Konto: Soll minus Haben seit Geschaeftsjahr-Beginn."""
-    fy_start = "2025-01-01"
-    try:
-        years = await bexio.get_business_years()
-        open_years = [y for y in years if y.get("status") == "open"]
-        if open_years:
-            fy_start = open_years[0].get("start", fy_start)
-    except Exception:
-        pass
+def _bank_salden(bank_nrs: set[int]) -> dict[int, float]:
+    """Saldo pro Bankkonto: Soll minus Haben seit Geschaeftsjahr-Beginn.
 
-    entries = await _get_journal_data(bexio, fy_start, date.today().isoformat())
-    balances: dict[int, float] = {acc_id: 0.0 for acc_id in bank_account_ids}
+    Eroeffnungsbuchungen liegen als regulaere Journaleintraege vor, darum ergibt die
+    Summe ab Jahresbeginn den heutigen Saldo.
+    """
+    entries = _journal(dl.geschaeftsjahr_beginn(), date.today().isoformat())
+    balances: dict[int, float] = {nr: 0.0 for nr in bank_nrs}
     for e in entries:
-        amount = float(e.get("amount", 0))
-        debit = e.get("debit_account_id")
-        credit = e.get("credit_account_id")
-        if debit in bank_account_ids:
-            balances[debit] += amount
-        if credit in bank_account_ids:
-            balances[credit] -= amount
+        if e["soll_nr"] in bank_nrs:
+            balances[e["soll_nr"]] += e["betrag_chf"]
+        if e["haben_nr"] in bank_nrs:
+            balances[e["haben_nr"]] -= e["betrag_chf"]
     return balances
-
-
-async def _get_fy_start(bexio: BexioClient) -> str:
-    """Start des aktuell offenen Geschaeftsjahres (Fallback: laufendes Kalenderjahr)."""
-    fy_start = f"{date.today().year}-01-01"
-    try:
-        years = await bexio.get_business_years()
-        open_years = [y for y in years if y.get("status") == "open"]
-        if open_years:
-            fy_start = open_years[0].get("start", fy_start)
-    except Exception:  # noqa: BLE001
-        pass
-    return fy_start
-
-
-async def _get_accounts_meta(bexio: BexioClient) -> dict[int, dict]:
-    """Kontenplan als id -> {no, name} laden (gecacht)."""
-    cached = _accounts_cache.get("meta")
-    if cached is not None:
-        return cached
-    accounts = await bexio.list_accounts(limit=500)
-    meta = {
-        a.get("id"): {
-            "no": int(a.get("account_no", 0) or 0),
-            "name": a.get("name") or "",
-        }
-        for a in accounts
-        if a.get("id")
-    }
-    _accounts_cache["meta"] = meta
-    return meta
 
 
 # ── Bilanz-Klassifikation (Schweizer Kontenrahmen KMU) ───
@@ -521,27 +418,20 @@ def _classify_bs_account(acc_no: int) -> str | None:
     return None
 
 
-async def _compute_all_account_balances(bexio: BexioClient) -> dict[int, float]:
-    """Roh-Saldo (Soll - Haben) je Konto seit Geschaeftsjahr-Beginn.
+def _compute_all_account_balances() -> dict[int, float]:
+    """Roh-Saldo (Soll - Haben) je Kontonummer seit Geschaeftsjahr-Beginn.
 
     Eroeffnungsbuchungen liegen als regulaere Journal-Eintraege vor, daher ergibt
     die Summe ab Jahresbeginn den aktuellen Konto-Saldo (gleiches Prinzip wie der
     bereits etablierte Banksaldo).
     """
-    fy_start = await _get_fy_start(bexio)
-    entries = await _get_journal_data(bexio, fy_start, date.today().isoformat())
+    entries = _journal(dl.geschaeftsjahr_beginn(), date.today().isoformat())
     balances: dict[int, float] = defaultdict(float)
     for e in entries:
-        try:
-            amount = float(e.get("amount", 0))
-        except (ValueError, TypeError):
-            continue
-        debit = e.get("debit_account_id")
-        credit = e.get("credit_account_id")
-        if debit:
-            balances[debit] += amount
-        if credit:
-            balances[credit] -= amount
+        if e["soll_nr"]:
+            balances[e["soll_nr"]] += e["betrag_chf"]
+        if e["haben_nr"]:
+            balances[e["haben_nr"]] -= e["betrag_chf"]
     return dict(balances)
 
 
@@ -552,23 +442,19 @@ def _ratio_pct(numerator: float, denominator: float) -> float | None:
     return round(numerator / denominator * 100, 1)
 
 
-async def _compute_balance_sheet(
-    bexio: BexioClient,
-    accounts_map: dict[int, int],
-) -> dict:
+def _compute_balance_sheet() -> dict:
     """Saldenbilanz + Bilanzkennzahlen aus dem Journal ableiten.
 
     Das laufende Jahresergebnis (3xxx - Aufwand) wird dem gebuchten Eigenkapital
     zugeschlagen, damit Aktiven = Passiven gilt und die EK-Quote unterjaehrig
     oekonomisch korrekt ist.
     """
-    raw = await _compute_all_account_balances(bexio)
+    raw = _compute_all_account_balances()
     groups: dict[str, float] = defaultdict(float)
     income_total = 0.0
     expense_total = 0.0
 
-    for acc_id, bal in raw.items():
-        acc_no = accounts_map.get(acc_id, 0)
+    for acc_no, bal in raw.items():
         if not acc_no:
             continue
         cls = _classify_bs_account(acc_no)
@@ -642,104 +528,51 @@ async def _compute_balance_sheet(
     }
 
 
-async def _compute_expenses_by_account(
-    bexio: BexioClient,
+def _compute_expenses_by_account(
     from_date: str,
     to_date: str,
-    accounts_meta: dict[int, dict],
+    kontonamen: dict[int, str],
 ) -> dict[int, dict]:
     """Aufwand je Einzelkonto: Monatsreihe + Total ueber den Zeitraum."""
-    entries = await _get_journal_data(bexio, from_date, to_date)
     per_acc: dict[int, dict] = {}
-    for e in entries:
-        try:
-            amount = float(e.get("amount", 0))
-        except (ValueError, TypeError):
-            continue
-        d = e.get("date") or ""
-        mk = d[:7]
-        if len(mk) != 7:
-            continue
-        for acc_id, sign in (
-            (e.get("debit_account_id"), 1.0),
-            (e.get("credit_account_id"), -1.0),
-        ):
-            if not acc_id:
-                continue
-            acc_no = accounts_meta.get(acc_id, {}).get("no", 0)
+    for e in _journal(from_date, to_date):
+        for acc_no, sign in ((e["soll_nr"], 1.0), (e["haben_nr"], -1.0)):
             if not _is_expense_account(acc_no):
                 continue
             bucket = per_acc.setdefault(
-                acc_id,
+                acc_no,
                 {
                     "account_no": acc_no,
-                    "name": accounts_meta.get(acc_id, {}).get("name", ""),
+                    "name": kontonamen.get(acc_no, ""),
                     "category": _categorize_account(acc_no),
                     "monthly": defaultdict(float),
                     "total": 0.0,
                 },
             )
-            bucket["monthly"][mk] += amount * sign
-            bucket["total"] += amount * sign
+            bucket["monthly"][e["monat"]] += e["betrag_chf"] * sign
+            bucket["total"] += e["betrag_chf"] * sign
     return per_acc
 
 
-async def _compute_bank_balance(
-    bexio: BexioClient,
-    bank_account_ids: set[int],
-) -> float:
-    """Banksaldo: Summe aller Buchungen auf Bankkonten seit Geschaeftsjahr-Beginn."""
-    balances = await _compute_bank_balances_by_account(bexio, bank_account_ids)
-    return sum(balances.values())
-
-
-async def _compute_expenses_by_month(
-    bexio: BexioClient,
-    from_date: str,
-    to_date: str,
-    accounts_map: dict[int, int],
-) -> dict[str, float]:
+def _compute_expenses_by_month(from_date: str, to_date: str) -> dict[str, float]:
     """Monatliche Ausgaben: Soll-Buchungen auf Aufwandkonten abzgl. Haben-Korrekturen."""
-    entries = await _get_journal_data(bexio, from_date, to_date)
-    expense_account_ids = {
-        acc_id for acc_id, acc_no in accounts_map.items()
-        if _is_expense_account(acc_no)
-    }
-
     expenses: dict[str, float] = defaultdict(float)
-    for e in entries:
-        entry_date = (e.get("date") or "")[:10]
-        if len(entry_date) < 7:
-            continue
-        mk = entry_date[:7]
-        amount = float(e.get("amount", 0))
-        if e.get("debit_account_id") in expense_account_ids:
-            expenses[mk] += amount
-        if e.get("credit_account_id") in expense_account_ids:
-            expenses[mk] -= amount
-
+    for e in _journal(from_date, to_date):
+        if _is_expense_account(e["soll_nr"]):
+            expenses[e["monat"]] += e["betrag_chf"]
+        if _is_expense_account(e["haben_nr"]):
+            expenses[e["monat"]] -= e["betrag_chf"]
     return dict(expenses)
 
 
-async def _compute_expenses_by_category(
-    bexio: BexioClient,
-    from_date: str,
-    to_date: str,
-    accounts_map: dict[int, int],
-) -> dict[str, float]:
+def _compute_expenses_by_category(from_date: str, to_date: str) -> dict[str, float]:
     """Ausgaben nach KMU-Kategorie: Soll abzgl. Haben-Korrekturen (Privatanteile)."""
-    entries = await _get_journal_data(bexio, from_date, to_date)
     cat_totals: dict[str, float] = defaultdict(float)
-    for e in entries:
-        amount = float(e.get("amount", 0))
-        did = e.get("debit_account_id")
-        cid = e.get("credit_account_id")
-        debit_no = accounts_map.get(did, 0)
-        credit_no = accounts_map.get(cid, 0)
-        if _is_expense_account(debit_no):
-            cat_totals[_categorize_account(debit_no)] += amount
-        if _is_expense_account(credit_no):
-            cat_totals[_categorize_account(credit_no)] -= amount
+    for e in _journal(from_date, to_date):
+        if _is_expense_account(e["soll_nr"]):
+            cat_totals[_categorize_account(e["soll_nr"])] += e["betrag_chf"]
+        if _is_expense_account(e["haben_nr"]):
+            cat_totals[_categorize_account(e["haben_nr"])] -= e["betrag_chf"]
     return dict(cat_totals)
 
 
@@ -814,12 +647,10 @@ def _classify_bank_outflow(gegen_no: int) -> str:
     return "op"
 
 
-async def _compute_categorized_cashflow(
-    bexio: BexioClient,
-    bank_account_ids: set[int],
+def _compute_categorized_cashflow(
+    bank_nrs: set[int],
     from_date: str,
     to_date: str,
-    accounts_map: dict[int, int],
 ) -> dict[str, dict]:
     """Kategorisierter Cashflow pro Monat aus Bankkonten (direkte Methode).
 
@@ -829,7 +660,6 @@ async def _compute_categorized_cashflow(
     - Finanzierung (echte Finanzverbindl./EK: 2100-2199, 2260-2269, 2400-2999)
     - operativ (Rest, inkl. Kreditoren 2000-2099 und MWST/Steuern 2200-2399)
     """
-    entries = await _get_journal_data(bexio, from_date, to_date)
     flows: dict[str, dict] = defaultdict(lambda: {
         "inflow": 0.0, "op_outflow": 0.0,
         "personnel_outflow": 0.0, "social_outflow": 0.0, "pension_outflow": 0.0,
@@ -838,19 +668,15 @@ async def _compute_categorized_cashflow(
         "special_items": defaultdict(float),
     })
 
-    for e in entries:
-        mk = (e.get("date") or "")[:7]
-        if not mk:
-            continue
-        amount = float(e.get("amount", 0))
-        did = e.get("debit_account_id")
-        cid = e.get("credit_account_id")
+    for e in _journal(from_date, to_date):
+        mk = e["monat"]
+        amount = e["betrag_chf"]
 
-        if did in bank_account_ids:
+        if e["soll_nr"] in bank_nrs:
             flows[mk]["inflow"] += amount
 
-        if cid in bank_account_ids:
-            gegen_no = accounts_map.get(did, 0)
+        if e["haben_nr"] in bank_nrs:
+            gegen_no = e["soll_nr"]
             kind = _classify_bank_outflow(gegen_no)
             if kind == "invest":
                 flows[mk]["invest_outflow"] += amount
@@ -903,6 +729,19 @@ class CashflowSpecialItem(BaseModel):
     amount: float
 
 
+class Datenstand(BaseModel):
+    """Wie alt die Zahlen sind -- reist mit jeder Finanzantwort mit.
+
+    Ohne dieses Feld wäre die Umstellung auf den Datenraum ein Rückschritt: live
+    geholte Daten sind per Definition aktuell, abgeglichene nicht. Ein Dashboard
+    darf alt sein, solange es das sagt.
+    """
+
+    stand: str | None = None
+    alter_stunden: float | None = None
+    veraltet: bool = False
+
+
 class KpiOverview(BaseModel):
     bank_balance: float | None = None
     bank_account_name: str | None = None
@@ -951,6 +790,7 @@ class KpiOverview(BaseModel):
     vat_saldo_rate: float | None = None  # Saldosteuersatz (nur bei method=saldo)
     vat_rate: float = 0.081            # Fakturierungssatz (Normalsatz)
     currency: str = "CHF"
+    datenstand: Datenstand = Datenstand()
 
 
 class CashflowMonth(BaseModel):
@@ -990,6 +830,7 @@ class CashflowResponse(BaseModel):
     annual_revenue_goal: float = 0
     monthly_revenue_goal: float = 0
     min_liquidity: float = 0
+    datenstand: Datenstand = Datenstand()
 
 
 class TogglProjectSummary(BaseModel):
@@ -1110,11 +951,18 @@ class ExpensesByAccountResponse(BaseModel):
 @router.get("/overview", response_model=KpiOverview)
 async def get_overview(user: User = Depends(require_role("owner"))):
     """KPI-Uebersicht mit Jahresprognosen, Burn Rate und Runway."""
-    cached = _overview_cache.get("overview")
+    schluessel = _schluessel("overview")
+    cached = _overview_cache.get(schluessel)
     if cached is not None:
         return cached
 
-    bexio = _get_bexio_client(user)
+    try:
+        return await _overview_berechnen(user, schluessel)
+    except DatenraumUnbrauchbar as exc:
+        raise _datenraum_fehler(exc) from exc
+
+
+async def _overview_berechnen(user: User, schluessel: str) -> KpiOverview:
     today = date.today()
     current_year = today.year
     current_month = _month_key(today)
@@ -1148,57 +996,28 @@ async def get_overview(user: User = Depends(require_role("owner"))):
     )
 
     # Banksaldo via Journal
-    bank_balance = None
-    bank_name = None
-    bank_ids: set[int] = set()
-    try:
-        bank_accounts = await bexio.list_bank_accounts()
-        if bank_accounts:
-            bank_ids = {a.get("account_id") for a in bank_accounts if a.get("account_id")}
-            if bank_ids:
-                balances_by_account = await _compute_bank_balances_by_account(bexio, bank_ids)
-                bank_balance = sum(balances_by_account.values())
-                # Namen des tatsaechlich genutzten Kontos (groesster Saldo) anzeigen --
-                # nicht stur das erste Konto (sonst erscheinen alte, inaktive Konten).
-                id_to_name = {
-                    a.get("account_id"): a.get("name")
-                    for a in bank_accounts if a.get("account_id")
-                }
-                active_ids = [aid for aid, bal in balances_by_account.items() if abs(bal) > 0.005]
-                if active_ids:
-                    dominant_id = max(active_ids, key=lambda aid: abs(balances_by_account[aid]))
-                    bank_name = id_to_name.get(dominant_id) or "Hauptkonto"
-                    if len(active_ids) > 1:
-                        bank_name = f"{bank_name} (+{len(active_ids) - 1} weitere)"
-                else:
-                    bank_name = bank_accounts[0].get("name", "Hauptkonto")
-    except Exception as e:
-        logger.warning("Banksaldo nicht verfuegbar: %s", e)
+    bank_accounts = dl.bankkonten()
+    bank_nrs = {b["konto_nr"] for b in bank_accounts}
+    balances_by_account = _bank_salden(bank_nrs)
+    bank_balance = sum(balances_by_account.values())
 
-    # Rechnungen laden (25 Monate fuer YTD + Prognose-Basis)
-    all_invoices: list[dict] = []
-    try:
-        all_invoices = await _fetch_recent_invoices(bexio, months=25)
-    except Exception as e:
-        logger.warning("Rechnungen nicht verfuegbar: %s", e)
+    # Namen des tatsaechlich genutzten Kontos (groesster Saldo) anzeigen --
+    # nicht stur das erste Konto (sonst erscheinen alte, inaktive Konten).
+    nr_to_name = {b["konto_nr"]: b["name"] for b in bank_accounts}
+    active_nrs = [nr for nr, bal in balances_by_account.items() if abs(bal) > 0.005]
+    if active_nrs:
+        dominant = max(active_nrs, key=lambda nr: abs(balances_by_account[nr]))
+        bank_name = nr_to_name.get(dominant) or "Hauptkonto"
+        if len(active_nrs) > 1:
+            bank_name = f"{bank_name} (+{len(active_nrs) - 1} weitere)"
+    else:
+        bank_name = bank_accounts[0]["name"] if bank_accounts else None
 
-    # Offene Debitoren
-    open_total = 0.0
-    open_count = 0
-    for inv in all_invoices:
-        if _invoice_is_open(inv):
-            remaining = inv.get("total_remaining_payments")
-            if remaining is not None:
-                try:
-                    open_total += float(remaining)
-                except (ValueError, TypeError):
-                    open_total += _parse_bexio_invoice_total(inv)
-            else:
-                open_total += _parse_bexio_invoice_total(inv)
-            open_count += 1
+    # Offene Debitoren -- Entwuerfe zaehlen nicht mit (siehe dl.offene_debitoren)
+    open_total, open_count = dl.offene_debitoren()
 
-    # Revenue by month
-    revenue_by_month = _revenue_by_month_from_invoices(all_invoices)
+    # Umsatz je Monat (brutto, nur gestellte Rechnungen)
+    revenue_by_month = dl.umsatz_je_monat()
 
     # YTD Revenue (faire Basis): nur abgeschlossene Monate, stichtagsgleich VJ.
     revenue_ytd_closed = sum(
@@ -1216,38 +1035,17 @@ async def get_overview(user: User = Depends(require_role("owner"))):
     )
 
     # Ausgaben
-    accounts_map: dict[int, int] = {}
-    expenses_by_month: dict[str, float] = {}
     journal_from = f"{current_year - 1}-01-01"
-    try:
-        accounts_map = await _get_accounts_map(bexio)
-        expenses_by_month = await _compute_expenses_by_month(
-            bexio, journal_from, today.isoformat(), accounts_map
-        )
-    except Exception as e:
-        logger.warning("Ausgaben nicht verfuegbar: %s", e)
+    expenses_by_month = _compute_expenses_by_month(journal_from, today.isoformat())
 
     # Kategorisierter Cashflow (fuer klumpige Finanz-/Investitionsabfluesse)
-    cat_cf: dict[str, dict] = {}
-    try:
-        if bank_ids and accounts_map:
-            cat_cf = await _compute_categorized_cashflow(
-                bexio, bank_ids, journal_from, today.isoformat(), accounts_map
-            )
-    except Exception as e:
-        logger.warning("Kategorisierter Cashflow (Overview) nicht verfuegbar: %s", e)
+    cat_cf = (
+        _compute_categorized_cashflow(bank_nrs, journal_from, today.isoformat())
+        if bank_nrs else {}
+    )
 
-    # Toggl: laufender Monat (frueh geladen, damit die Jahresprognose ihn nutzen kann)
-    current_revenue = 0.0
-    current_hours = 0.0
-    try:
-        toggl = _get_toggl_client(user)
-        start = today.replace(day=1).isoformat()
-        end = today.isoformat()
-        summary = await toggl.get_summary_by_project(start, end, billable=True)
-        current_revenue, current_hours = _parse_toggl_revenue(summary)
-    except Exception as e:
-        logger.warning("Toggl-Summary nicht verfuegbar: %s", e)
+    # Zeiterfassung: laufender Monat (frueh geladen, damit die Jahresprognose ihn nutzt)
+    current_revenue, current_hours = _toggl_monat(current_month)
 
     # Prognose-Basis (letzte 3 und 12 Monate) -- nur abgeschlossene Monate
     hist_months_12 = _month_range(12, 0)[:-1]
@@ -1403,9 +1201,7 @@ async def get_overview(user: User = Depends(require_role("owner"))):
     personnel_cost_annualized = None
     if current_closed_key:
         try:
-            cat_ytd = await _compute_expenses_by_category(
-                bexio, f"{current_year}-01-01", closed_to_date, accounts_map
-            )
+            cat_ytd = _compute_expenses_by_category(f"{current_year}-01-01", closed_to_date)
             non_ebitda_cats = {"abschreibungen", "finanzaufwand", "steuern", "ausserordentlich"}
             operating_exp = sum(v for k, v in cat_ytd.items() if k not in non_ebitda_cats)
             ebitda_ytd = round(revenue_ytd_net_closed - operating_exp, 2)
@@ -1433,28 +1229,19 @@ async def get_overview(user: User = Depends(require_role("owner"))):
             dso_days = round(open_total / daily_rev, 0)
 
     # Liquiditaetsgrad 2 + EK-Quote aus der Saldenbilanz (Journal-basiert)
-    liquiditaet_2 = None
-    ek_quote = None
-    try:
-        if accounts_map:
-            bs = await _compute_balance_sheet(bexio, accounts_map)
-            liquiditaet_2 = bs.get("liquiditaet_2")
-            ek_quote = bs.get("ek_quote")
-    except Exception as e:  # noqa: BLE001
-        logger.warning("Bilanzkennzahlen (Overview) nicht verfuegbar: %s", e)
+    bs = _compute_balance_sheet()
+    liquiditaet_2 = bs.get("liquiditaet_2")
+    ek_quote = bs.get("ek_quote")
 
     # ── Vorjahres-KPIs (stichtagsgleich: gleiche abgeschlossene Monate) ──
     revenue_ytd_prior = revenue_ytd_closed_prior
 
     expenses_ytd_prior = 0.0
     if prior_closed_to_date:
-        try:
-            prior_expenses = await _compute_expenses_by_month(
-                bexio, f"{prior_year}-01-01", prior_closed_to_date, accounts_map
-            )
-            expenses_ytd_prior = sum(prior_expenses.values())
-        except Exception:
-            pass
+        prior_expenses = _compute_expenses_by_month(
+            f"{prior_year}-01-01", prior_closed_to_date
+        )
+        expenses_ytd_prior = sum(prior_expenses.values())
 
     revenue_ytd_net_prior = fs.net_revenue(revenue_ytd_prior)
     profit_margin_ytd_prior = None
@@ -1466,36 +1253,23 @@ async def get_overview(user: User = Depends(require_role("owner"))):
     ebitda_ytd_prior = None
     personalquote_ytd_prior = None
     if prior_closed_to_date:
-        try:
-            cat_prior = await _compute_expenses_by_category(
-                bexio, f"{prior_year}-01-01", prior_closed_to_date, accounts_map
-            )
-            non_ebitda_cats = {"abschreibungen", "finanzaufwand", "steuern", "ausserordentlich"}
-            op_exp_prior = sum(v for k, v in cat_prior.items() if k not in non_ebitda_cats)
-            ebitda_ytd_prior = round(revenue_ytd_net_prior - op_exp_prior, 2)
+        cat_prior = _compute_expenses_by_category(
+            f"{prior_year}-01-01", prior_closed_to_date
+        )
+        non_ebitda_cats = {"abschreibungen", "finanzaufwand", "steuern", "ausserordentlich"}
+        op_exp_prior = sum(v for k, v in cat_prior.items() if k not in non_ebitda_cats)
+        ebitda_ytd_prior = round(revenue_ytd_net_prior - op_exp_prior, 2)
 
-            personal_cats = {"loehne", "sozialversicherungen", "pensionskasse", "uvg_ktg",
-                             "spesen_personal", "personalaufwand_sonstig", "uebr_personal"}
-            personal_prior = sum(v for k, v in cat_prior.items() if k in personal_cats)
-            if revenue_ytd_net_prior > 0:
-                personalquote_ytd_prior = round(personal_prior / revenue_ytd_net_prior * 100, 1)
-        except Exception:
-            pass
+        personal_cats = {"loehne", "sozialversicherungen", "pensionskasse", "uvg_ktg",
+                         "spesen_personal", "personalaufwand_sonstig", "uebr_personal"}
+        personal_prior = sum(v for k, v in cat_prior.items() if k in personal_cats)
+        if revenue_ytd_net_prior > 0:
+            personalquote_ytd_prior = round(personal_prior / revenue_ytd_net_prior * 100, 1)
 
     # Journal-Datenstand ermitteln
-    journal_from_str = None
-    journal_to_str = None
-    try:
-        all_dates = [
-            (e.get("date") or "")[:10]
-            for e in await _get_journal_data(bexio, f"{current_year - 1}-01-01", today.isoformat())
-            if e.get("date")
-        ]
-        if all_dates:
-            journal_from_str = min(all_dates)
-            journal_to_str = max(all_dates)
-    except Exception:
-        pass
+    journal_dates = [e["datum"] for e in _journal(f"{current_year - 1}-01-01", today.isoformat())]
+    journal_from_str = min(journal_dates) if journal_dates else None
+    journal_to_str = max(journal_dates) if journal_dates else None
 
     result = KpiOverview(
         bank_balance=round(bank_balance, 2) if bank_balance is not None else None,
@@ -1544,8 +1318,9 @@ async def get_overview(user: User = Depends(require_role("owner"))):
         vat_method=fs.vat_method,
         vat_saldo_rate=fs.vat_saldo_rate if fs.vat_method == "saldo" else None,
         vat_rate=fs.vat_rate,
+        datenstand=Datenstand(**dl.stand()),
     )
-    _overview_cache["overview"] = result
+    _overview_cache[schluessel] = result
     return result
 
 
@@ -1562,58 +1337,41 @@ async def get_cashflow(
     - Investitionen (Anlagen 15xx)
     - Finanzierung (FK/EK 2xxx, inkl. Dividende, Kontokorrent, MWST)
     """
-    cache_key = f"cashflow:{months_back}:{months_forward}"
-    cached = _cashflow_cache.get(cache_key)
+    schluessel = _schluessel(f"cashflow:{months_back}:{months_forward}")
+    cached = _cashflow_cache.get(schluessel)
     if cached is not None:
         return cached
 
-    bexio = _get_bexio_client(user)
+    try:
+        return await _cashflow_berechnen(user, months_back, months_forward, schluessel)
+    except DatenraumUnbrauchbar as exc:
+        raise _datenraum_fehler(exc) from exc
+
+
+async def _cashflow_berechnen(
+    user: User, months_back: int, months_forward: int, schluessel: str
+) -> CashflowResponse:
     today = date.today()
     current_month = _month_key(today)
     all_month_keys = _month_range(months_back, months_forward)
     lookback = max(months_back, 12) + 1
 
     # Bankkonten ermitteln
-    bank_ids: set[int] = set()
-    start_balance = 0.0
-    try:
-        bank_accounts = await bexio.list_bank_accounts()
-        bank_ids = {a.get("account_id") for a in bank_accounts if a.get("account_id")}
-        if bank_ids:
-            start_balance = await _compute_bank_balance(bexio, bank_ids)
-    except Exception as e:
-        logger.warning("Bankkonten nicht verfuegbar: %s", e)
+    bank_nrs = {b["konto_nr"] for b in dl.bankkonten()}
+    start_balance = sum(_bank_salden(bank_nrs).values()) if bank_nrs else 0.0
 
     # Rechnungsdaten fuer Prognose-Basis
-    revenue_by_month: dict[str, float] = defaultdict(float)
-    try:
-        invoices = await _fetch_recent_invoices(bexio, months=lookback)
-        revenue_by_month = defaultdict(float, _revenue_by_month_from_invoices(invoices))
-    except Exception as e:
-        logger.warning("Rechnungen fuer Cashflow nicht verfuegbar: %s", e)
+    revenue_by_month: dict[str, float] = defaultdict(float, dl.umsatz_je_monat())
 
-    # Kontenplan und kategorisierter Cashflow
-    accounts_map: dict[int, int] = {}
-    cat_cf: dict[str, dict] = {}
-    try:
-        accounts_map = await _get_accounts_map(bexio)
-        journal_from = (today.replace(day=1) - timedelta(days=30 * lookback)).strftime("%Y-%m-%d")
-        cat_cf = await _compute_categorized_cashflow(
-            bexio, bank_ids, journal_from, today.isoformat(), accounts_map
-        )
-    except Exception as e:
-        logger.warning("Kategorisierter Cashflow nicht verfuegbar: %s", e)
+    # Kategorisierter Cashflow
+    journal_from = (today.replace(day=1) - timedelta(days=30 * lookback)).strftime("%Y-%m-%d")
+    cat_cf = (
+        _compute_categorized_cashflow(bank_nrs, journal_from, today.isoformat())
+        if bank_nrs else {}
+    )
 
-    # Toggl fuer laufenden Monat
-    current_toggl_revenue = 0.0
-    try:
-        toggl = _get_toggl_client(user)
-        start = today.replace(day=1).isoformat()
-        end = today.isoformat()
-        summary = await toggl.get_summary_by_project(start, end, billable=True)
-        current_toggl_revenue, _ = _parse_toggl_revenue(summary)
-    except Exception:
-        pass
+    # Zeiterfassung fuer den laufenden Monat
+    current_toggl_revenue, _ = _toggl_monat(current_month)
 
     # Prognose-Basis (abgeschlossene Monate)
     hist_months_12 = _month_range(12, 0)[:-1]
@@ -1828,30 +1586,29 @@ async def get_cashflow(
         annual_revenue_goal=round(fs.annual_revenue_goal, 2),
         monthly_revenue_goal=round(fs.annual_revenue_goal / 12.0, 2) if fs.annual_revenue_goal > 0 else 0.0,
         min_liquidity=round(fs.min_liquidity, 2),
+        datenstand=Datenstand(**dl.stand()),
     )
-    _cashflow_cache[cache_key] = result
+    _cashflow_cache[schluessel] = result
     return result
 
 
 @router.get("/yoy", response_model=YoyResponse)
 async def get_year_over_year(user: User = Depends(require_role("owner"))):
     """Vorjahresvergleich: Monatliche Einnahmen/Ausgaben aktuelles vs. Vorjahr."""
-    cached = _cashflow_cache.get("yoy")
+    schluessel = _schluessel("yoy")
+    cached = _cashflow_cache.get(schluessel)
     if cached is not None:
         return cached
 
-    bexio = _get_bexio_client(user)
     today = date.today()
     cy = today.year
     py = cy - 1
 
-    invoices = await _fetch_recent_invoices(bexio, months=25)
-    revenue_by_month = _revenue_by_month_from_invoices(invoices)
-
-    accounts_map = await _get_accounts_map(bexio)
-    expenses_by_month = await _compute_expenses_by_month(
-        bexio, f"{py}-01-01", today.isoformat(), accounts_map
-    )
+    try:
+        revenue_by_month = dl.umsatz_je_monat()
+        expenses_by_month = _compute_expenses_by_month(f"{py}-01-01", today.isoformat())
+    except DatenraumUnbrauchbar as exc:
+        raise _datenraum_fehler(exc) from exc
 
     month_names = ["", "Jan", "Feb", "Mär", "Apr", "Mai", "Jun",
                    "Jul", "Aug", "Sep", "Okt", "Nov", "Dez"]
@@ -1901,7 +1658,7 @@ async def get_year_over_year(user: User = Depends(require_role("owner"))):
         compare_until_month=max(compare_until, 0),
         compare_until_label=month_names[compare_until] if 1 <= compare_until <= 12 else "",
     )
-    _cashflow_cache["yoy"] = result
+    _cashflow_cache[schluessel] = result
     return result
 
 
@@ -1911,12 +1668,11 @@ async def get_pnl_waterfall(
     user: User = Depends(require_role("owner")),
 ):
     """P&L-Wasserfall: Umsatz -> Aufwandkategorien -> Ergebnis."""
-    cache_key = f"pnl_waterfall:{period}"
-    cached = _cashflow_cache.get(cache_key)
+    schluessel = _schluessel(f"pnl_waterfall:{period}")
+    cached = _cashflow_cache.get(schluessel)
     if cached is not None:
         return cached
 
-    bexio = _get_bexio_client(user)
     today = date.today()
 
     if period == "ytd":
@@ -1943,16 +1699,15 @@ async def get_pnl_waterfall(
                        "Jul", "Aug", "Sep", "Okt", "Nov", "Dez"]
         period_label = f"{month_names[m]} {y}"
 
-    invoices = await _fetch_recent_invoices(bexio, months=25)
-    revenue_by_month = _revenue_by_month_from_invoices(invoices)
+    try:
+        revenue_by_month = dl.umsatz_je_monat()
+        cat_totals = _compute_expenses_by_category(from_date, to_date)
+    except DatenraumUnbrauchbar as exc:
+        raise _datenraum_fehler(exc) from exc
+
     revenue_total = sum(
         v for mk, v in revenue_by_month.items()
         if from_date[:7] <= mk <= to_date[:7]
-    )
-
-    accounts_map = await _get_accounts_map(bexio)
-    cat_totals = await _compute_expenses_by_category(
-        bexio, from_date, to_date, accounts_map
     )
 
     steps: list[WaterfallStep] = [
@@ -1981,7 +1736,7 @@ async def get_pnl_waterfall(
         expenses_total=round(expenses_total, 2),
         result=round(net_result, 2),
     )
-    _cashflow_cache[cache_key] = result
+    _cashflow_cache[schluessel] = result
     return result
 
 
@@ -1995,71 +1750,36 @@ async def get_toggl_month_summary(
     if not month:
         month = _month_key(today)
 
-    cache_key = f"toggl_summary:{month}"
+    cache_key = _schluessel(f"toggl_summary:{month}")
     cached = _overview_cache.get(cache_key)
     if cached is not None:
         return cached
 
     year, mon = int(month[:4]), int(month[5:7])
     start = date(year, mon, 1)
-    if mon == 12:
-        end = date(year + 1, 1, 1) - timedelta(days=1)
-    else:
-        end = date(year, mon + 1, 1) - timedelta(days=1)
-    if end > today:
-        end = today
+    end = min(today, _monatsende(start))
+    if end < start:
+        return []
 
-    toggl = _get_toggl_client(user)
-    projects = await toggl.list_projects(active="both")
-    proj_map = {p.get("id"): p for p in projects}
+    try:
+        gruppen = dl.stunden_je_projekt(start.isoformat(), end.isoformat())
+    except DatenraumUnbrauchbar as exc:
+        raise _datenraum_fehler(exc) from exc
 
-    clients = await toggl.list_clients()
-    client_map = {c.get("id"): c.get("name", "") for c in clients}
-
-    summary_data = await toggl.get_summary_by_project(
-        start.isoformat(), end.isoformat(), billable=True
-    )
-
-    result: list[TogglProjectSummary] = []
-    for group in summary_data:
-        pid = group.get("id")
-        proj = proj_map.get(pid, {})
-        title = group.get("title") or {}
-        sub_groups = group.get("sub_groups") or group.get("items") or []
-
-        group_hours = 0.0
-        group_amount = 0.0
-        group_rate = 0.0
-        group_currency = "CHF"
-
-        for item in sub_groups:
-            rates = item.get("rates") or []
-            for rate_info in rates:
-                billable_secs = rate_info.get("billable_seconds", 0) or 0
-                hourly_cents = rate_info.get("hourly_rate_in_cents", 0) or 0
-                hours = billable_secs / 3600
-                group_hours += hours
-                group_amount += hours * (hourly_cents / 100)
-                if hourly_cents and not group_rate:
-                    group_rate = hourly_cents / 100
-                if rate_info.get("currency"):
-                    group_currency = rate_info["currency"]
-            if not rates:
-                secs = item.get("seconds", 0) or item.get("time", 0) or 0
-                group_hours += secs / 3600
-
-        if group_hours > 0:
-            cid = proj.get("client_id")
-            result.append(TogglProjectSummary(
-                project_name=proj.get("name") or title.get("project") or f"Projekt {pid}",
-                client_name=(client_map.get(cid, "") if cid else "") or title.get("client") or "",
-                hours=round(group_hours, 2),
-                rate_per_hour=round(group_rate, 2),
-                amount=round(group_amount, 2),
-                currency=group_currency,
-            ))
-
-    result.sort(key=lambda x: x.amount, reverse=True)
+    result = [
+        TogglProjectSummary(
+            project_name=g["projekt"] or f"Projekt {g['projekt_id']}",
+            client_name=g["kunde"],
+            # Der Effektivsatz (Betrag durch Stunden) statt des am Projekt
+            # hinterlegten: bei zwei Sätzen im selben Monat ist er die einzige Zahl,
+            # die mit dem Betrag zusammenpasst.
+            rate_per_hour=g["satz"],
+            hours=g["stunden"],
+            amount=g["betrag"],
+        )
+        for g in gruppen
+        if g["stunden"] > 0
+    ]
     _overview_cache[cache_key] = result
     return result
 
@@ -2067,16 +1787,17 @@ async def get_toggl_month_summary(
 @router.get("/expense-categories", response_model=ExpenseCategoryResponse)
 async def get_expense_categories(user: User = Depends(require_role("owner"))):
     """Aufwand-Kategorien mit Durchschnittswerten und tatsaechlichem Zeitraum."""
-    cached = _cashflow_cache.get("expense_categories_v2")
+    schluessel = _schluessel("expense_categories_v2")
+    cached = _cashflow_cache.get(schluessel)
     if cached is not None:
         return cached
 
-    bexio = _get_bexio_client(user)
-    accounts_map = await _get_accounts_map(bexio)
-
     today = date.today()
     journal_from = (today.replace(day=1) - timedelta(days=365)).strftime("%Y-%m-%d")
-    entries = await _get_journal_data(bexio, journal_from, today.isoformat())
+    try:
+        entries = _journal(journal_from, today.isoformat())
+    except DatenraumUnbrauchbar as exc:
+        raise _datenraum_fehler(exc) from exc
 
     # Tatsaechlichen Zeitraum aus den Daten ermitteln
     all_expense_dates: list[str] = []
@@ -2086,23 +1807,15 @@ async def get_expense_categories(user: User = Depends(require_role("owner"))):
     cat_months: dict[str, set[str]] = defaultdict(set)
 
     for e in entries:
-        amount = float(e.get("amount", 0))
-        entry_date = (e.get("date") or "")[:10]
-        entry_month = entry_date[:7]
-        did = e.get("debit_account_id")
-        cid = e.get("credit_account_id")
-        debit_no = accounts_map.get(did, 0)
-        credit_no = accounts_map.get(cid, 0)
-        if _is_expense_account(debit_no):
-            cat_key = _categorize_account(debit_no)
+        amount = e["betrag_chf"]
+        if _is_expense_account(e["soll_nr"]):
+            cat_key = _categorize_account(e["soll_nr"])
             cat_totals[cat_key] += amount
-            if entry_month:
-                cat_months[cat_key].add(entry_month)
-                all_expense_months.add(entry_month)
-                all_expense_dates.append(entry_date)
-        if _is_expense_account(credit_no):
-            cat_key = _categorize_account(credit_no)
-            cat_totals[cat_key] -= amount
+            cat_months[cat_key].add(e["monat"])
+            all_expense_months.add(e["monat"])
+            all_expense_dates.append(e["datum"])
+        if _is_expense_account(e["haben_nr"]):
+            cat_totals[_categorize_account(e["haben_nr"])] -= amount
 
     period_from = min(all_expense_dates) if all_expense_dates else journal_from
     period_to = max(all_expense_dates) if all_expense_dates else today.isoformat()
@@ -2139,7 +1852,7 @@ async def get_expense_categories(user: User = Depends(require_role("owner"))):
         period_to=period_to[:7],
         months_covered=months_covered,
     )
-    _cashflow_cache["expense_categories_v2"] = result
+    _cashflow_cache[schluessel] = result
     return result
 
 
@@ -2163,35 +1876,26 @@ class ExpenseMonthlyBreakdownResponse(BaseModel):
 @router.get("/expense-monthly-breakdown", response_model=ExpenseMonthlyBreakdownResponse)
 async def get_expense_monthly_breakdown(user: User = Depends(require_role("owner"))):
     """Monatliche Kostenverteilung nach KMU-Kategorie, aktuelles Jahr vs. Vorjahr."""
-    cached = _cashflow_cache.get("expense_monthly_breakdown")
+    schluessel = _schluessel("expense_monthly_breakdown")
+    cached = _cashflow_cache.get(schluessel)
     if cached is not None:
         return cached
 
-    bexio = _get_bexio_client(user)
-    accounts_map = await _get_accounts_map(bexio)
     today = date.today()
     cy = today.year
     py = cy - 1
 
-    entries = await _get_journal_data(bexio, f"{py}-01-01", today.isoformat())
+    try:
+        entries = _journal(f"{py}-01-01", today.isoformat())
+    except DatenraumUnbrauchbar as exc:
+        raise _datenraum_fehler(exc) from exc
 
     monthly_cats: dict[str, dict[str, float]] = defaultdict(lambda: defaultdict(float))
     for e in entries:
-        entry_date = (e.get("date") or "")[:10]
-        if len(entry_date) < 7:
-            continue
-        mk = entry_date[:7]
-        amount = float(e.get("amount", 0))
-        did = e.get("debit_account_id")
-        cid = e.get("credit_account_id")
-        debit_no = accounts_map.get(did, 0)
-        credit_no = accounts_map.get(cid, 0)
-        if _is_expense_account(debit_no):
-            cat = _categorize_account(debit_no)
-            monthly_cats[mk][cat] += amount
-        if _is_expense_account(credit_no):
-            cat = _categorize_account(credit_no)
-            monthly_cats[mk][cat] -= amount
+        if _is_expense_account(e["soll_nr"]):
+            monthly_cats[e["monat"]][_categorize_account(e["soll_nr"])] += e["betrag_chf"]
+        if _is_expense_account(e["haben_nr"]):
+            monthly_cats[e["monat"]][_categorize_account(e["haben_nr"])] -= e["betrag_chf"]
 
     month_names = ["", "Jan", "Feb", "Mär", "Apr", "Mai", "Jun",
                    "Jul", "Aug", "Sep", "Okt", "Nov", "Dez"]
@@ -2222,7 +1926,7 @@ async def get_expense_monthly_breakdown(user: User = Depends(require_role("owner
         months_prior=_build_rows(py),
         category_labels=cat_labels,
     )
-    _cashflow_cache["expense_monthly_breakdown"] = result
+    _cashflow_cache[schluessel] = result
     return result
 
 
@@ -2245,22 +1949,20 @@ class MarginTrendResponse(BaseModel):
 @router.get("/margin-trend", response_model=MarginTrendResponse)
 async def get_margin_trend(user: User = Depends(require_role("owner"))):
     """Gewinnmarge: YTD-kumuliert + 12-Mt-Rolling + Vorjahr als Benchmark."""
-    cached = _cashflow_cache.get("margin_trend")
+    schluessel = _schluessel("margin_trend")
+    cached = _cashflow_cache.get(schluessel)
     if cached is not None:
         return cached
 
-    bexio = _get_bexio_client(user)
     today = date.today()
     cy = today.year
     py = cy - 1
 
-    invoices = await _fetch_recent_invoices(bexio, months=30)
-    rev_by_month = _revenue_by_month_from_invoices(invoices)
-
-    accounts_map = await _get_accounts_map(bexio)
-    exp_by_month = await _compute_expenses_by_month(
-        bexio, f"{py - 1}-01-01", today.isoformat(), accounts_map
-    )
+    try:
+        rev_by_month = dl.umsatz_je_monat()
+        exp_by_month = _compute_expenses_by_month(f"{py - 1}-01-01", today.isoformat())
+    except DatenraumUnbrauchbar as exc:
+        raise _datenraum_fehler(exc) from exc
 
     mwst_satz = get_forecast_settings_from_settings(user.settings).vat_rate
     month_names = ["", "Jan", "Feb", "Mär", "Apr", "Mai", "Jun",
@@ -2306,50 +2008,126 @@ async def get_margin_trend(user: User = Depends(require_role("owner"))):
         ))
 
     result = MarginTrendResponse(months=months, current_year=cy, prior_year=py)
-    _cashflow_cache["margin_trend"] = result
+    _cashflow_cache[schluessel] = result
     return result
 
 
-# ── Kreuz-Validierung ────────────────────────────────────
+# ── Kreuzprobe ───────────────────────────────────────────
+#
+# Die Kreuzprobe ist der einzige dauerhafte Beleg dafür, dass die Umstellung auf den
+# Datenraum nichts verschoben hat. Sie ist bewusst kein Test, sondern ein Endpunkt:
+# ein Test läuft gegen Fixtures, diese Frage lässt sich nur gegen den echten Bestand
+# beantworten -- und sie muss auch in einem Jahr noch beantwortbar sein, wenn ein
+# Konnektor eine Spalte anders füllt.
+#
+# Erwartete Abweichungen sind benannt statt geglättet: wo Datenraum und
+# Schnittstelle sich unterscheiden, steht die Ursache dabei.
 
-@router.get("/validate/2025")
-async def validate_2025(user: User = Depends(require_role("owner"))):
-    """Vergleiche Dashboard-Werte mit Jahresrechnung 2025."""
+
+@router.get("/validate")
+async def validate_gegen_live(
+    jahr: int = Query(default=0, description="Jahr; 0 = laufendes und Vorjahr"),
+    user: User = Depends(require_role("owner")),
+):
+    """Umsatz und Aufwand je Jahr aus dem Datenraum neben derselben Zahl live.
+
+    Der Aufruf kostet mehrere Sekunden und Bexio-Kontingent -- er gehört in die
+    Prüfung, nicht in die Ansicht.
+    """
+    heute = date.today()
+    jahre = [jahr] if jahr else [heute.year, heute.year - 1]
+
+    try:
+        umsatz_dr = dl.umsatz_je_monat()
+        rechnungen = dl.rechnungen()
+    except DatenraumUnbrauchbar as exc:
+        raise _datenraum_fehler(exc) from exc
+
     bexio = _get_bexio_client(user)
-    accounts_map = await _get_accounts_map(bexio)
-
-    cat_totals = await _compute_expenses_by_category(
-        bexio, "2025-01-01", "2025-12-31", accounts_map
-    )
-
-    invoices = await _fetch_recent_invoices(bexio, months=25)
-    rev = _revenue_by_month_from_invoices(invoices)
-    revenue_2025 = sum(v for mk, v in rev.items() if mk.startswith("2025"))
-
-    expenses_by_month = await _compute_expenses_by_month(
-        bexio, "2025-01-01", "2025-12-31", accounts_map
-    )
-    total_expenses = sum(expenses_by_month.values())
-
-    jr = {
-        "total_ertrag_brutto": 396_485.84,
-        "mwst_saldosteuer": 23_670.93,
-        "total_ertrag_netto": 372_114.91,
-        "personalaufwand": 296_746.17,
-        "uebr_betriebsaufwand": 29_674.44,
-        "abschreibungen": 1_398.40,
-        "finanzaufwand": 102.95,
-        "steuern": 3_588.40,
-        "jahresgewinn": 39_804.21,
+    konten_live = {
+        a.get("id"): int(a.get("account_no", 0) or 0)
+        for a in await bexio.list_accounts(limit=2000)
     }
 
+    zeilen = []
+    for j in jahre:
+        bis = min(heute, date(j, 12, 31)).isoformat()
+        von = f"{j}-01-01"
+
+        # ── Datenraum ──
+        umsatz_datenraum = sum(v for mk, v in umsatz_dr.items() if mk.startswith(str(j)))
+        aufwand_datenraum = sum(_compute_expenses_by_month(von, bis).values())
+
+        # ── Live, mit derselben Rechenregel ──
+        eintraege = await bexio.get_journal(von, bis)
+        aufwand_live_chf = 0.0
+        aufwand_live_buchungswaehrung = 0.0
+        for e in eintraege:
+            soll = konten_live.get(e.get("debit_account_id"), 0)
+            haben = konten_live.get(e.get("credit_account_id"), 0)
+            chf = float(e.get("base_currency_amount") or e.get("amount") or 0)
+            roh = float(e.get("amount") or 0)
+            if _is_expense_account(soll):
+                aufwand_live_chf += chf
+                aufwand_live_buchungswaehrung += roh
+            if _is_expense_account(haben):
+                aufwand_live_chf -= chf
+                aufwand_live_buchungswaehrung -= roh
+
+        umsatz_live_alle = 0.0
+        umsatz_live_gestellt = 0.0
+        for inv in await bexio.search_invoices(from_date=von):
+            datum = str(inv.get("is_valid_from") or "")
+            if not datum.startswith(str(j)):
+                continue
+            betrag = float(inv.get("total") or 0)
+            umsatz_live_alle += betrag
+            if inv.get("kb_item_status_id") != 7:  # 7 = Entwurf
+                umsatz_live_gestellt += betrag
+
+        entwuerfe = [
+            r for r in rechnungen
+            if r["monat"].startswith(str(j)) and not r["ist_umsatz"]
+        ]
+
+        zeilen.append({
+            "jahr": j,
+            "umsatz": {
+                "datenraum": round(umsatz_datenraum, 2),
+                "live_gestellt": round(umsatz_live_gestellt, 2),
+                "differenz": round(umsatz_datenraum - umsatz_live_gestellt, 2),
+                "live_inkl_entwuerfe": round(umsatz_live_alle, 2),
+                "entwuerfe_nicht_gezaehlt": round(sum(r["brutto"] for r in entwuerfe), 2),
+                "entwuerfe_anzahl": len(entwuerfe),
+            },
+            "aufwand": {
+                "datenraum": round(aufwand_datenraum, 2),
+                "live_chf": round(aufwand_live_chf, 2),
+                "differenz": round(aufwand_datenraum - aufwand_live_chf, 2),
+                "live_buchungswaehrung": round(aufwand_live_buchungswaehrung, 2),
+                "waehrungsfehler_vermieden": round(
+                    aufwand_live_buchungswaehrung - aufwand_live_chf, 2
+                ),
+            },
+        })
+
     return {
-        "dashboard_revenue_brutto_2025": round(revenue_2025, 2),
-        "dashboard_expenses_total_2025": round(total_expenses, 2),
-        "dashboard_categories_2025": {k: round(v, 2) for k, v in sorted(cat_totals.items())},
-        "jahresrechnung_referenz": jr,
-        "differenz_umsatz_brutto": round(revenue_2025 - jr["total_ertrag_brutto"], 2),
-        "differenz_aufwand": round(total_expenses - (jr["personalaufwand"] + jr["uebr_betriebsaufwand"] + jr["abschreibungen"] + jr["finanzaufwand"] + jr["steuern"]), 2),
+        "datenstand": dl.stand(),
+        "jahre": zeilen,
+        "lesart": {
+            "differenz": (
+                "muss 0.00 sein -- Datenraum und Schnittstelle rechnen dieselbe "
+                "Regel auf denselben Daten"
+            ),
+            "entwuerfe_nicht_gezaehlt": (
+                "die Korrektur: Entwurfsrechnungen wurden nie gestellt und sind "
+                "kein Umsatz. Die frühere Fassung zählte sie mit."
+            ),
+            "waehrungsfehler_vermieden": (
+                "die zweite Korrektur: um diesen Betrag stand der Aufwand zu hoch, "
+                "weil die Buchungswährung statt des Frankenwerts summiert wurde"
+            ),
+        },
     }
 
 
@@ -2363,21 +2141,23 @@ async def get_balance_sheet(user: User = Depends(require_role("owner"))):
     Eroeffnungsbuchungen). Das laufende Jahresergebnis wird dem Eigenkapital
     zugeschlagen, damit die Bilanz aufgeht.
     """
-    cached = _cashflow_cache.get("balance_sheet")
+    schluessel = _schluessel("balance_sheet")
+    cached = _cashflow_cache.get(schluessel)
     if cached is not None:
         return cached
 
-    bexio = _get_bexio_client(user)
-    accounts_map = await _get_accounts_map(bexio)
-    bs = await _compute_balance_sheet(bexio, accounts_map)
+    try:
+        bs = _compute_balance_sheet()
+        fy_start = dl.geschaeftsjahr_beginn()
+    except DatenraumUnbrauchbar as exc:
+        raise _datenraum_fehler(exc) from exc
 
-    fy_start = await _get_fy_start(bexio)
     result = BalanceSheetResponse(
         **bs,
         period_from=fy_start,
         period_to=date.today().isoformat(),
     )
-    _cashflow_cache["balance_sheet"] = result
+    _cashflow_cache[schluessel] = result
     return result
 
 
@@ -2392,20 +2172,20 @@ async def get_expenses_by_account(
 
     Feinere Granularitaet als die KMU-Kategorien: Basis fuer Kostenanalysen.
     """
-    cache_key = f"expenses_by_account:{months}"
-    cached = _cashflow_cache.get(cache_key)
+    schluessel = _schluessel(f"expenses_by_account:{months}")
+    cached = _cashflow_cache.get(schluessel)
     if cached is not None:
         return cached
-
-    bexio = _get_bexio_client(user)
-    accounts_meta = await _get_accounts_meta(bexio)
 
     today = date.today()
     from_date = (today.replace(day=1) - timedelta(days=30 * months)).strftime("%Y-%m-%d")
     to_date = today.isoformat()
     current_year = str(today.year)
 
-    per_acc = await _compute_expenses_by_account(bexio, from_date, to_date, accounts_meta)
+    try:
+        per_acc = _compute_expenses_by_account(from_date, to_date, dl.kontonamen())
+    except DatenraumUnbrauchbar as exc:
+        raise _datenraum_fehler(exc) from exc
 
     # Tatsaechlich abgedeckte Monate (fuer 12M-Durchschnitt)
     all_months: set[str] = set()
@@ -2449,7 +2229,7 @@ async def get_expenses_by_account(
         period_to=to_date[:7],
         months_covered=months_covered,
     )
-    _cashflow_cache[cache_key] = result
+    _cashflow_cache[schluessel] = result
     return result
 
 
@@ -2459,8 +2239,7 @@ async def get_expenses_by_account(
 async def clear_cache(user: User = Depends(require_role("owner"))):
     _overview_cache.clear()
     _cashflow_cache.clear()
-    _journal_cache.clear()
-    _accounts_cache.clear()
+    _toggl_rate_cache.clear()
     logger.info("Finance-Caches manuell geleert")
     return {"status": "ok", "message": "Alle Finance-Caches geleert"}
 
@@ -2470,6 +2249,49 @@ async def cache_stats(user: User = Depends(require_role("owner"))):
     return {
         "overview_cache": {"size": len(_overview_cache), "maxsize": _overview_cache.maxsize, "ttl": _overview_cache.ttl},
         "cashflow_cache": {"size": len(_cashflow_cache), "maxsize": _cashflow_cache.maxsize, "ttl": _cashflow_cache.ttl},
-        "journal_cache": {"size": len(_journal_cache), "maxsize": _journal_cache.maxsize, "ttl": _journal_cache.ttl},
-        "accounts_cache": {"size": len(_accounts_cache), "maxsize": _accounts_cache.maxsize, "ttl": _accounts_cache.ttl},
+        "toggl_rate_cache": {"size": len(_toggl_rate_cache), "maxsize": _toggl_rate_cache.maxsize, "ttl": _toggl_rate_cache.ttl},
+        "datenstand": dl.stand(),
     }
+
+
+@router.get("/datenstand")
+async def get_datenstand(user: User = Depends(require_role("owner"))):
+    """Alter der Finanztabellen -- für die Anzeige und für die Diagnose."""
+    return dl.stand()
+
+
+@router.post("/refresh")
+async def refresh_datenraum(user: User = Depends(require_role("owner"))):
+    """Bexio und Toggl neu abgleichen und die Ansicht damit auffrischen.
+
+    Bewusst nur diese zwei Quellen: Pipedrive und InvoiceInsight tragen zur
+    Finanzansicht nichts bei, und ein Vollabgleich dauert das Vielfache. Der Aufruf
+    wartet auf das Ergebnis, statt im Hintergrund zu laufen -- wer «Aktualisieren»
+    drückt, will wissen, ob es geklappt hat.
+    """
+    from app.services.datenraum import abgleichen
+
+    katalog = await abgleichen(["bexio", "toggl"], vorschlaege=False)
+    quellen = katalog.get("quellen") or {}
+    fehler = {
+        name: quellen.get(name, {}).get("letzter_fehler")
+        for name in ("bexio", "toggl")
+        if quellen.get(name, {}).get("letzter_fehler")
+    }
+
+    # Die Caches sind an den Stand gebunden und wären damit schon ungültig. Sie
+    # trotzdem zu leeren hält den Speicher klein, statt jeden Stand aufzubewahren.
+    _overview_cache.clear()
+    _cashflow_cache.clear()
+    _toggl_rate_cache.clear()
+
+    if fehler:
+        logger.warning("Finanz-Abgleich mit Fehlern: %s", fehler)
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                "Abgleich unvollständig -- der bisherige Stand bleibt gültig: "
+                + "; ".join(f"{n}: {t}" for n, t in fehler.items())
+            ),
+        )
+    return {"status": "ok", **dl.stand()}

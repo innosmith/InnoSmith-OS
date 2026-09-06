@@ -84,6 +84,7 @@ interface TriageItem {
     label?: string;
     needs_review?: boolean;
     label_rejected?: string | null;
+    class_rejected?: string | null;
     move_suppressed?: string | null;
     suggested_action?: { type?: string; detail?: string };
     type?: string;
@@ -161,8 +162,17 @@ function getCategoryClass(cat: string): string {
  * Erklärt die Sichtungsmarke. «Unklar» ist kein erfundenes Label, sondern der
  * Agent, der sich nicht entschieden hat -- das liest sich anders und führt zu einer
  * anderen Reaktion.
+ *
+ * Die verworfene Klasse kommt zuerst, weil sie schwerer wiegt: bei einem
+ * verworfenen Label steht die Einordnung noch, bei einer verworfenen Klasse hat
+ * das Backend selbst auf «fyi» zurückgesetzt. Ohne diesen Hinweis wäre nicht
+ * erkennbar, ob «fyi» das Urteil des Agenten oder ein Rückfall ist -- und eine
+ * Mail, die eigentlich eine Antwort verlangt, sähe aus wie eine zur Kenntnis.
  */
-function reviewHint(labelRejected?: string | null): string {
+function reviewHint(labelRejected?: string | null, classRejected?: string | null): string {
+  if (classRejected) {
+    return `Agent lieferte «${classRejected}» als Einordnung – unbrauchbar, auf «zur Kenntnis» zurückgesetzt. Bitte selbst entscheiden.`;
+  }
   if (!labelRejected) return 'Zur manuellen Sichtung markiert.';
   if (labelRejected.trim().toLowerCase() === 'unklar') {
     return 'Der Agent hat sich auf keine Kategorie festgelegt – bitte selbst setzen.';
@@ -979,7 +989,10 @@ export function InboxPage() {
                     </select>
                     {selectedTriage.suggested_action?.needs_review && (
                       <span className="text-xs text-amber-600 dark:text-amber-400">
-                        {reviewHint(selectedTriage.suggested_action.label_rejected)}
+                        {reviewHint(
+                          selectedTriage.suggested_action.label_rejected,
+                          selectedTriage.suggested_action.class_rejected,
+                        )}
                       </span>
                     )}
                     {selectedTriage.suggested_action?.move_suppressed && (

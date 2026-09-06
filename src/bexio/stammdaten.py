@@ -1,8 +1,8 @@
-"""Kontenplan und Geschaeftsjahre als eigene Tabellen.
+"""Kontenplan, Bankkonten und Geschaeftsjahre als eigene Tabellen.
 
-Beides sind Stammdaten, und beide beantworten fuer sich genommen keine Frage. Sie
-stehen trotzdem im Datenraum, weil ohne sie **zwei stille Fehler** unvermeidlich
-sind:
+Alle drei sind Stammdaten, und alle drei beantworten fuer sich genommen keine
+Frage. Sie stehen trotzdem im Datenraum, weil ohne sie **stille Fehler**
+unvermeidlich sind:
 
 * Das Journal fuehrt Konten nur als Kennung. Ohne Kontenplan ist
   ``debit_account_id: 227`` eine nackte Zahl, und die Frage «wofuer geben wir Geld
@@ -12,9 +12,12 @@ sind:
   CHF als **offenes** Jahr von acht Monaten. Wer beide Zahlen nebeneinanderstellt,
   sieht einen Einbruch von einem Drittel, wo ein Teiljahr steht. Der Vergleich ist
   arithmetisch richtig und inhaltlich falsch -- die gefaehrlichste Kombination.
+* Welche Konten Bankkonten sind, steht nirgends in der Kontonummer. Wer es aus ihr
+  erschliesst, zaehlt ``1090 Transferkonto`` und ``1099 Unklare Betraege`` in den
+  Banksaldo -- siehe ``bankkonten_laden``.
 
-Beide Tabellen sind winzig (197 bzw. 9 Zeilen) und aendern sich selten. Sie kosten
-nichts und nehmen dem Agenten zwei Annahmen ab, die er sonst raten muesste.
+Alle drei Tabellen sind winzig (197, 3 bzw. 9 Zeilen) und aendern sich selten. Sie
+kosten nichts und nehmen dem Leser Annahmen ab, die er sonst raten muesste.
 """
 
 from __future__ import annotations
@@ -109,6 +112,52 @@ async def kontenplan_laden(client) -> tuple[list[dict], dict[int, dict]]:
 
     zeilen.sort(key=lambda z: z["konto_nr"])
     return zeilen, verzeichnis
+
+
+async def bankkonten_laden(client, konten: dict[int, dict]) -> tuple[list[dict], int]:
+    """Welche Konten des Kontenplans Bankkonten sind.
+
+    Die Frage sieht beantwortbar aus, ohne sie zu stellen -- «1020 heisst Bank,
+    also ist es eines». Genau das wäre geraten. Die erste Ziffer trägt die Klasse
+    (1 = Aktiven), nicht die Eigenschaft «hier liegt Geld auf einem Bankkonto»:
+    ``1090 Transferkonto``, ``1091 Lohndurchlaufkonto`` und ``1099 Unklare
+    Beträge`` stehen im selben Hunderterblock und sind keine. Ein Banksaldo, der
+    sie mitzählt, ist falsch und sieht richtig aus. Bexio weiss es, also wird
+    Bexio gefragt.
+
+    Verknüpft wird über ``account_id`` mit dem Kontenplan, damit die Tabelle die
+    **Kontonummer** trägt und nicht bloss die Kennung: das Journal führt Konten
+    als Nummer. Ohne diese Auflösung liesse sich die Tabelle nicht mit dem
+    Journal verbinden -- sie wäre vorhanden und unbrauchbar.
+
+    Der zweite Rückgabewert zählt die Bankkonten ohne Gegenstück im Kontenplan.
+    Sie fehlen im Saldo, und eine fehlende Zeile sieht aus wie ein Konto ohne
+    Bewegung.
+    """
+    rohe = await client.list_bank_accounts()
+
+    zeilen: list[dict] = []
+    ohne_konto = 0
+    for b in rohe:
+        kennung = b.get("account_id")
+        eintrag = konten.get(int(kennung)) if kennung is not None else None
+        if eintrag is None:
+            ohne_konto += 1
+            continue
+        zeilen.append({
+            "konto_id": int(kennung),
+            "konto_nr": eintrag.get("konto_nr", ""),
+            "konto": konto_beschriftung(eintrag),
+            "name": str(b.get("name") or "").strip(),
+        })
+
+    zeilen.sort(key=lambda z: z["konto_nr"])
+    if ohne_konto:
+        logger.warning(
+            "%d Bankkonten ohne Gegenstueck im Kontenplan -- ihr Saldo fehlt",
+            ohne_konto,
+        )
+    return zeilen, ohne_konto
 
 
 async def geschaeftsjahre_laden(client) -> list[dict]:

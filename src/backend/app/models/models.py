@@ -359,6 +359,10 @@ class AgentFeedback(Base):
     original: Mapped[dict] = mapped_column(JSONB, server_default="{}")
     corrected: Mapped[dict] = mapped_column(JSONB, server_default="{}")
     diff_text: Mapped[str | None] = mapped_column(Text)
+    # Anteil des Entwurfs, den der Mensch angefasst hat (0.0 bis 1.0). Nur bei
+    # ``draft_edit`` und ``approved_clean`` gesetzt -- eine geloeschte Aufgabe hat
+    # kein Aenderungsmass. Begruendung der Messart in ``learning.compute_draft_diff``.
+    change_ratio: Mapped[float | None] = mapped_column(Float)
     reason: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=func.now())
 

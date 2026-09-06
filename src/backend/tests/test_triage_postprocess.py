@@ -152,6 +152,117 @@ async def _needs_review_for(content: str) -> bool:
     return finalize.call_args.kwargs["needs_review"]
 
 
+async def _finalize_kwargs_for(content: str, meta: dict | None = None) -> dict:
+    """Wie ``_needs_review_for``, liefert aber alle Argumente der Finalisierung."""
+    ctx = _patches()
+    with ctx[0], ctx[1], ctx[2] as finalize, ctx[3], ctx[4], ctx[5], ctx[6]:
+        await hw._post_process_triage(
+            uuid.uuid4(), content, meta if meta is not None else dict(_META), None, [], None
+        )
+    finalize.assert_called_once()
+    return finalize.call_args.kwargs
+
+
+class TestKlassenWeissliste:
+    """Eine unbekannte ``triage_class`` darf den Job nicht mehr töten.
+
+    Vorfall, fünfmal in zehn Wochen und zuletzt am 04.09.2026: Der Rohwert des
+    Modells lief ungeprüft bis in die Datenbank, wo
+    ``email_triage_triage_class_check`` zuschlug. Der Zuschlag traf nicht das Feld,
+    sondern den ganzen Job -- die Mail blieb ohne Kategorie, ohne Aufgabe und ohne
+    Sichtungsmarke liegen, und im Cockpit sah das aus wie ein technischer Ausfall
+    ohne Bezug zur Mail.
+
+    Geprüft werden die vier real gemessenen Ursachen, nicht erfundene Beispiele.
+    Der Weg dahin war eine Synonymtabelle, die genau drei Umbenennungen kannte und
+    alles andere durchliess -- deshalb steht hier eine Weissliste und keine
+    Erweiterung der Tabelle: die Menge der Fehlformen ist offen, die Menge der
+    gültigen Klassen ist geschlossen.
+    """
+
+    @pytest.mark.parametrize(
+        "raw,ursache",
+        [
+            ("f_yi", "Tippfehler in einer gültigen Klasse"),
+            ("system", "Label ins Klassenfeld gerutscht"),
+            ("newsletter", "Label ins Klassenfeld gerutscht"),
+            ("none", "Verweigerung"),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_measured_invalid_classes_fall_back_to_fyi(self, raw, ursache):
+        content = f'{{"triage_class": "{raw}", "label": "System", "confidence": 0.95}}'
+        kwargs = await _finalize_kwargs_for(content)
+        assert kwargs["triage_class"] == "fyi", ursache
+        assert kwargs["needs_review"] is True, ursache
+
+    @pytest.mark.asyncio
+    async def test_undecided_class_becomes_a_review_case_not_a_task(self):
+        """``task/auto_reply`` ist Unentschiedenheit -- das Backend entscheidet nicht nach.
+
+        Der gemessene Fall (10.07.2026, Kundenmail von sandro.scheidt@be.ch) kam mit
+        ``confidence 0.85``, fertigem ``task_title`` und ``needs_review: false``. Die
+        naheliegende Rettung wäre, die erste genannte Klasse zu nehmen. Genau das
+        wäre falsch: das Modell hat sich nicht entschieden, also entscheidet ein
+        Mensch. Ohne die Sichtungsmarke würde daraus eine stumme ``fyi``-Mail, und
+        der Kunde wartet auf eine Antwort, die niemand mehr sieht.
+        """
+        content = (
+            '{"triage_class": "task/auto_reply", "label": "Wichtig", '
+            '"task_title": "COflow: Umsetzungspunkte", "confidence": 0.85}'
+        )
+        ctx = _patches()
+        with ctx[0], ctx[1] as create_task, ctx[2] as finalize, ctx[3], ctx[4], ctx[5], ctx[6]:
+            status = await hw._post_process_triage(
+                uuid.uuid4(), content, dict(_META), None, [], None
+            )
+        assert status == "completed"
+        create_task.assert_not_called()
+        assert finalize.call_args.kwargs["triage_class"] == "fyi"
+        assert finalize.call_args.kwargs["needs_review"] is True
+
+    @pytest.mark.asyncio
+    async def test_legacy_synonyms_still_translate(self):
+        """``board_task`` stammt aus einer älteren Skill-Fassung und meint ``task``.
+
+        Die drei Aliasse sind keine Heuristik, sondern Übersetzungen bekannter
+        Umbenennungen (Migration ``c9e2a4b6d8f0``). Sie dürfen die Weissliste
+        passieren, ohne eine Sichtungsmarke auszulösen.
+        """
+        content = (
+            '{"triage_class": "board_task", "label": "Wichtig", '
+            '"task_title": "Offerte prüfen", "confidence": 0.9}'
+        )
+        ctx = _patches()
+        with ctx[0], ctx[1] as create_task, ctx[2] as finalize, ctx[3], ctx[4], ctx[5], ctx[6]:
+            await hw._post_process_triage(uuid.uuid4(), content, dict(_META), None, [], None)
+        create_task.assert_called_once()
+        assert finalize.call_args.kwargs["triage_class"] == "task"
+        assert finalize.call_args.kwargs["needs_review"] is False
+
+    @pytest.mark.asyncio
+    async def test_human_class_correction_clears_the_review_mark(self):
+        """Hat der Mensch die Klasse gesetzt, ist der Fall gesichtet.
+
+        Sonst trüge eine gerade von Hand korrigierte Mail eine Sichtungsmarke --
+        dieselbe Begründung wie bei ``forced_label``.
+        """
+        meta = dict(_META)
+        meta["forced_class"] = "task"
+        content = '{"triage_class": "newsletter", "label": "Wichtig", "confidence": 0.95}'
+        kwargs = await _finalize_kwargs_for(content, meta)
+        assert kwargs["triage_class"] == "task"
+        assert kwargs["needs_review"] is False
+
+    @pytest.mark.asyncio
+    async def test_valid_class_passes_untouched(self):
+        """Gegenprobe: die Weissliste ist kein zweites Pauschal-Gate."""
+        content = '{"triage_class": "fyi", "label": "Newsletter", "confidence": 0.95}'
+        kwargs = await _finalize_kwargs_for(content)
+        assert kwargs["triage_class"] == "fyi"
+        assert kwargs["needs_review"] is False
+
+
 class TestUnsicherheitBremstDenMove:
     """``needs_review`` ist die einzige Bremse vor einem Move -- sie muss alles tragen.
 

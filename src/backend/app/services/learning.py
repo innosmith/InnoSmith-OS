@@ -19,6 +19,7 @@ import difflib
 import logging
 import re
 import uuid
+from typing import NamedTuple
 
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -45,6 +46,46 @@ from app.services.text_style import (  # noqa: F401
 from ai9.embeddings import embed_text, to_pgvector
 
 logger = logging.getLogger("taskpilot.learning")
+
+# Waehlbare Gruende, einen Antwort-Entwurf abzulehnen.
+#
+# Bis zum 06.09.2026 war die Ablehnung das einzige Signal ohne jede Aussage: 16
+# abgelehnte Entwuerfe, alle mit demselben ``error_message``, und ausnahmslos an
+# namentliche Menschen gerichtet (BFH, T+R, Swiss Bankers, GVB, be.ch, GSW) --
+# kein einziger Maschinen-Absender. Das System wusste also, DASS seine Entwuerfe
+# an genau der wichtigsten Post scheitern, und nichts darueber, woran.
+#
+# Die vier Gruende trennen Faelle, die verschiedene Konsequenzen haben: die
+# ersten beiden sagen, dass gar kein Entwurf haette entstehen sollen (Frage an
+# die Triage), die letzten beiden, dass er schlecht war (Frage an den
+# Schreib-Pass). Sie zu vermengen hiesse, den Prompt fuer ein Triage-Problem zu
+# aendern.
+#
+# Gespeichert wird die Kennung, angezeigt die Beschriftung im Frontend --
+# ``REJECTION_REASONS`` ist ASCII, weil es ein Schluessel ist.
+REJECTION_REASONS: tuple[str, ...] = (
+    "nicht_noetig",       # Diese Mail brauchte gar keine Antwort
+    "schreibe_selbst",    # Zu wichtig oder zu persoenlich zum Delegieren
+    "inhaltlich_falsch",  # Der Entwurf behauptet etwas Unzutreffendes
+    "zu_duenn",           # Hoeflich formuliert, sagt aber nichts
+)
+
+
+def normalize_rejection_reason(value: object) -> str | None:
+    """Prueft einen Ablehnungsgrund gegen ``REJECTION_REASONS``.
+
+    ``None`` heisst "kein Grund angegeben" und ist ein zulaessiges Ergebnis: der
+    Grund ist ueberspringbar. Waere er Pflicht, waere die schnellste Antwort die
+    erste in der Liste, und die Messreihe traege eine Mehrheit, die niemand
+    gemeint hat.
+
+    Ein unbekannter Wert wird ebenfalls zu ``None`` -- lieber keine Angabe als
+    eine erfundene Kategorie, die spaeter in einer Auswertung als Befund erscheint.
+    """
+    if not isinstance(value, str):
+        return None
+    key = value.strip()
+    return key if key in REJECTION_REASONS else None
 
 
 async def _resolve_principal(db: AsyncSession, user_id: uuid.UUID | str | None):
@@ -101,18 +142,49 @@ async def update_learned_tone(
         logger.warning("update_learned_tone fehlgeschlagen (%s)", email)
 
 
-def compute_draft_diff(original_html: str | None, sent_html: str | None) -> tuple[str, bool]:
+class DraftDiff(NamedTuple):
+    """Ergebnis des Entwurfsvergleichs.
+
+    ``change_ratio`` ist der Anteil des Entwurfs, den der Mensch angefasst hat:
+    0.0 unveraendert, 1.0 nichts uebrig geblieben. ``is_clean`` ist genau
+    ``change_ratio == 0`` und bleibt als eigenes Feld erhalten, weil daran der
+    Typ der Rueckmeldung haengt (``approved_clean`` gegen ``draft_edit``).
+    """
+
+    diff_text: str
+    is_clean: bool
+    change_ratio: float
+
+
+def compute_draft_diff(original_html: str | None, sent_html: str | None) -> DraftDiff:
     """Vergleicht Agent-Entwurf und gesendete Fassung (nur neuer Text, ohne Zitat).
 
-    Returns ``(diff_text, is_clean)`` -- ``is_clean`` True, wenn inhaltlich
-    unveraendert (Freigabe ohne Edit).
+    Bis zum 06.09.2026 gab es hier nur ein Ja/Nein, und das verbarg den
+    wichtigsten Befund ueber die Entwuerfe. Nachgerechnet an allen 29 damals
+    erfassten ``draft_edit``-Zeilen ergab sich keine Wolke um die Mitte, sondern
+    eine Zweiteilung: vier Faelle unter 0.15 -- ein Wort, eine Anrede -- und
+    **vierzehn ab 0.80**, also knapp die Haelfte praktisch neu geschrieben. Elf
+    lagen dazwischen. Unter einem gemeinsamen Etikett gelesen, sah das aus wie
+    durchgaengige Politur; es sind zwei verschiedene Vorgaenge, und nur der
+    zweite ist ein Qualitaetsproblem.
+
+    Gemessen wird auf **Woertern**, nicht auf Zeichen. Ein umformulierter Satz
+    soll einmal zaehlen und nicht so oft, wie er Buchstaben hat; ausserdem
+    ueberlebt ein Wortvergleich den Zeilenumbruch, den Outlook beim Senden
+    ohnehin neu setzt. ``autojunk`` ist abgeschaltet, weil die Heuristik in
+    laengeren Texten haeufige Woerter als Fuellmaterial verwirft -- bei
+    deutscher Prosa traefe das genau die Woerter, die den Satzbau tragen.
     """
     orig = strip_quoted_history(html_to_text(original_html))
     sent = strip_quoted_history(html_to_text(sent_html))
 
-    is_clean = _normalize(orig) == _normalize(sent)
-    if is_clean:
-        return "", True
+    if _normalize(orig) == _normalize(sent):
+        return DraftDiff("", True, 0.0)
+
+    matcher = difflib.SequenceMatcher(
+        None, _normalize(orig).split(), _normalize(sent).split(), autojunk=False
+    )
+    change_ratio = round(1.0 - matcher.ratio(), 3)
 
     diff_lines = difflib.unified_diff(
         orig.splitlines(),
@@ -123,7 +195,7 @@ def compute_draft_diff(original_html: str | None, sent_html: str | None) -> tupl
         n=2,
     )
     diff_text = "\n".join(diff_lines)[:8000]
-    return diff_text, False
+    return DraftDiff(diff_text, False, change_ratio)
 
 
 # Trigger-Phrasen, mit denen der Berater im Chat etwas dauerhaft lehren will.
@@ -228,6 +300,7 @@ async def record_feedback(
     original: dict | None = None,
     corrected: dict | None = None,
     diff_text: str | None = None,
+    change_ratio: float | None = None,
     reason: str | None = None,
     user_id: uuid.UUID | str | None = None,
     commit: bool = False,
@@ -246,6 +319,7 @@ async def record_feedback(
             original=original or {},
             corrected=corrected or {},
             diff_text=diff_text,
+            change_ratio=change_ratio,
             reason=reason,
         )
         db.add(fb)
@@ -299,7 +373,7 @@ async def capture_draft_feedback(
         if not original_html:
             return False
 
-        diff_text, is_clean = compute_draft_diff(original_html, sent_html)
+        diff_text, is_clean, change_ratio = compute_draft_diff(original_html, sent_html)
         recipient = recipient or (meta.get("draft_to") or [None])[0] or meta.get("from_address")
 
         await record_feedback(
@@ -311,6 +385,7 @@ async def capture_draft_feedback(
             original={"body_html": original_html},
             corrected={"body_html": sent_html},
             diff_text=diff_text or None,
+            change_ratio=change_ratio,
         )
         if not is_clean:
             await mark_episode_corrected(db, agent_job_id=src_job.id)

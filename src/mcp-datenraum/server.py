@@ -135,7 +135,21 @@ SPALTEN_BEDEUTUNG = {
         "Betrag in CHF; das ist die Spalte für JEDE Summe. Wer nach Geld fragt, "
         "nimmt diese -- nie 'betrag'."
     ),
-    "bexio_journal.ist_aufwand": "true, wenn das SOLLkonto ein Aufwandskonto ist (4000-8999). Für jede Ausgabenfrage: WHERE ist_aufwand",
+    "bexio_journal.ist_aufwand": (
+        "true, wenn das SOLLkonto ein Aufwandskonto ist (4000-8999). ACHTUNG: "
+        "'WHERE ist_aufwand' allein ergibt eine BRUTTO-Summe und ist zu hoch -- sie "
+        "ignoriert die Gegenbuchungen im Haben eines Aufwandskontos. 2025: 401'459 "
+        "brutto gegen 335'982 netto. Für jede Ausgabensumme das Rezept «was hat uns "
+        "etwas gekostet» nehmen, das beide Seiten verrechnet."
+    ),
+    "bexio_journal.ist_aufwand_haben": (
+        "true, wenn das HABENkonto ein Aufwandskonto ist -- eine Entlastung, also "
+        "negativer Aufwand. Zwei Drittel davon sind Umbuchungen zwischen zwei "
+        "Aufwandskonten (dann ist auch 'ist_aufwand' true, und die Buchung erhöht den "
+        "Aufwand netto um null), der Rest sind Rückerstattungen und Aktivierungen. "
+        "Aufwand netto = sum(betrag_chf WHERE ist_aufwand) - sum(betrag_chf WHERE "
+        "ist_aufwand_haben)."
+    ),
     "bexio_journal.soll_konto": "Sollkonto als «Nummer Name», z.B. '6570 Software'. Bei Aufwand ist das die Kategorie -- danach gruppieren",
     "bexio_journal.soll_konto_nr": "nur die Kontonummer des Sollkontos, für Vergleiche und Bereiche",
     "bexio_journal.haben_konto": "Habenkonto als «Nummer Name». NIE zusätzlich zum Sollkonto summieren -- das zählt jeden Betrag doppelt",
@@ -162,6 +176,13 @@ SPALTEN_BEDEUTUNG = {
     "bexio_konten.klasse": "aktiven | passiven | ertrag | aufwand_material | personalaufwand | betriebsaufwand | nebenerfolg | ausserordentlich | abschluss -- aus der ersten Ziffer der Kontonummer",
     "bexio_konten.aktiv": "true, wenn das Konto bebuchbar ist",
     "bexio_konten.gesperrt": "true, wenn Bexio das Konto für neue Buchungen gesperrt hat",
+    "bexio_bankkonten.konto": (
+        "«Nummer Name» des Kontos, auf dem tatsächlich Geld liegt -- die Tabelle "
+        "listet NUR diese. Für einen Banksaldo nach der Kontonummer zu filtern ist "
+        "falsch: '1090 Transferkonto' und '1099 Unklare Beträge' liegen im selben "
+        "Hunderterblock und sind keine Bankkonten. Zum Verbinden mit dem Journal "
+        "'konto_nr' gegen 'soll_konto_nr'/'haben_konto_nr' nehmen."
+    ),
     "bexio_geschaeftsjahre.jahr": "Kalenderjahr des Geschäftsjahrs",
     "bexio_geschaeftsjahre.von": "erster Tag des Geschäftsjahrs",
     "bexio_geschaeftsjahre.bis": "letzter Tag des Geschäftsjahrs",
@@ -354,9 +375,14 @@ SPALTEN_BEDEUTUNG = {
 # Sekunden widerlegt -- und danach dem ganzen Katalog nicht mehr geglaubt.
 KREDITOREN_LESART = (
     "Drei Tabellen berühren Ausgaben, und jede beantwortet eine ANDERE Frage:\n\n"
-    "1. «Was hat uns X gekostet?» -> 'bexio_journal' mit WHERE ist_aufwand, "
-    "gruppiert nach 'soll_konto'. NUR hier ist das Bild vollständig: 2025 sind das "
-    "401'459 CHF, wovon bloss 88'177 (22 Prozent) über den Kreditorenweg liefen.\n"
+    "1. «Was hat uns X gekostet?» -> 'bexio_journal', und zwar NETTO: der Aufwand im "
+    "Soll MINUS die Gegenbuchungen im Haben eines Aufwandskontos ('ist_aufwand_haben'). "
+    "2025 sind das 335'982 CHF. Die naheliegende Summe über 'WHERE ist_aufwand' allein "
+    "ergibt 401'459 und ist zu hoch: 43'335 davon sind Umbuchungen von einem "
+    "Aufwandskonto auf ein anderes, also derselbe Betrag zweimal, und 22'142 CHF "
+    "Rückerstattungen und Aktivierungen fehlen ganz. Fertiges Rezept: «was hat uns "
+    "etwas gekostet». NUR im Journal ist das Bild vollständig -- über den "
+    "Kreditorenweg liefen 2025 bloss 88'177 CHF.\n"
     "2. «Was ist offen, wann fällig?» -> 'bexio_kreditoren'. Für Ausgabensummen "
     "UNGEEIGNET, aus zwei verschiedenen Gründen: die Tabelle enthält NUR erfasste "
     "Lieferantenrechnungen (der grössere Teil des Aufwands wird manuell gebucht), "
@@ -427,12 +453,29 @@ UMSATZ_LESART = (
 # Eine lauffähige Abfrage abzuwandeln gelingt zuverlässig, eine aus einer
 # Beschreibung zu bauen nicht.
 REZEPTE = {
+    # Netto, und die UNION ist der Grund: der Aufwand eines Kontos steht in zwei
+    # Spalten. Nur im Soll zu summieren ergibt 2025 401'459 statt 335'982 CHF.
     "was hat uns etwas gekostet (Aufwand je Kategorie und Jahr)": (
-        "SELECT EXTRACT(YEAR FROM datum) AS jahr, soll_konto,\n"
-        "       count(*) AS buchungen, round(sum(betrag_chf),2) AS chf\n"
+        "WITH bewegung AS (\n"
+        "  SELECT EXTRACT(YEAR FROM datum) AS jahr, soll_konto AS konto,\n"
+        "         betrag_chf AS chf\n"
+        "  FROM '/daten/bexio_journal.parquet' WHERE ist_aufwand\n"
+        "  UNION ALL\n"
+        "  SELECT EXTRACT(YEAR FROM datum) AS jahr, haben_konto AS konto,\n"
+        "         -betrag_chf AS chf\n"
+        "  FROM '/daten/bexio_journal.parquet' WHERE ist_aufwand_haben\n"
+        ")\n"
+        "SELECT jahr, konto, count(*) AS buchungen, round(sum(chf),2) AS chf\n"
+        "FROM bewegung GROUP BY 1, 2 HAVING round(sum(chf),2) <> 0\n"
+        "ORDER BY jahr DESC, chf DESC"
+    ),
+    "Aufwand total je Jahr (netto, die Zahl der Finanzansicht)": (
+        "SELECT EXTRACT(YEAR FROM datum) AS jahr,\n"
+        "       round(sum(CASE WHEN ist_aufwand THEN betrag_chf ELSE 0 END)\n"
+        "           - sum(CASE WHEN ist_aufwand_haben THEN betrag_chf ELSE 0 END), 2)\n"
+        "         AS aufwand_chf\n"
         "FROM '/daten/bexio_journal.parquet'\n"
-        "WHERE ist_aufwand\n"
-        "GROUP BY 1, 2 ORDER BY jahr DESC, chf DESC"
+        "GROUP BY 1 ORDER BY jahr DESC"
     ),
     "was hat der Inhaber privat vorgeschossen (Kreditkarte)": (
         "SELECT EXTRACT(YEAR FROM datum) AS jahr, soll_konto,\n"

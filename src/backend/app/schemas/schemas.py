@@ -340,6 +340,10 @@ class AgentJobUpdate(BaseModel):
     tokens_used: int | None = None
     cost_usd: float | None = None
     metadata_json: dict | None = None
+    # Warum der Mensch einen Antwort-Entwurf ablehnt -- eine Kennung aus
+    # ``learning.REJECTION_REASONS``, oder nichts. Der Grund ist ueberspringbar,
+    # deshalb ist das Feld optional und nicht Teil des Status-Uebergangs.
+    rejection_reason: str | None = None
 
 
 class AgentJobWithTask(AgentJobOut):

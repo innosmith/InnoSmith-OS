@@ -10,6 +10,7 @@ import { EmailThreadPanel } from '../components/EmailThreadPanel';
 import { MeetingSourcePanel } from '../components/MeetingSourcePanel';
 import { EmailBody } from '../components/EmailBody';
 import { TracePanel } from '../components/TracePanel';
+import { AblehnungsgrundWahl, type Ablehnungsgrund } from '../components/agent/Ablehnungsgrund';
 import { AgentRationale } from '../components/agent/AgentRationale';
 import { ConfidenceBadge } from '../components/agent/ConfidenceBadge';
 import { BriefingCard } from '../components/BriefingCard';
@@ -120,6 +121,10 @@ export function CockpitPage() {
   const [processing, setProcessing] = useState<Set<string>>(new Set());
   const [editingJobId, setEditingJobId] = useState<string | null>(null);
   const [expandedApprovals, setExpandedApprovals] = useState<Set<string>>(new Set());
+  // Job, dessen Ablehnung gerade nach einem Grund fragt. Die Ablehnung geschieht
+  // erst mit der Antwort -- auch «Ohne Grund» ist eine, und sie ist einen Klick
+  // entfernt.
+  const [grundFuerJob, setGrundFuerJob] = useState<string | null>(null);
 
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [reviewTaskId, setReviewTaskId] = useState<string | null>(null);
@@ -303,10 +308,15 @@ export function CockpitPage() {
     finally { setProcessing(prev => { const n = new Set(prev); n.delete(jobId); return n; }); }
   };
 
-  const handleReject = async (jobId: string) => {
+  const handleReject = async (jobId: string, grund: Ablehnungsgrund | null) => {
     setProcessing(prev => new Set(prev).add(jobId));
     try {
-      await api.patch(`/api/agent-jobs/${jobId}`, { status: 'failed', error_message: 'Vom Benutzer abgelehnt' });
+      await api.patch(`/api/agent-jobs/${jobId}`, {
+        status: 'failed',
+        error_message: 'Vom Benutzer abgelehnt',
+        rejection_reason: grund,
+      });
+      setGrundFuerJob(null);
       fetchAppData();
     } catch { /* */ }
     finally { setProcessing(prev => { const n = new Set(prev); n.delete(jobId); return n; }); }
@@ -791,8 +801,8 @@ export function CockpitPage() {
                               Prüfen
                             </button>
                             <button
-                              onClick={(e) => { e.stopPropagation(); handleReject(job.id); }}
-                              disabled={isProcessing}
+                              onClick={(e) => { e.stopPropagation(); setGrundFuerJob(job.id); }}
+                              disabled={isProcessing || grundFuerJob === job.id}
                               className={`rounded-lg px-2.5 py-1.5 text-xs font-medium transition-colors disabled:opacity-50 ${
                                 hasBg
                                   ? 'text-red-300 hover:bg-red-500/20'
@@ -810,6 +820,19 @@ export function CockpitPage() {
                           </button>
                         )}
                       </div>
+
+                      {/* Warum abgelehnt wird -- einmal fuer beide Ablehn-Knoepfe
+                          (zugeklappt das ✕, aufgeklappt «Ablehnen»). */}
+                      {grundFuerJob === job.id && (
+                        <div className="mt-3" onClick={(e) => e.stopPropagation()}>
+                          <AblehnungsgrundWahl
+                            onWahl={(grund) => handleReject(job.id, grund)}
+                            onAbbruch={() => setGrundFuerJob(null)}
+                            disabled={isProcessing}
+                            glassBg={hasBg}
+                          />
+                        </div>
+                      )}
 
                       {/* Aufgeklappter Inhalt */}
                       {isExpanded && (
@@ -925,8 +948,8 @@ export function CockpitPage() {
                                   </button>
                                 )}
                                 <button
-                                  onClick={() => handleReject(job.id)}
-                                  disabled={isProcessing}
+                                  onClick={() => setGrundFuerJob(job.id)}
+                                  disabled={isProcessing || grundFuerJob === job.id}
                                   className={`rounded-lg px-4 py-2 text-sm font-medium transition-colors disabled:opacity-50 ${
                                     hasBg
                                       ? 'bg-red-500/20 text-red-200 hover:bg-red-500/30 border border-red-400/30'

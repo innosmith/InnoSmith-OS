@@ -182,6 +182,15 @@ async def journal_laden(client, konten: dict[int, dict], jahre: list[dict]) -> J
                 # Aufwand ist eine Eigenschaft der SOLLSEITE, nicht der Buchung:
                 # dasselbe Konto steht auf der Habenseite fuer das Gegenteil.
                 "ist_aufwand": soll.get("klasse") in AUFWANDSKLASSEN,
+                # Und darum braucht es das Merkmal auch fuer die Habenseite. Ohne es
+                # laesst sich der Aufwand nur brutto summieren, und brutto ist falsch:
+                # 2025 stehen 65'476 CHF im Haben eines Aufwandskontos, davon 43'335
+                # als Umbuchung von einem Aufwandskonto auf ein anderes. Die Brutto-
+                # Summe zaehlt diese Betraege zweimal und laesst die restlichen 22'142
+                # (Rueckerstattungen, Aktivierungen) ganz weg -- 401'459 statt 335'982.
+                # Wer es aus 'haben_konto_nr' ableiten muss, leitet es irgendwann
+                # falsch ab; deshalb steht die Entscheidung als Spalte in den Daten.
+                "ist_aufwand_haben": haben.get("klasse") in AUFWANDSKLASSEN,
             })
 
     bestand.zeilen.sort(key=lambda z: (z["datum"] or "", z["buchung_id"] or 0))

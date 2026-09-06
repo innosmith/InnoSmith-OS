@@ -303,14 +303,79 @@ async def apply_deterministic_rules(
     return False
 
 
+def _rule_names_exact_sender(conditions) -> bool:
+    """Benennt die Regel den Absender wörtlich (``sender equals``)?
+
+    Trennt die zwei Arten deterministischer Regeln, die im Move-Fall
+    unterschiedlich viel Vertrauen verdienen. Eine Regel mit ``sender equals``
+    nennt genau eine Adresse: dort hat ein Mensch entschieden, dass Post von
+    dieser Adresse weggeräumt werden darf. Eine Regel mit ``contains`` oder über
+    ``domain`` beschreibt dagegen eine Menge, deren Umfang niemand kennt --
+    ``domain equals stripe.com`` trifft auch die Rechnung eines künftigen
+    Geschäftspartners auf derselben Plattform.
+
+    Nur für die zweite Art wird der Korrespondenz-Nachweis geführt. Ihn auch bei
+    einer namentlich genannten Adresse zu verlangen, wäre ein Graph-Abruf pro
+    Treffer, der nichts entscheidet: die Antwort ist bei einer reinen
+    Versandadresse immer dieselbe.
+    """
+    if not isinstance(conditions, (list, tuple)):
+        return False
+    return any(
+        isinstance(c, dict) and c.get("field") == "sender" and c.get("op") == "equals"
+        for c in conditions
+    )
+
+
+async def _move_suppressed_for_rule(
+    client: GraphClient, rule, from_addr: str
+) -> str | None:
+    """Grund, warum eine Regel gerade NICHT verschieben darf -- oder ``None``.
+
+    Schliesst die Lücke, durch die der Regelpfad an ``move_target()`` vorbeilief.
+    Der Modellpfad führt seit August 2026 einen Nachweis aus «Gesendete Elemente»,
+    weil 49 Mails namentlicher Absender aus dem Posteingang geräumt worden waren.
+    Diese Sicherung fehlte hier vollständig -- eine Regel verschob, ohne zu fragen.
+
+    Der Nachweis gilt nur, wo die Regel eine Menge unbekannten Umfangs beschreibt
+    (siehe ``_rule_names_exact_sender``). Ist er nicht führbar, wird nicht
+    verschoben: ein Ausfall der Graph-Suche darf keine Post wegräumen -- dieselbe
+    Richtung wie in ``move_target``, wo ``None`` wie «ist ein Kontakt» zählt.
+    """
+    conditions = rule.match_conditions if isinstance(rule.match_conditions, list) else []
+    if _rule_names_exact_sender(conditions):
+        return None
+
+    from app.services.hermes_worker import _is_known_correspondent
+
+    known = await _is_known_correspondent(client, from_addr)
+    if known is True:
+        return "eigene Korrespondenz mit dieser Adresse"
+    if known is None:
+        return "Korrespondenz nicht prüfbar"
+    return None
+
+
 async def _execute_deterministic_action(
     db: AsyncSession, client: GraphClient, email_data: dict, rule
 ) -> None:
     """Führt die Aktion einer deterministischen Regel aus (fyi/task + Kategorie + Move)."""
     from app.models import LearnedRule
+    from app.services.rules import ACTION_TRIAGE_CLASSES
 
     action = rule.action if isinstance(rule.action, dict) else {}
-    triage_class = action.get("triage_class") or "fyi"
+    # Weissliste wie im Modellpfad. Die API prüft die Klasse beim Anlegen
+    # (``intelligence.py``), aber eine Regel kann älter sein als diese Prüfung oder
+    # aus einer Migration stammen -- und ein ungültiger Wert tötet hier denselben
+    # CHECK-Constraint wie beim LLM. ``auto_reply`` ist bewusst nicht erlaubt: auf
+    # diesem Pfad schreibt niemand einen Entwurf.
+    raw_class = action.get("triage_class")
+    triage_class = raw_class if raw_class in ACTION_TRIAGE_CLASSES else "fyi"
+    if raw_class is not None and triage_class != raw_class:
+        logger.warning(
+            "Det. Regel %s: triage_class %r nicht erlaubt -- fail-closed auf 'fyi'",
+            rule.id, str(raw_class)[:40],
+        )
     category = action.get("category")
     folder = action.get("folder")
 
@@ -330,7 +395,11 @@ async def _execute_deterministic_action(
         inference_class=email_data.get("inferenceClassification", ""),
         triage_class=triage_class,
         reply_expected=False,
-        confidence=1.0,
+        # Bewusst leer statt 1.0. Eine Regel misst keine Sicherheit -- sie ist eine
+        # Setzung. Die 1.0 war eine Behauptung, die im Cockpit neben echten,
+        # gemessenen Werten stand und dadurch aussah wie das sicherste Urteil des
+        # Systems. Woher die Einordnung kommt, sagt ``deterministic_override``.
+        confidence=None,
         suggested_action={
             "label": category or triage_class,
             "triage_class": triage_class,
@@ -378,15 +447,26 @@ async def _execute_deterministic_action(
         except Exception:  # noqa: BLE001
             logger.warning("Det. Regel: Kategorie '%s' setzen fehlgeschlagen (mid=%s)", category, message_id[:30])
     if folder:
-        try:
-            moved = await client.move_to_folder(message_id, folder)
-            await sync_message_id(
-                db,
-                internet_message_id=triage_record.internet_message_id,
-                new_message_id=(moved or {}).get("id"),
+        suppressed = await _move_suppressed_for_rule(client, rule, from_addr)
+        if suppressed:
+            logger.info(
+                "Det. Regel %s: Move nach '%s' unterdrückt -- %s (%s)",
+                rule.id, folder, suppressed, from_addr[:60],
             )
-        except Exception:  # noqa: BLE001
-            logger.info("Det. Regel: Move nach '%s' nicht möglich (Ordner fehlt?)", folder)
+            merged = dict(triage_record.suggested_action or {})
+            merged["move_suppressed"] = suppressed
+            triage_record.suggested_action = merged
+            await db.flush()
+        else:
+            try:
+                moved = await client.move_to_folder(message_id, folder)
+                await sync_message_id(
+                    db,
+                    internet_message_id=triage_record.internet_message_id,
+                    new_message_id=(moved or {}).get("id"),
+                )
+            except Exception:  # noqa: BLE001
+                logger.info("Det. Regel: Move nach '%s' nicht möglich (Ordner fehlt?)", folder)
 
     # Anwendungszähler erhöhen (Anzeige/Vertrauen im Cockpit).
     await db.execute(
@@ -458,8 +538,6 @@ async def _create_triage_job(db: AsyncSession, email_data: dict) -> None:
 
     Keine Vorab-Klassifikation -- der Hermes-Agent uebernimmt alles via LLM.
     """
-    from app.services.llm_defaults import get_default_local_model
-
     from_info = email_data.get("from", {}).get("emailAddress", {})
     from_addr = from_info.get("address", "")
     subject = email_data.get("subject", "")
@@ -483,14 +561,24 @@ async def _create_triage_job(db: AsyncSession, email_data: dict) -> None:
     )
     db.add(triage_record)
 
-    local_model = await get_default_local_model(db)
-
     agent_job = AgentJob(
         user_id=principal,
         task_id=None,
         job_type="email_triage",
         status="queued",
-        llm_model=local_model,
+        # Das Modell, das diesen Job TATSAECHLICH rechnet. Bis zum 06.09.2026 stand
+        # hier ``get_default_local_model`` -- die Owner-Einstellung
+        # ``llm_default_local_model``, die den Triage-Worker gar nicht steuert. Der
+        # Worker folgt ``triage_model`` und tat das immer.
+        #
+        # Der Schaden war nicht kosmetisch: in drei Wochen trugen die
+        # ``email_triage``-Jobs vier verschiedene Modellnamen (205x 27b, 80x
+        # 27b-bf16, 43x 27b-q8_0, 8x qwen3.6), weil das Feld der Einstellung folgte,
+        # sooft sie sich aenderte. Gerechnet hat durchweg ``qwen3.6:latest``. Damit
+        # war jede Auswertung nach Modell falsch -- und 43 Jobs schienen auf
+        # ``27b-q8_0`` gelaufen zu sein, das wegen thermischer Dauerlast auf der GX10
+        # ausdruecklich nicht laufen darf (siehe ``docs/gx10-freeze-befund.md``).
+        llm_model=get_settings().triage_model,
         metadata_json={
             "email_message_id": email_data["id"],
             "internet_message_id": email_data.get("internetMessageId", ""),
@@ -681,7 +769,9 @@ async def _reconcile_sent_drafts(limit: int = 25) -> int:
                     if body.get("contentType") == "html"
                     else match.get("bodyPreview")
                 )
-                diff_text, is_clean = compute_draft_diff(original_html, sent_html)
+                diff_text, is_clean, change_ratio = compute_draft_diff(
+                    original_html, sent_html
+                )
                 await record_feedback(
                     db,
                     feedback_type="approved_clean" if is_clean else "draft_edit",
@@ -691,6 +781,7 @@ async def _reconcile_sent_drafts(limit: int = 25) -> int:
                     original={"body_html": original_html},
                     corrected={"body_html": sent_html},
                     diff_text=diff_text or None,
+                    change_ratio=change_ratio,
                 )
                 if not is_clean:
                     await mark_episode_corrected(db, agent_job_id=job.id)
@@ -1117,8 +1208,6 @@ async def _create_chat_triage_job(
     db: AsyncSession, chat_id: str, msg: dict, chat_type: str | None = None,
 ) -> None:
     """Erstellt einen ChatTriage-Record und einen AgentJob für eine neue Chat-Nachricht."""
-    from app.services.llm_defaults import get_default_local_model
-
     sender = (msg.get("from") or {}).get("user", {})
     from_name = sender.get("displayName", "")
     from_id = sender.get("id", "")
@@ -1141,14 +1230,13 @@ async def _create_chat_triage_job(
     )
     db.add(triage_record)
 
-    local_model = await get_default_local_model(db)
-
     agent_job = AgentJob(
         user_id=principal,
         task_id=None,
         job_type="chat_triage",
         status="queued",
-        llm_model=local_model,
+        # Wie bei ``email_triage``: derselbe Worker, dasselbe Modell.
+        llm_model=get_settings().triage_model,
         metadata_json={
             "chat_id": chat_id,
             "chat_message_id": msg["id"],

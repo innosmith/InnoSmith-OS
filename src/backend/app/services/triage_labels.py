@@ -102,6 +102,25 @@ LABEL_FOLDERS: dict[str, str] = {
 _BY_CASEFOLD: dict[str, str] = {label.casefold(): label for label in TRIAGE_LABELS}
 _AGENT_BY_CASEFOLD: dict[str, str] = {label.casefold(): label for label in AGENT_LABELS}
 
+# Die Klassen, die ``email_triage_triage_class_check`` in der Datenbank zulaesst.
+# Der Reask-Pfad fuehrt dieselbe Aufzaehlung im JSON-Schema (``hermes_worker``);
+# diese Konstante ist der Zwilling dazu fuer den gewoehnlichen Parse-Pfad.
+TRIAGE_CLASSES: tuple[str, ...] = ("auto_reply", "task", "fyi")
+
+# Fail-closed-Ziel einer unbekannten Klasse. Begruendung in ``normalize_triage_class``.
+FALLBACK_CLASS = "fyi"
+
+# Aeltere Namen derselben drei Klassen aus frueheren Skill-Fassungen.
+# ``board_task`` traegt zusaetzlich die Bedeutung "Antwort erwartet"; diese
+# Nebenwirkung setzt der Aufrufer, weil sie ein anderes Feld betrifft.
+_CLASS_SYNONYMS: dict[str, str] = {
+    "quick_response": "auto_reply",
+    "board_task": "task",
+    "bedenkzeit": "task",
+}
+
+_CLASS_BY_CASEFOLD: dict[str, str] = {cls.casefold(): cls for cls in TRIAGE_CLASSES}
+
 
 def normalize_label(value: object) -> str | None:
     """Prueft ein Label gegen das vollstaendige Vokabular (inkl. ``Unklar``).
@@ -130,6 +149,48 @@ def normalize_agent_label(value: object) -> str | None:
     if not isinstance(value, str):
         return None
     return _AGENT_BY_CASEFOLD.get(value.strip().casefold())
+
+
+def normalize_triage_class(value: object) -> str | None:
+    """Prueft eine Triage-Klasse gegen ``TRIAGE_CLASSES`` -- ``None`` heisst ungueltig.
+
+    Fail-closed wie ``normalize_agent_label``: der Aufrufer setzt dann
+    ``FALLBACK_CLASS`` plus ``needs_review``, statt den Wert ungeprueft in die
+    Datenbank zu schreiben. Dort wartet ``email_triage_triage_class_check``, und
+    dessen Zuschlag toetet nicht das Feld, sondern den ganzen Job: die Mail bleibt
+    ohne Kategorie, ohne Aufgabe und ohne Sichtungsmarke liegen. Gemessen fuenfmal
+    in zehn Wochen, zuletzt am 04.09.2026.
+
+    Die real aufgetretenen Fehlformen zeigen vier verschiedene Ursachen, und keine
+    davon wird zurechtgebogen:
+
+    - ``f_yi`` -- Tippfehler in einer gueltigen Klasse.
+    - ``system``, ``newsletter`` -- ein Label ist ins Klassenfeld gerutscht.
+    - ``task/auto_reply`` -- Unentschiedenheit, hier sogar mit ``confidence 0.85``
+      und fertigem ``task_title``.
+    - ``none`` -- Verweigerung.
+
+    Gerade der dritte Fall begruendet, warum der Rueckfall ``fyi`` heisst und nicht
+    etwa die erste genannte Klasse: das Modell hat sich nicht entschieden, also
+    entscheidet es das Backend auch nicht. ``needs_review`` macht den Fall im
+    Cockpit sichtbar, und ein Mensch vergibt die Klasse. Das ist schlechter als eine
+    richtige Klasse und viel besser als der heutige Totalverlust.
+
+    Die drei Aliasse in ``_CLASS_SYNONYMS`` sind kein Widerspruch zur Absage an
+    Label-Synonyme im Modulkopf. Ein Label-Synonym muesste Bedeutung raten (gehoert
+    "Rechnung" zu ``Finanzen`` oder zu ``Offerten/Verträge``?). ``quick_response``
+    dagegen ist derselbe Begriff unter einem aelteren Namen, den frueher
+    Skill-Fassungen vorgaben -- dokumentiert in der Migration
+    ``c9e2a4b6d8f0_extend_chat_triage_classes``. Eine geschlossene Menge von drei
+    bekannten Umbenennungen ist keine Heuristik, sondern eine Uebersetzung.
+    """
+    if not isinstance(value, str):
+        return None
+    key = value.strip().casefold()
+    canonical = _CLASS_BY_CASEFOLD.get(key)
+    if canonical is not None:
+        return canonical
+    return _CLASS_SYNONYMS.get(key)
 
 
 def folder_for_label(label: str | None) -> str | None:

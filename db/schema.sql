@@ -630,6 +630,11 @@ CREATE TABLE agent_feedback (
     original        JSONB DEFAULT '{}'::jsonb,
     corrected       JSONB DEFAULT '{}'::jsonb,
     diff_text       TEXT,
+    -- Anteil des Entwurfs, den der Mensch angefasst hat (0.0 unveraendert,
+    -- 1.0 neu geschrieben). Nur bei 'draft_edit' und 'approved_clean' gesetzt.
+    -- Trennt Politur von Neufassung -- ohne diese Zahl sehen beide gleich aus.
+    change_ratio    REAL CHECK (change_ratio IS NULL
+                                OR change_ratio BETWEEN 0 AND 1),
     reason          TEXT,
     created_at      TIMESTAMPTZ DEFAULT now()
 );

@@ -77,13 +77,16 @@ from app.services.notification import (
 )
 from app.services.triage_labels import (
     AGENT_LABELS,
+    FALLBACK_CLASS,
     FALLBACK_LABEL,
     NO_CATEGORY,
+    TRIAGE_CLASSES,
     folder_for_label,
     move_suppressed_reason,
     move_target,
     normalize_agent_label,
     normalize_label,
+    normalize_triage_class,
 )
 from app.core.principal import get_owner_settings, system_principal_id
 
@@ -1280,8 +1283,8 @@ async def _build_triage_prompt(job: AgentJob) -> str:
     if conversation_id:
         thread_hint = f"""
 **Konversations-ID:** {conversation_id}
-→ Lade den Thread mit get_thread("{conversation_id}") für vollständigen Kontext.
-→ Lade die Absender-History mit search_sender_history("{from_addr}") um Kommunikationsmuster zu erkennen.
+→ Lade den Thread mit mcp_graph_get_thread("{conversation_id}") für vollständigen Kontext.
+→ Lade die Absender-History mit mcp_graph_search_sender_history("{from_addr}") um Kommunikationsmuster zu erkennen.
 """
 
     # Fakt aus dem Umschlag (RFC 3834), keine Textdeutung: der Absender-Server
@@ -1350,15 +1353,15 @@ async def _build_triage_prompt(job: AgentJob) -> str:
     # Entwurf (das uebernimmt der separate Schreib-Pass), sonst im selben Loop.
     if two_pass:
         draft_step = (
-            "7. Erstelle KEINEN Antwort-Entwurf. Klassifiziere nur -- bei auto_reply "
+            "5. Erstelle KEINEN Antwort-Entwurf. Klassifiziere nur -- bei auto_reply "
             "schreibt das Backend den Entwurf anschliessend in einem separaten, "
             "fokussierten Schreib-Pass. Das Backend erzwingt die Thread-Zugehörigkeit "
             "und erstellt bei task die Aufgabe automatisch."
         )
     else:
         draft_step = (
-            "7. Erstelle Draft falls auto_reply. WICHTIG: Rufe VORHER "
-            f'search_my_replies("{from_addr}") auf und nutze die letzten von Anthony '
+            "5. Erstelle Draft falls auto_reply. WICHTIG: Rufe VORHER "
+            f'mcp_graph_search_my_replies("{from_addr}") auf und nutze die letzten von Anthony '
             "gesendeten Antworten an diesen Kontakt als Ton-/Register-Kalibrierung "
             "(orientiere dich an Ton, Länge, Anrede und Schlussformel, schreibe aber "
             "natürlich neu, kopiere nicht wörtlich). PFLICHT: Übergib bei create_draft "
@@ -1395,29 +1398,33 @@ Du hast einen email_triage Job erhalten. Führe den kompletten Triage-Ablauf gem
 ## PFLICHT-AUFRUFE VOR JEDER KLASSIFIKATION UND DRAFT-ERSTELLUNG
 
 Du MUSST die folgenden drei Kontext-Quellen laden, BEVOR du klassifizierst oder einen Draft erstellst:
-1. **get_thread("{conversation_id or ''}")** -- Thread-Kontext laden (PFLICHT falls conversation_id vorhanden)
-2. **search_sender_history("{from_addr}")** -- Absender-History laden (IMMER PFLICHT)
-3. **get_sender_profile("{from_addr}")** -- Absender-Profil laden (IMMER PFLICHT)
+1. **mcp_graph_get_thread("{conversation_id or ''}")** -- Thread-Kontext laden (PFLICHT falls conversation_id vorhanden)
+2. **mcp_graph_search_sender_history(sender_email="{from_addr}")** -- Absender-History laden (IMMER PFLICHT)
+3. **mcp_taskpilot_get_sender_profile(email="{from_addr}")** -- Absender-Profil laden (IMMER PFLICHT)
 
 Erstelle NIEMALS einen Draft ohne diese drei Kontext-Quellen geladen zu haben!
 
 ---
 
-WICHTIG: Befolge die Prioritätsreihenfolge (Stufe 1 → Stufe 2 → Stufe 3) STRIKT.
-- Prüfe ZUERST ob Stufe 1 (Signale) zutrifft.
-- Prüfe DANN ob Stufe 2 (System) zutrifft.
-- Nur wenn weder Stufe 1 noch 2 passen, wende Stufe 3 (Standardregeln) an.
+WICHTIG: Befolge die Prioritätsreihenfolge STRIKT. Sobald eine Stufe greift: STOPP.
+- Stufe 1 (Signale) -- eigene Briefings und Deep Dives.
+- Stufe 2 (Finanzen) -- geht es inhaltlich um Geld, ist es Finanzen, AUCH wenn ein
+  Automat die Mail schickte und keine Anrede enthält. Thema schlägt Herkunft.
+- Stufe 3 (System) -- automatisiert UND ohne Handlungsbedarf. Beides muss gelten.
+- Stufe 4 (Standardregeln) -- nur wenn keine der drei Stufen greift.
 
 Führe jetzt den Triage-Ablauf durch:
-1. Lies die E-Mail mit get_email("{email_id}"). Falls hasAttachments=true und Bildinhalt für die Einordnung relevant sein könnte (Screenshot, gescanntes Dokument, Bild-Newsletter), rufe get_email_attachments("{email_id}") auf und werte jeden Bild-Anhang mit vision_analyze(image_url=<path>, user_prompt="Beschreibe den Inhalt für die E-Mail-Triage") aus.
-2. Lies die Kategorien mit get_email_categories("{email_id}")
+1. Lies die E-Mail mit mcp_graph_get_email("{email_id}"). Falls hasAttachments=true und Bildinhalt für die Einordnung relevant sein könnte (Screenshot, gescanntes Dokument, Bild-Newsletter), rufe mcp_graph_get_email_attachments("{email_id}") auf und werte jeden Bild-Anhang mit vision_analyze(image_url=<path>, user_prompt="Beschreibe den Inhalt für die E-Mail-Triage") aus.
+2. Lies die Kategorien mit mcp_graph_get_email_categories("{email_id}")
 3. Lade Thread-Kontext, Absender-History und Absender-Profil (PFLICHT!)
 4. Klassifiziere gemäss der Prioritätsreihenfolge
-5. Setze die Outlook-Kategorie
-6. Verschiebe bei Bedarf (System/Newsletter/Junk/Kalender)
 {draft_step}
-8. Gib den PFLICHT-JSON-Block aus (Schema im Skill bzw. references/triage-rules.md)
-9. Aktualisiere das Absender-Profil mit update_sender_profile (siehe Skill)
+6. Gib den PFLICHT-JSON-Block aus (Schema im Skill bzw. references/triage-rules.md)
+7. Aktualisiere das Absender-Profil mit mcp_taskpilot_update_sender_profile (siehe Skill)
+
+Kategorie und Move gehören NICHT zu deinen Schritten: beides setzt das Backend
+deterministisch aus dem validierten JSON-Block, und im Triage-Lauf hast du die
+Werkzeuge dafür gar nicht. Frühere Prompt-Fassungen forderten es trotzdem.
 
 Status und Output werden automatisch aus deiner finalen Antwort gespeichert -- rufe update_agent_job NICHT selbst auf.
 """ + (f"\n\n## ZUSÄTZLICHE BENUTZER-REGELN (haben Vorrang!)\n{custom_triage_prompt}" if custom_triage_prompt else "")
@@ -1577,9 +1584,7 @@ async def _post_process_chat_triage(job_id, content: str, meta: dict | None = No
     rationale = None
     confidence = None
     if parsed is not None:
-        triage_class = parsed.get("triage_class")
-        if triage_class == "quick_response":
-            triage_class = "auto_reply"
+        triage_class = normalize_triage_class(parsed.get("triage_class"))
         rationale = parsed.get("rationale")
         confidence = parsed.get("confidence")
         try:
@@ -1591,8 +1596,10 @@ async def _post_process_chat_triage(job_id, content: str, meta: dict | None = No
         except (TypeError, ValueError):
             confidence = None
 
-    if triage_class not in ("task", "fyi", "auto_reply"):
-        triage_class = "fyi"
+    # ``normalize_triage_class`` liefert ``None`` bei unbekannter Klasse und bei
+    # fehlendem JSON-Block -- beides endet hier fail-closed auf ``fyi``.
+    if triage_class is None:
+        triage_class = FALLBACK_CLASS
 
     async with async_session() as db:
         # Deterministische Task-Erstellung (Paritaet zur E-Mail-Triage): Das
@@ -3384,7 +3391,27 @@ async def _post_process_triage(
         else:
             return await _fallback_unparsed_triage(job_id, meta, moved_id)
 
-    triage_class = parsed.get("triage_class")
+    # Klasse gegen das Vokabular pruefen -- vor jedem Schreibzugriff. Ohne diese
+    # Pruefung lief der Rohwert bis in die Datenbank und ``triage_class_check``
+    # toetete den ganzen Job: keine Kategorie, keine Aufgabe, keine Sichtungsmarke.
+    raw_class = parsed.get("triage_class")
+    triage_class = normalize_triage_class(raw_class)
+    class_invalid = triage_class is None
+    if class_invalid:
+        logger.warning(
+            "Job %s: triage_class %r nicht im Vokabular -- fail-closed auf '%s' "
+            "(needs_review)",
+            job_id, str(raw_class)[:60], FALLBACK_CLASS,
+        )
+        triage_class = FALLBACK_CLASS
+        parsed["class_rejected"] = str(raw_class)[:120] if raw_class else None
+    parsed["triage_class"] = triage_class
+    # ``board_task`` hiess "Aufgabe, und der Absender erwartet eine Antwort". Die
+    # Klasse uebersetzt ``normalize_triage_class``, die Nebenwirkung gehoert hierher,
+    # weil sie ein anderes Feld betrifft.
+    if isinstance(raw_class, str) and raw_class.strip().casefold() == "board_task":
+        parsed["reply_expected"] = True
+
     # Label gegen das Agenten-Vokabular pruefen. Fail-closed: ein erfundenes ODER
     # ausweichendes Label ('Unklar' ist nicht waehlbar, siehe AGENT_LABELS) wird
     # nicht zurechtgebogen, sondern zu 'Unklar' mit needs_review -- sichtbar in
@@ -3458,23 +3485,19 @@ async def _post_process_triage(
         )
         confidence = None
 
-    if triage_class == "quick_response":
-        triage_class = "auto_reply"
-    elif triage_class == "board_task":
-        triage_class = "task"
-        reply_expected = True
-    elif triage_class == "bedenkzeit":
-        triage_class = "task"
-
     # Berater-Korrektur erzwingen: Eine vom Menschen vorgegebene Klasse hat Vorrang
     # vor der (ggf. abweichenden) Selbst-Klassifikation des Agenten.
     forced_class = meta.get("forced_class")
-    if forced_class in ("auto_reply", "task", "fyi") and triage_class != forced_class:
+    if forced_class in TRIAGE_CLASSES and triage_class != forced_class:
         logger.info(
             "Job %s: forced_class=%s erzwingt Korrektur (Agent wollte %s)",
             job_id, forced_class, triage_class,
         )
         triage_class = forced_class
+        parsed["triage_class"] = forced_class
+        # Der Mensch hat die Klasse gesetzt -- die verworfene Modellklasse ist damit
+        # erledigt und darf keine Sichtungsmarke mehr ausloesen (analog zum Label).
+        class_invalid = False
 
     # Bei erzwungener Klasse den Draft-basierten Auto-Switch unterdruecken, damit
     # eine bewusst gewollte 'task'-Korrektur nicht zurueck auf auto_reply kippt.
@@ -3570,9 +3593,16 @@ async def _post_process_triage(
     # Eine Berater-Korrektur (``forced_label``) hebt das Signal auf: der Fall ist
     # dann per Definition gesichtet, und ein Sichtungsmarker auf einer gerade von
     # Hand korrigierten Mail waere schlicht falsch.
+    #
+    # ``class_invalid`` ist der dritte Anteil und kam am 06.09.2026 dazu. Er wiegt
+    # schwerer als die beiden anderen: bei einem verworfenen Label steht die Klasse
+    # noch, hier hat das Backend selbst auf ``fyi`` zurueckgesetzt. Der gemessene
+    # Fall ``task/auto_reply`` kam mit ``confidence 0.85`` und fertigem Titel -- ohne
+    # diese Marke waere daraus eine stumme ``fyi``-Mail geworden, und der Kunde
+    # haette auf eine Antwort gewartet, die niemand mehr sieht.
     low_conf_threshold = get_settings().triage_low_confidence_threshold
     low_confidence = confidence is None or confidence < low_conf_threshold
-    needs_review = (label_invalid or low_confidence) and not forced_label
+    needs_review = (label_invalid or class_invalid or low_confidence) and not forced_label
     if low_confidence:
         logger.info(
             "Job %s: Confidence %s -- als needs_review markiert (Schwelle %.2f)",
@@ -3609,6 +3639,10 @@ async def _post_process_triage(
                     # ``parsed`` und erreichte die DB nie -- das Cockpit liest das
                     # Feld (InboxPage), fand es aber immer leer.
                     "label_rejected": parsed.get("label_rejected"),
+                    # Verworfene Klasse -- der Zwilling dazu. Ohne dieses Feld waere
+                    # im Cockpit nicht erkennbar, ob ``fyi`` das Urteil des Modells
+                    # oder der Rueckfall des Backends ist.
+                    "class_rejected": parsed.get("class_rejected"),
                 },
                 status="acted" if triage_class != "auto_reply" else "processing",
             )
@@ -5121,7 +5155,32 @@ async def _cleanup_orphaned_drafts() -> int:
 
 
 async def _reap_stale_jobs() -> int:
-    """Setzt running-Jobs, die länger als STALE_TIMEOUT_MINUTES laufen, auf failed."""
+    """Setzt running-Jobs, die länger als STALE_TIMEOUT_MINUTES laufen, auf failed.
+
+    **Gemessen am 06.09.2026: diese Funktion hat noch nie gegriffen** -- null Treffer
+    in zehn Wochen, während im selben Zeitraum fünf Triage-Jobs echte 31 bis 39
+    Minuten Rechenzeit brauchten. Der Grund ist strukturell und keine Fehlfunktion:
+    ``_process_job`` wird in derselben Schleife **erwartet**, in der auch der Reaper
+    steht. Solange ein Job rechnet, kommt die Schleife nicht an den Reaper zurück;
+    ist sie zurück, ist der Job nicht mehr ``running``. Der einzige Job, der je
+    überfällig sein könnte, ist genau der, der den Reaper blockiert.
+
+    Was tatsächlich aufräumt, ist der Startup-Cleanup in ``main.py`` (15 Treffer):
+    er läuft **vor** dem Worker und findet die Jobs eines abgestürzten Vorgängers.
+    Der Reaper deckt damit keinen Fall ab, den nicht schon der Neustart abdeckt.
+
+    Er bleibt trotzdem stehen: sobald die Jobverarbeitung nebenläufig wird, ist er
+    die richtige Sicherung. Bis dahin darf niemand ihn für eine wirksame halten --
+    ein Zeitlimit, das nicht auslöst, sieht im Code aus wie eine Garantie.
+
+    Zur Einordnung der Laufzeiten, weil die rohe Differenz irreführt: bei
+    ``auto_reply`` misst ``completed_at - started_at`` die **Wartezeit auf die
+    Freigabe**, nicht Rechenzeit -- daher Mittelwerte über zwei Stunden und ein
+    Ausreisser von zwölf Tagen. Rechenzeit ist nur bei ``fyi`` und ``task``
+    ablesbar: Mittel 5.6 bzw. 12 Minuten, p95 22 bzw. 27 Minuten. Die Tokenmenge
+    erklärt den Ausläufer **nicht** (138k im Mittel in beiden Gruppen), die
+    Tageszeit auch nicht (7.4 bis 10.9 Minuten über alle Stunden).
+    """
     cutoff = datetime.now(timezone.utc) - timedelta(minutes=STALE_TIMEOUT_MINUTES)
     async with async_session() as db:
         result = await db.execute(

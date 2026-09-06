@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { Link } from 'react-router-dom';
-import { Sparkles } from 'lucide-react';
+import { Sparkles, AlertTriangle } from 'lucide-react';
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid,
   Tooltip, ResponsiveContainer, ReferenceLine, Cell, ComposedChart,
@@ -12,6 +12,18 @@ import { useMediaQuery } from '../hooks/useMediaQuery';
 import { parseExcludeVendors, isExcludedVendor } from './creditors/creditors-helpers';
 
 // ── Types ────────────────────────────────────────────
+
+/**
+ * Alter der Zahlen. Sie kommen aus dem lokalen Datenraum, der stündlich
+ * abgeglichen wird -- nicht mehr live aus Bexio und Toggl. Das ist genauer
+ * (Fremdwährung, Entwurfsrechnungen), aber nicht mehr per Definition aktuell.
+ * Darum muss der Stand sichtbar sein.
+ */
+interface Datenstand {
+  stand: string | null;
+  alter_stunden: number | null;
+  veraltet: boolean;
+}
 
 interface KpiOverview {
   bank_balance: number | null;
@@ -55,6 +67,7 @@ interface KpiOverview {
   journal_data_to: string | null;
   as_of_date: string;
   currency: string;
+  datenstand: Datenstand;
 }
 
 interface CashflowSpecialItem {
@@ -215,6 +228,22 @@ function trendStatus(trend: KpiTrend | null): 'green' | 'red' | 'neutral' {
   return isGood ? 'green' : 'red';
 }
 
+/**
+ * Das Alter der Daten in Worten, die man ohne Rechnen versteht.
+ * Eine Uhrzeit allein («14:04») verlangt vom Leser, sie mit der aktuellen zu
+ * vergleichen — genau der Schritt, den er überspringt.
+ */
+function formatDatenstand(d: Datenstand | undefined): string {
+  if (!d?.stand) return 'unbekannt';
+  const stunden = d.alter_stunden ?? 0;
+  const zeitpunkt = new Date(d.stand).toLocaleString('de-CH', {
+    day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit',
+  });
+  if (stunden < 1) return `vor ${Math.max(1, Math.round(stunden * 60))} Min. (${zeitpunkt})`;
+  if (stunden < 48) return `vor ${Math.round(stunden)} Std. (${zeitpunkt})`;
+  return `vor ${Math.round(stunden / 24)} Tagen (${zeitpunkt})`;
+}
+
 function formatMonthLabel(month: string): string {
   const [y, m] = month.split('-');
   const names = ['', 'Jan', 'Feb', 'Mär', 'Apr', 'Mai', 'Jun', 'Jul', 'Aug', 'Sep', 'Okt', 'Nov', 'Dez'];
@@ -254,6 +283,7 @@ export function FinancePage() {
   const [bgUrl, setBgUrl] = useState<string | null>(null);
   const [creditorsExcludeVendors, setCreditorsExcludeVendors] = useState<string | null>(null);
   const [bgPickerOpen, setBgPickerOpen] = useState(false);
+  const [syncing, setSyncing] = useState(false);
   const isFinanceMobile = useMediaQuery('(max-width: 1023px)');
 
   const loadData = useCallback(async (wfPeriod = 'ytd') => {
@@ -293,12 +323,29 @@ export function FinancePage() {
       .catch(() => {});
   }, [loadData]);
 
+  /**
+   * Aktualisieren heisst jetzt: Bexio und Toggl neu in den Datenraum holen.
+   * Vorher wurden nur Caches geleert, was die Daten nicht frischer machte --
+   * es zwang bloss dieselbe Abfrage ein zweites Mal.
+   *
+   * Der Abgleich dauert rund fünfzehn Sekunden, darum die eigene Anzeige: ein
+   * Knopf, der eine Viertelminute ohne Rückmeldung stillsteht, sieht kaputt aus.
+   */
   const handleRefresh = async () => {
+    setSyncing(true);
+    setError(null);
     try {
-      await api.post('/api/finance/cache/clear', {});
-      await api.post('/api/bexio/cache/clear', {});
-      await api.post('/api/toggl/cache/clear', {});
-    } catch { /* ignore */ }
+      await api.post('/api/finance/refresh', {});
+      await api.post('/api/debtors/cache/clear', {});
+    } catch (e) {
+      setError(
+        e instanceof Error
+          ? `Abgleich fehlgeschlagen — der bisherige Stand bleibt gültig. ${e.message}`
+          : 'Abgleich fehlgeschlagen — der bisherige Stand bleibt gültig.',
+      );
+    } finally {
+      setSyncing(false);
+    }
     loadData();
   };
 
@@ -518,11 +565,11 @@ export function FinancePage() {
             <h1 className={`hidden text-xl font-bold lg:block lg:text-2xl ${hasBg ? 'text-white drop-shadow-sm' : 'text-gray-900 dark:text-white'}`}>Finanz-Controlling</h1>
             {overview && (
               <p className={`mt-1 text-xs ${hasBg ? 'text-white/60' : 'text-gray-400 dark:text-gray-500'}`}>
-                Datenstand: Journal{' '}
+                Journal{' '}
                 {overview.journal_data_from && overview.journal_data_to
                   ? `${formatMonthLabel(overview.journal_data_from.slice(0, 7))} – ${formatMonthLabel(overview.journal_data_to.slice(0, 7))}`
                   : '–'}
-                {` · Toggl: live · Aktualisiert: ${new Date().toLocaleString('de-CH')}`}
+                {` · Datenstand: ${formatDatenstand(overview.datenstand)}`}
               </p>
             )}
             {!overview && (
@@ -559,14 +606,25 @@ export function FinancePage() {
             </button>
             <button
               onClick={handleRefresh}
-              disabled={loading}
-              className={`flex min-h-11 items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium transition-colors lg:min-h-0 ${hasBg ? 'bg-white/10 text-white/90 hover:bg-white/20 backdrop-blur-sm' : 'border border-gray-200 bg-white text-gray-700 hover:bg-gray-50 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-300 dark:hover:bg-gray-700'}`}
+              disabled={loading || syncing}
+              title="Bexio und Toggl neu abgleichen (dauert rund 15 Sekunden)"
+              className={`flex min-h-11 items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium transition-colors disabled:opacity-60 lg:min-h-0 ${hasBg ? 'bg-white/10 text-white/90 hover:bg-white/20 backdrop-blur-sm' : 'border border-gray-200 bg-white text-gray-700 hover:bg-gray-50 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-300 dark:hover:bg-gray-700'}`}
             >
-              <RefreshIcon className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
-              Aktualisieren
+              <RefreshIcon className={`h-4 w-4 ${loading || syncing ? 'animate-spin' : ''}`} />
+              {syncing ? 'Gleiche ab …' : 'Aktualisieren'}
             </button>
           </div>
         </div>
+
+        {overview?.datenstand.veraltet && (
+          <div className="mb-4 flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800 dark:border-amber-800 dark:bg-amber-900/20 dark:text-amber-300">
+            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+            <span>
+              Die Zahlen sind {formatDatenstand(overview.datenstand)} — der
+              stündliche Abgleich läuft nicht. Mit «Aktualisieren» neu holen.
+            </span>
+          </div>
+        )}
 
         {error && (
           <div className="mb-4 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700 dark:border-red-800 dark:bg-red-900/20 dark:text-red-400">

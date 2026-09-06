@@ -10,10 +10,17 @@ FALLBACK_LOCAL_MODEL = "ollama/qwen3.8:27b"
 async def get_default_local_model(db: AsyncSession) -> str:
     """Liest llm_default_local_model aus den Owner-Settings.
 
-    Wird systemweit genutzt für Triage-Job-Labels, Chat-Fallback und
-    Code-Execution. Fehlt die Owner-Einstellung, gilt ``FALLBACK_LOCAL_MODEL``
-    (Install-Default, aktuell Qwen 3.8). Der Hermes-Worker selbst folgt
-    ``TP_TRIAGE_MODEL`` / ``triage_model``.
+    Zuständig für Chat-Fallback und Code-Ausführung -- also dort, wo die Einstellung
+    tatsächlich steuert, welches Modell rechnet. Fehlt sie, gilt
+    ``FALLBACK_LOCAL_MODEL`` (Install-Default).
+
+    **Nicht** für die Beschriftung von Triage-Jobs. Der Worker folgt
+    ``triage_model``, und bis zum 06.09.2026 schrieb ``triage.py`` trotzdem diesen
+    Wert nach ``agent_jobs.llm_model``. Die Beschriftung folgte damit einer
+    Einstellung, die den Lauf nicht beeinflusste: in drei Wochen vier verschiedene
+    Modellnamen auf Jobs, die alle dasselbe Modell benutzten. Wer ein Feld
+    "verwendetes Modell" nennt, muss das verwendete Modell hineinschreiben --
+    sonst ist jede Auswertung darüber falsch, ohne es anzuzeigen.
     """
     settings = await get_owner_settings(db)
     return settings.get("llm_default_local_model") or FALLBACK_LOCAL_MODEL

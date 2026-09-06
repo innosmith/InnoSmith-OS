@@ -20,6 +20,7 @@ from app.schemas import AgentJobCreate, AgentJobOut, AgentJobUpdate, AgentJobWit
 from app.services.learning import (
     capture_draft_feedback,
     mark_episode_corrected,
+    normalize_rejection_reason,
     record_feedback,
 )
 
@@ -423,14 +424,23 @@ async def update_agent_job(
     ):
         # Lernsignal: der Berater hat den Entwurf abgelehnt.
         meta = job.metadata_json or {}
+        grund = normalize_rejection_reason(body.rejection_reason)
         await record_feedback(
             db,
             feedback_type="rejected",
             agent_job_id=job.id,
             sender_email=meta.get("from_address"),
             source="cockpit",
+            reason=grund,
         )
-        await mark_episode_corrected(db, agent_job_id=job.id, lesson="Entwurf abgelehnt")
+        # Der Grund gehoert auch in die Episode: sie ist die Form, in der der Agent
+        # sich spaeter an den Fall erinnert. "Entwurf abgelehnt" allein sagt ihm
+        # nur, dass etwas schieflief -- nicht, was er anders machen soll.
+        await mark_episode_corrected(
+            db,
+            agent_job_id=job.id,
+            lesson=f"Entwurf abgelehnt ({grund})" if grund else "Entwurf abgelehnt",
+        )
         draft_id = _extract_draft_id(job)
         if draft_id:
             client = _get_email_client()

@@ -310,14 +310,15 @@ class Quelle:
 async def _lade_bexio(settings: dict) -> tuple[dict[str, list[dict]], dict]:
     """Die Buchhaltung als Ganzes: Debitoren, Kreditoren, Journal und Stammdaten.
 
-    Fuenf Tabellen, weil vier Fragen gestellt werden und keine einzelne Tabelle
+    Sechs Tabellen, weil vier Fragen gestellt werden und keine einzelne Tabelle
     mehr als eine davon beantwortet:
 
     * «Was haben wir eingenommen» -- ``bexio_rechnungen``
     * «Was hat uns etwas gekostet» -- ``bexio_journal``, und **nur** dort. Ueber
       den Kreditorenweg liefen 2025 bloss 88'177 von 401'459 CHF Aufwand.
     * «Was ist offen, wann faellig» -- ``bexio_kreditoren``
-    * «Was bedeutet Konto 227, ist 2026 schon abgeschlossen» -- die Stammdaten
+    * «Was bedeutet Konto 227, welches Konto ist ein Bankkonto, ist 2026 schon
+      abgeschlossen» -- die Stammdaten
 
     Das Journal braucht den Kontenplan, um Kennungen aufzuloesen, und die
     Geschaeftsjahre, um seine Abrufe zu begrenzen. Deshalb werden beide vor ihm
@@ -327,7 +328,7 @@ async def _lade_bexio(settings: dict) -> tuple[dict[str, list[dict]], dict]:
     from journal import journal_laden
     from kreditoren import lieferantenrechnungen_laden
     from rechnungen import kontakte_laden, rechnungen_laden
-    from stammdaten import geschaeftsjahre_laden, kontenplan_laden
+    from stammdaten import bankkonten_laden, geschaeftsjahre_laden, kontenplan_laden
 
     token = settings.get("bexio_api_token") or get_settings().bexio_api_token
     if not token:
@@ -340,6 +341,7 @@ async def _lade_bexio(settings: dict) -> tuple[dict[str, list[dict]], dict]:
     kreditoren = await lieferantenrechnungen_laden(client, konten)
     jahre = await geschaeftsjahre_laden(client)
     journal = await journal_laden(client, konten, jahre)
+    bankkonten, bankkonten_ohne_konto = await bankkonten_laden(client, konten)
 
     hinweise: dict = {"waehrungen": bestand.waehrungen}
     if bestand.unbekannte_status:
@@ -383,6 +385,12 @@ async def _lade_bexio(settings: dict) -> tuple[dict[str, list[dict]], dict]:
     if offene_jahre:
         hinweise["offene_geschaeftsjahre"] = offene_jahre
 
+    # Ein Bankkonto ohne Gegenstück im Kontenplan fehlt im Saldo, und die fehlende
+    # Zeile ist von einem Konto ohne Bewegung nicht zu unterscheiden.
+    hinweise["bankkonten"] = [z["konto_nr"] for z in bankkonten]
+    if bankkonten_ohne_konto:
+        hinweise["bankkonten_ohne_kontenplan"] = bankkonten_ohne_konto
+
     return (
         {
             "bexio_rechnungen": bestand.zeilen,
@@ -390,6 +398,7 @@ async def _lade_bexio(settings: dict) -> tuple[dict[str, list[dict]], dict]:
             "bexio_kreditoren": kreditoren.zeilen,
             "bexio_journal": journal.zeilen,
             "bexio_konten": kontenzeilen,
+            "bexio_bankkonten": bankkonten,
             "bexio_geschaeftsjahre": jahre,
         },
         hinweise,

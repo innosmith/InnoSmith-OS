@@ -5,6 +5,7 @@ import { EmailBody } from '../EmailBody';
 import { FormattedOutput } from '../FormattedOutput';
 import { EmailThreadPanel } from '../EmailThreadPanel';
 import { CrmBadge } from '../CrmBadge';
+import { AblehnungsgrundWahl, type Ablehnungsgrund } from './Ablehnungsgrund';
 import { AgentRationale } from './AgentRationale';
 import { ConfidenceBadge } from './ConfidenceBadge';
 import { ContextSources, type ContextSource } from './ContextSources';
@@ -64,6 +65,7 @@ export function ApprovalCard({
   const [failed, setFailed] = useState(false);
   const [processing, setProcessing] = useState(false);
   const [editing, setEditing] = useState(false);
+  const [frageNachGrund, setFrageNachGrund] = useState(false);
 
   const fromAddress = (meta.from_address as string) || '';
   const fromName = (meta.from_name as string) || '';
@@ -94,10 +96,15 @@ export function ApprovalCard({
     finally { setProcessing(false); }
   };
 
-  const reject = async () => {
+  const reject = async (grund: Ablehnungsgrund | null) => {
     setProcessing(true);
     try {
-      await api.patch(`/api/agent-jobs/${jobId}`, { status: 'failed', error_message: 'Vom Benutzer abgelehnt' });
+      await api.patch(`/api/agent-jobs/${jobId}`, {
+        status: 'failed',
+        error_message: 'Vom Benutzer abgelehnt',
+        rejection_reason: grund,
+      });
+      setFrageNachGrund(false);
       onResolved();
     } catch { /* belassen */ }
     finally { setProcessing(false); }
@@ -225,8 +232,8 @@ export function ApprovalCard({
           </button>
         )}
         <button
-          onClick={reject}
-          disabled={processing}
+          onClick={() => setFrageNachGrund(true)}
+          disabled={processing || frageNachGrund}
           className={`rounded-lg px-4 py-2 text-sm font-medium transition-colors disabled:opacity-50 ${
             glassBg ? 'border border-red-400/30 bg-red-500/20 text-red-200 hover:bg-red-500/30'
               : 'border border-red-300 text-red-600 hover:bg-red-50 dark:border-red-800 dark:text-red-400 dark:hover:bg-red-900/20'
@@ -235,6 +242,15 @@ export function ApprovalCard({
           Ablehnen
         </button>
       </div>
+
+      {frageNachGrund && (
+        <AblehnungsgrundWahl
+          onWahl={reject}
+          onAbbruch={() => setFrageNachGrund(false)}
+          disabled={processing}
+          glassBg={glassBg}
+        />
+      )}
 
       {(preview?.conversation_id || metaConvId) && (
         <EmailThreadPanel conversationId={(preview?.conversation_id || metaConvId) as string} glassBg={glassBg} compact />

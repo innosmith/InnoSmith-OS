@@ -1,14 +1,21 @@
 """Debitorensicht -- Kundenzentrisches Finanz-Cockpit.
 
-Aggregiert Daten aus Bexio (Rechnungen, Kontakte) und Toggl Track
-(Stundenerfassung pro Projekt/Kunde) zu einer Debitorenübersicht.
+Liest wie die Finanzansicht ausschliesslich aus dem **Datenraum**
+(``services/datenraum_lesen.py``). Vorher standen hier eigene Kopien von
+``_parse_invoice_total`` und ``_invoice_is_open`` -- mit denselben zwei stillen
+Fehlern wie in ``finance.py``: eine Entwurfsrechnung galt als offene Forderung, und
+``total_gross`` wurde als Bruttobetrag gelesen, obwohl es die Positionssumme vor
+Rabatt ist.
+
+Dass es Kopien waren, ist der eigentliche Befund. Zwei Ansichten desselben Hauses
+zeigten dieselbe Kennzahl aus demselben Bestand, konnten aber unterschiedlich
+antworten -- und niemand hätte gewusst, welche recht hat. Deshalb sind die Helfer
+nicht korrigiert, sondern entfernt.
 """
 
 import logging
-import sys
 from collections import defaultdict
 from datetime import date, timedelta
-from pathlib import Path
 
 from cachetools import TTLCache
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -16,92 +23,27 @@ from pydantic import BaseModel
 
 from app.auth.deps import get_current_user, require_role
 from app.models import User
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "bexio"))
-sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "toggl"))
-from bexio_client import BexioClient, BexioConfig  # noqa: E402
-from toggl_client import TogglClient, TogglConfig  # noqa: E402
+from app.services import datenraum_lesen as dl
+from app.services.datenraum_lesen import DatenraumUnbrauchbar
 
 logger = logging.getLogger("taskpilot.debtors")
 
 router = APIRouter(prefix="/api/debtors", tags=["debtors"])
 
+# Die TTL ist das Sicherheitsnetz; ausschlaggebend ist der Datenraum-Stand im
+# Schlüssel. Der frühere Unterschied zwischen «laufender Monat kurz, abgeschlossene
+# Monate lange» ist damit hinfällig: alles hängt am Abgleich, nicht an einer Uhr.
 _cache: TTLCache = TTLCache(maxsize=10, ttl=300)
-# Pro-Monat-Cache fuer das Toggl-Monats-Cockpit (schont das Toggl-Rate-Limit):
-# laufender Monat kurz (live), abgeschlossene Monate lange (unveraenderlich).
-_toggl_month_live: TTLCache = TTLCache(maxsize=2, ttl=300)
-_toggl_month_past: TTLCache = TTLCache(maxsize=36, ttl=86400)
+_toggl_month_cache: TTLCache = TTLCache(maxsize=36, ttl=900)
 
 
-# ── Client-Helfer (identisch mit finance.py) ─────────────
-
-def _get_bexio_client(user: User) -> BexioClient:
-    settings = user.settings or {}
-    token = settings.get("bexio_api_token") or ""
-    if not token:
-        from app.config import get_settings
-        token = get_settings().bexio_api_token
-    if not token:
-        raise HTTPException(status_code=400, detail="Bexio API-Token nicht konfiguriert")
-    return BexioClient(BexioConfig(api_token=token))
+def _schluessel(basis: str) -> str:
+    return f"{basis}@{dl.stand_kennung()}"
 
 
-def _get_toggl_client(user: User) -> TogglClient:
-    settings = user.settings or {}
-    token = settings.get("toggl_api_token") or ""
-    ws_id = settings.get("toggl_workspace_id") or 0
-    if not token:
-        from app.config import get_settings
-        app_cfg = get_settings()
-        token = app_cfg.toggl_api_token
-        ws_id = ws_id or app_cfg.toggl_workspace_id
-    if not token:
-        raise HTTPException(status_code=400, detail="Toggl API-Token nicht konfiguriert")
-    return TogglClient(TogglConfig(api_token=token, workspace_id=int(ws_id or 0)))
-
-
-# ── Bexio-Helfer ─────────────────────────────────────────
-
-def _parse_invoice_total(inv: dict) -> float:
-    for field in ("total", "total_gross"):
-        val = inv.get(field)
-        if val is not None:
-            try:
-                return float(val)
-            except (ValueError, TypeError):
-                continue
-    return 0.0
-
-
-def _invoice_is_open(inv: dict) -> bool:
-    remaining = inv.get("total_remaining_payments")
-    if remaining is not None:
-        try:
-            return float(remaining) > 0.01
-        except (ValueError, TypeError):
-            pass
-    return inv.get("kb_item_status_id") in (7, 8, 9)
-
-
-def _open_amount(inv: dict) -> float:
-    remaining = inv.get("total_remaining_payments")
-    if remaining is not None:
-        try:
-            return float(remaining)
-        except (ValueError, TypeError):
-            pass
-    return _parse_invoice_total(inv)
-
-
-async def _fetch_invoices(bexio: BexioClient, months: int = 25) -> list[dict]:
-    from_date = (date.today().replace(day=1) - timedelta(days=30 * months)).strftime("%Y-%m-%d")
-    try:
-        results = await bexio.search_invoices(from_date=from_date)
-        if results:
-            return results
-    except Exception as e:
-        logger.warning("Bexio Rechnungssuche fehlgeschlagen: %s -- Fallback", e)
-    return await bexio.list_invoices(limit=500)
+def _datenraum_fehler(exc: DatenraumUnbrauchbar) -> HTTPException:
+    logger.warning("Debitorensicht: Datenraum unbrauchbar -- %s", exc)
+    return HTTPException(status_code=503, detail=f"Debitorendaten nicht auswertbar: {exc}")
 
 
 # ── Response-Modelle ─────────────────────────────────────
@@ -163,6 +105,12 @@ class RevenueByMonth(BaseModel):
     months: dict[str, float] = {}
 
 
+class Datenstand(BaseModel):
+    stand: str | None = None
+    alter_stunden: float | None = None
+    veraltet: bool = False
+
+
 class DebtorsResponse(BaseModel):
     toggl_month: TogglMonthSummary
     debtors: list[DebtorSummary]
@@ -171,6 +119,7 @@ class DebtorsResponse(BaseModel):
     total_revenue_ytd: float = 0
     dso_days: float | None = None
     currency: str = "CHF"
+    datenstand: Datenstand = Datenstand()
 
 
 # ── Arbeitstage-Berechnung ───────────────────────────────
@@ -222,203 +171,125 @@ def _month_bounds(year: int, month: int) -> tuple[str, str, bool]:
     return first.isoformat(), month_end.isoformat(), is_current
 
 
-async def _compute_toggl_month(user: User, year: int, month: int) -> TogglMonthSummary:
-    """Berechnet das Toggl-Monats-Cockpit fuer einen bestimmten Monat.
+def _compute_toggl_month(user: User, year: int, month: int) -> TogglMonthSummary:
+    """Das Monats-Cockpit der Zeiterfassung aus dem Datenraum.
 
     Fuer abgeschlossene Monate liefern die Arbeitstage-Helfer automatisch
     ``elapsed == total`` (Fortschritt 100%), womit die Prognose dem Ist
     entspricht. Zukunftsmonate ergeben eine leere Zusammenfassung.
+
+    Der Stundensatz je Projekt ist der **Effektivsatz** (Betrag durch verrechenbare
+    Stunden). Die frühere Fassung nahm den ersten Satz, den die Toggl-Antwort
+    nannte -- bei zwei Sätzen im selben Monat passte er nicht zum Betrag daneben.
     """
     today = date.today()
     if date(year, month, 1) > today:
         return TogglMonthSummary()
 
     month_start, month_end, _is_current = _month_bounds(year, month)
+    eintraege = dl.zeiteintraege(month_start, month_end, nur_verrechenbar=False)
 
-    toggl_month = TogglMonthSummary()
-    try:
-        toggl = _get_toggl_client(user)
+    budgets: dict[str, dict] = (user.settings or {}).get("debtor_budgets") or {}
 
-        projects_all = await toggl.list_projects(active="both")
-        proj_map = {p.get("id"): p for p in projects_all}
+    je_projekt: dict[int, dict] = defaultdict(lambda: {
+        "hours": 0.0, "billable_hours": 0.0, "amount": 0.0,
+        "name": "", "client_name": "", "client_id": None,
+    })
+    daily_map: dict[str, dict[str, float]] = {}
 
-        clients = await toggl.list_clients()
-        client_map = {c.get("id"): c.get("name", "") for c in clients}
+    for e in eintraege:
+        pid = int(e["projekt_id"]) if e["projekt_id"] is not None else 0
+        eintrag = je_projekt[pid]
+        eintrag["hours"] += e["stunden"]
+        eintrag["name"] = eintrag["name"] or e["projekt"]
+        eintrag["client_name"] = eintrag["client_name"] or e["kunde"]
+        if e["verrechenbar"]:
+            eintrag["billable_hours"] += e["stunden"]
+            eintrag["amount"] += e["betrag"]
 
-        # Alle Stunden (billable + non-billable)
-        all_summary = await toggl.get_summary_by_project(
-            month_start, month_end, billable=None,
+        tag = daily_map.setdefault(e["datum"], {"billable": 0.0, "non_billable": 0.0})
+        tag["billable" if e["verrechenbar"] else "non_billable"] += e["stunden"]
+
+    rows: list[TogglProjectRow] = []
+    total_hours = 0.0
+    total_billable = 0.0
+    total_amount = 0.0
+
+    for pid, data in je_projekt.items():
+        if data["hours"] <= 0:
+            continue
+        total_hours += data["hours"]
+        total_billable += data["billable_hours"]
+        total_amount += data["amount"]
+
+        budget_cfg = budgets.get(str(pid)) or {}
+        budget_hours = budget_cfg.get("monthly_hours") if budget_cfg else None
+        budget_pct = (
+            round(data["hours"] / budget_hours * 100, 1)
+            if budget_hours and budget_hours > 0 else None
         )
-        # Nur billable
-        billable_summary = await toggl.get_summary_by_project(
-            month_start, month_end, billable=True,
+        satz = (
+            data["amount"] / data["billable_hours"]
+            if data["billable_hours"] > 0 else 0.0
         )
 
-        # Billable-Stunden pro Projekt sammeln
-        billable_by_pid: dict[int, tuple[float, float, float]] = {}
-        for group in billable_summary:
-            pid = group.get("id", 0)
-            sub_groups = group.get("sub_groups") or group.get("items") or []
-            b_hours = 0.0
-            b_amount = 0.0
-            b_rate = 0.0
-            for item in sub_groups:
-                rates = item.get("rates") or []
-                for rate_info in rates:
-                    secs = rate_info.get("billable_seconds", 0) or 0
-                    cents = rate_info.get("hourly_rate_in_cents", 0) or 0
-                    h = secs / 3600
-                    b_hours += h
-                    b_amount += h * (cents / 100)
-                    if cents and not b_rate:
-                        b_rate = cents / 100
-                if not rates:
-                    secs = item.get("seconds", 0) or item.get("time", 0) or 0
-                    b_hours += secs / 3600
-            billable_by_pid[pid] = (b_hours, b_amount, b_rate)
+        rows.append(TogglProjectRow(
+            project_id=pid,
+            project_name=data["name"] or f"Projekt {pid}",
+            client_id=data["client_id"],
+            client_name=data["client_name"],
+            hours=round(data["hours"], 2),
+            billable_hours=round(data["billable_hours"], 2),
+            is_billable=data["billable_hours"] > 0,
+            rate_per_hour=round(satz, 2),
+            amount=round(data["amount"], 2),
+            budget_hours=budget_hours,
+            budget_pct=budget_pct,
+        ))
 
-        # Budgets aus Settings
-        budgets: dict[str, dict] = (user.settings or {}).get("debtor_budgets") or {}
+    for row in rows:
+        if total_hours > 0:
+            row.pct_of_total = round(row.hours / total_hours * 100, 1)
+    rows.sort(key=lambda x: x.hours, reverse=True)
 
-        total_hours = 0.0
-        total_billable = 0.0
-        total_amount = 0.0
-        rows: list[TogglProjectRow] = []
+    wd_total = _working_days_in_month(year, month)
+    wd_elapsed = _working_days_elapsed(year, month)
 
-        for group in all_summary:
-            pid = group.get("id", 0)
-            proj = proj_map.get(pid, {})
-            title = group.get("title") or {}
-            sub_groups = group.get("sub_groups") or group.get("items") or []
+    avg_daily = total_hours / wd_elapsed if wd_elapsed > 0 else 0
+    billable_daily = total_billable / wd_elapsed if wd_elapsed > 0 else 0
+    rate_avg = total_amount / total_billable if total_billable > 0 else 0
+    forecast_amount = billable_daily * wd_total * rate_avg if wd_elapsed > 0 else 0
 
-            group_hours = 0.0
-            for item in sub_groups:
-                rates = item.get("rates") or []
-                for rate_info in rates:
-                    secs = rate_info.get("billable_seconds", 0) or 0
-                    group_hours += secs / 3600
-                secs_total = item.get("seconds", 0) or item.get("time", 0) or 0
-                if not rates:
-                    group_hours += secs_total / 3600
-                elif secs_total / 3600 > group_hours:
-                    group_hours = secs_total / 3600
-
-            if group_hours <= 0:
-                continue
-
-            b_hours, b_amount, b_rate = billable_by_pid.get(pid, (0, 0, 0))
-            is_billable = b_hours > 0
-            cid = proj.get("client_id")
-            client_name = (client_map.get(cid, "") if cid else "") or title.get("client") or ""
-
-            budget_key = str(pid)
-            budget_cfg = budgets.get(budget_key) or (budgets.get(str(cid)) if cid else None) or {}
-            budget_hours = budget_cfg.get("monthly_hours") if budget_cfg else None
-
-            budget_pct = None
-            if budget_hours and budget_hours > 0:
-                budget_pct = round(group_hours / budget_hours * 100, 1)
-
-            total_hours += group_hours
-            total_billable += b_hours
-            total_amount += b_amount
-
-            rows.append(TogglProjectRow(
-                project_id=pid,
-                project_name=proj.get("name") or title.get("project") or f"Projekt {pid}",
-                client_id=cid,
-                client_name=client_name,
-                hours=round(group_hours, 2),
-                billable_hours=round(b_hours, 2),
-                is_billable=is_billable,
-                rate_per_hour=round(b_rate, 2),
-                amount=round(b_amount, 2),
-                budget_hours=budget_hours,
-                budget_pct=budget_pct,
-            ))
-
-        # Prozent-Anteile berechnen
-        for row in rows:
-            if total_hours > 0:
-                row.pct_of_total = round(row.hours / total_hours * 100, 1)
-
-        rows.sort(key=lambda x: x.hours, reverse=True)
-
-        wd_total = _working_days_in_month(year, month)
-        wd_elapsed = _working_days_elapsed(year, month)
-
-        avg_daily = total_hours / wd_elapsed if wd_elapsed > 0 else 0
-        billable_daily = total_billable / wd_elapsed if wd_elapsed > 0 else 0
-        rate_avg = total_amount / total_billable if total_billable > 0 else 0
-        forecast_amount = billable_daily * wd_total * rate_avg if wd_elapsed > 0 else 0
-
-        daily_map: dict[str, dict[str, float]] = {}
-        try:
-            entries = await toggl.search_time_entries(
-                workspace_id=None,
-                start_date=month_start,
-                end_date=month_end,
+    return TogglMonthSummary(
+        total_hours=round(total_hours, 2),
+        billable_hours=round(total_billable, 2),
+        non_billable_hours=round(total_hours - total_billable, 2),
+        billable_ratio=round(total_billable / total_hours * 100, 1) if total_hours > 0 else 0,
+        total_amount=round(total_amount, 2),
+        avg_daily_hours=round(avg_daily, 2),
+        forecast_month_amount=round(forecast_amount, 2),
+        working_days_total=wd_total,
+        working_days_elapsed=wd_elapsed,
+        projects=rows,
+        daily_hours=[
+            DailyHours(
+                date=d,
+                billable=round(v["billable"], 2),
+                non_billable=round(v["non_billable"], 2),
             )
-            for row in entries:
-                is_b = row.get("billable", False)
-                sub_entries = row.get("time_entries") or []
-                if sub_entries:
-                    for te in sub_entries:
-                        start = te.get("start") or te.get("at") or ""
-                        secs = te.get("seconds", 0) or 0
-                        if not start:
-                            continue
-                        day = start[:10]
-                        h = abs(secs) / 3600
-                        daily_map.setdefault(day, {"billable": 0.0, "non_billable": 0.0})
-                        daily_map[day]["billable" if is_b else "non_billable"] += h
-                else:
-                    start = row.get("start") or row.get("at") or ""
-                    secs = row.get("seconds", 0) or row.get("dur", 0) or 0
-                    if not start:
-                        continue
-                    day = start[:10]
-                    h = abs(secs) / 3600
-                    daily_map.setdefault(day, {"billable": 0.0, "non_billable": 0.0})
-                    daily_map[day]["billable" if is_b else "non_billable"] += h
-        except Exception as exc:
-            logger.debug("daily_hours konnte nicht geladen werden: %s", exc)
-
-        daily_hours_list = [
-            DailyHours(date=d, billable=round(v["billable"], 2), non_billable=round(v["non_billable"], 2))
             for d, v in sorted(daily_map.items())
-        ]
-
-        toggl_month = TogglMonthSummary(
-            total_hours=round(total_hours, 2),
-            billable_hours=round(total_billable, 2),
-            non_billable_hours=round(total_hours - total_billable, 2),
-            billable_ratio=round(total_billable / total_hours * 100, 1) if total_hours > 0 else 0,
-            total_amount=round(total_amount, 2),
-            avg_daily_hours=round(avg_daily, 2),
-            forecast_month_amount=round(forecast_amount, 2),
-            working_days_total=wd_total,
-            working_days_elapsed=wd_elapsed,
-            projects=rows,
-            daily_hours=daily_hours_list,
-        )
-    except Exception as e:
-        logger.warning("Toggl-Daten nicht verfuegbar: %s", e)
-
-    return toggl_month
+        ],
+    )
 
 
-async def _get_toggl_month_cached(user: User, year: int, month: int) -> TogglMonthSummary:
-    """Toggl-Monatsdaten gecacht laden (laufender Monat live, sonst lange TTL)."""
-    today = date.today()
-    is_current = year == today.year and month == today.month
-    key = f"{year}-{month:02d}"
-    cache = _toggl_month_live if is_current else _toggl_month_past
-    cached = cache.get(key)
+def _get_toggl_month_cached(user: User, year: int, month: int) -> TogglMonthSummary:
+    """Monatsdaten gemerkt laden -- gebunden an den Stand des Datenraums."""
+    schluessel = _schluessel(f"{year}-{month:02d}")
+    cached = _toggl_month_cache.get(schluessel)
     if cached is not None:
         return cached
-    result = await _compute_toggl_month(user, year, month)
-    cache[key] = result
+    result = _compute_toggl_month(user, year, month)
+    _toggl_month_cache[schluessel] = result
     return result
 
 
@@ -428,142 +299,127 @@ async def _get_toggl_month_cached(user: User, year: int, month: int) -> TogglMon
 async def get_debtors(
     user: User = Depends(require_role("owner")),
 ):
-    """Debitorenübersicht: Toggl-Monats-Cockpit + Bexio-Debitoren."""
-    cached = _cache.get("debtors")
+    """Debitorenübersicht: Monats-Cockpit der Zeiterfassung + Debitoren."""
+    schluessel = _schluessel("debtors")
+    cached = _cache.get(schluessel)
     if cached is not None:
         return cached
 
+    try:
+        result = _debtors_berechnen(user)
+    except DatenraumUnbrauchbar as exc:
+        raise _datenraum_fehler(exc) from exc
+
+    _cache[schluessel] = result
+    return result
+
+
+def _debtors_berechnen(user: User) -> DebtorsResponse:
     today = date.today()
     current_year = today.year
     prior_year = current_year - 1
 
-    # ── Toggl: Monats-Cockpit (aktueller Monat, gecacht) ──
-    toggl_month = await _get_toggl_month_cached(user, today.year, today.month)
+    toggl_month = _get_toggl_month_cached(user, today.year, today.month)
 
-    # ── Bexio: Debitoren ─────────────────────────────────
+    # Pro Kontakt aggregieren. ``ist_umsatz`` schliesst Entwürfe aus -- sie sind
+    # weder Umsatz noch offene Forderung.
+    by_contact: dict[int, dict] = defaultdict(lambda: {
+        "name": "",
+        "revenue_ytd": 0.0, "revenue_prior": 0.0,
+        "open_count": 0, "open_total": 0.0,
+        "aging_0_30": 0.0, "aging_31_60": 0.0,
+        "aging_61_90": 0.0, "aging_over_90": 0.0,
+        "by_month": defaultdict(float),
+    })
+
+    for inv in dl.rechnungen():
+        cid = inv.get("kunden_id")
+        if not cid or not inv["ist_umsatz"]:
+            continue
+        cid = int(cid)
+        eintrag = by_contact[cid]
+        eintrag["name"] = eintrag["name"] or inv["kunde"]
+        eintrag["by_month"][inv["monat"]] += inv["brutto"]
+
+        if inv["monat"].startswith(str(current_year)):
+            eintrag["revenue_ytd"] += inv["brutto"]
+        elif inv["monat"].startswith(str(prior_year)):
+            eintrag["revenue_prior"] += inv["brutto"]
+
+        if inv["offen"] > 0.01:
+            eintrag["open_count"] += 1
+            eintrag["open_total"] += inv["offen"]
+            # Gestaffelt nach dem Alter der Rechnung, nicht nach Verzug -- so war es
+            # schon vorher, und der Wechsel wäre eine fachliche Entscheidung.
+            alter = (today - date.fromisoformat(inv["datum"])).days
+            if alter <= 30:
+                eintrag["aging_0_30"] += inv["offen"]
+            elif alter <= 60:
+                eintrag["aging_31_60"] += inv["offen"]
+            elif alter <= 90:
+                eintrag["aging_61_90"] += inv["offen"]
+            else:
+                eintrag["aging_over_90"] += inv["offen"]
+
     debtors: list[DebtorSummary] = []
-    revenue_trend: list[RevenueByMonth] = []
     total_open = 0.0
     total_revenue_ytd = 0.0
+
+    for cid, data in by_contact.items():
+        if data["revenue_ytd"] <= 0 and data["open_total"] <= 0 and data["revenue_prior"] <= 0:
+            continue
+
+        rev_ytd = data["revenue_ytd"]
+        rev_prior = data["revenue_prior"]
+        total_open += data["open_total"]
+        total_revenue_ytd += rev_ytd
+
+        debtors.append(DebtorSummary(
+            contact_id=cid,
+            contact_name=data["name"] or f"Kontakt {cid}",
+            revenue_ytd=round(rev_ytd, 2),
+            revenue_prior_year=round(rev_prior, 2),
+            revenue_delta_pct=(
+                round((rev_ytd - rev_prior) / rev_prior * 100, 1) if rev_prior > 0 else None
+            ),
+            open_invoices_count=data["open_count"],
+            open_invoices_total=round(data["open_total"], 2),
+            aging_0_30=round(data["aging_0_30"], 2),
+            aging_31_60=round(data["aging_31_60"], 2),
+            aging_61_90=round(data["aging_61_90"], 2),
+            aging_over_90=round(data["aging_over_90"], 2),
+        ))
+
+    debtors.sort(key=lambda x: x.revenue_ytd, reverse=True)
+
     dso_days = None
+    if total_revenue_ytd > 0 and today.month > 0:
+        daily_rev = total_revenue_ytd / (today.month * 30)
+        if daily_rev > 0:
+            dso_days = round(total_open / daily_rev, 0)
 
-    try:
-        bexio = _get_bexio_client(user)
+    # Umsatztrend: Top-5-Kunden, letzte 12 Monate
+    revenue_trend = [
+        RevenueByMonth(
+            contact_id=cid,
+            contact_name=data["name"] or f"Kontakt {cid}",
+            months=dict(sorted(data["by_month"].items())[-12:]),
+        )
+        for cid, data in sorted(
+            by_contact.items(), key=lambda x: x[1]["revenue_ytd"], reverse=True
+        )[:5]
+        if data["by_month"]
+    ]
 
-        contact_list = await bexio.list_contacts(limit=200)
-        contact_names = {c.get("id", 0): f"{c.get('name_1', '')} {c.get('name_2', '') or ''}".strip() for c in contact_list}
-
-        all_invoices = await _fetch_invoices(bexio, months=25)
-
-        # Pro Kontakt aggregieren
-        by_contact: dict[int, dict] = defaultdict(lambda: {
-            "revenue_ytd": 0.0, "revenue_prior": 0.0,
-            "open_count": 0, "open_total": 0.0,
-            "payment_days": [], "projects": set(),
-            "aging_0_30": 0.0, "aging_31_60": 0.0,
-            "aging_61_90": 0.0, "aging_over_90": 0.0,
-            "by_month": defaultdict(float),
-        })
-
-        for inv in all_invoices:
-            cid = inv.get("contact_id")
-            if not cid:
-                continue
-
-            total = _parse_invoice_total(inv)
-            inv_date_str = inv.get("is_valid_from") or ""
-
-            if len(inv_date_str) >= 7:
-                month_key = inv_date_str[:7]
-                by_contact[cid]["by_month"][month_key] += total
-
-                if month_key.startswith(str(current_year)):
-                    by_contact[cid]["revenue_ytd"] += total
-                elif month_key.startswith(str(prior_year)):
-                    by_contact[cid]["revenue_prior"] += total
-
-            if _invoice_is_open(inv):
-                remaining = _open_amount(inv)
-                by_contact[cid]["open_count"] += 1
-                by_contact[cid]["open_total"] += remaining
-
-                if inv_date_str:
-                    try:
-                        inv_date = date.fromisoformat(inv_date_str[:10])
-                        age = (today - inv_date).days
-                        if age <= 30:
-                            by_contact[cid]["aging_0_30"] += remaining
-                        elif age <= 60:
-                            by_contact[cid]["aging_31_60"] += remaining
-                        elif age <= 90:
-                            by_contact[cid]["aging_61_90"] += remaining
-                        else:
-                            by_contact[cid]["aging_over_90"] += remaining
-                    except (ValueError, TypeError):
-                        by_contact[cid]["aging_0_30"] += remaining
-
-        # Debtors-Liste aufbauen
-        for cid, data in by_contact.items():
-            if data["revenue_ytd"] <= 0 and data["open_total"] <= 0 and data["revenue_prior"] <= 0:
-                continue
-
-            name = contact_names.get(cid, f"Kontakt {cid}")
-            rev_ytd = data["revenue_ytd"]
-            rev_prior = data["revenue_prior"]
-            delta_pct = None
-            if rev_prior > 0:
-                delta_pct = round((rev_ytd - rev_prior) / rev_prior * 100, 1)
-
-            total_open += data["open_total"]
-            total_revenue_ytd += rev_ytd
-
-            debtors.append(DebtorSummary(
-                contact_id=cid,
-                contact_name=name,
-                revenue_ytd=round(rev_ytd, 2),
-                revenue_prior_year=round(rev_prior, 2),
-                revenue_delta_pct=delta_pct,
-                open_invoices_count=data["open_count"],
-                open_invoices_total=round(data["open_total"], 2),
-                aging_0_30=round(data["aging_0_30"], 2),
-                aging_31_60=round(data["aging_31_60"], 2),
-                aging_61_90=round(data["aging_61_90"], 2),
-                aging_over_90=round(data["aging_over_90"], 2),
-            ))
-
-        debtors.sort(key=lambda x: x.revenue_ytd, reverse=True)
-
-        # DSO berechnen
-        months_elapsed = today.month
-        if total_revenue_ytd > 0 and months_elapsed > 0:
-            daily_rev = total_revenue_ytd / (months_elapsed * 30)
-            if daily_rev > 0:
-                dso_days = round(total_open / daily_rev, 0)
-
-        # Revenue-Trend: Top-5-Kunden, letzte 12 Monate
-        top_contacts = sorted(by_contact.items(), key=lambda x: x[1]["revenue_ytd"], reverse=True)[:5]
-        for cid, data in top_contacts:
-            if not data["by_month"]:
-                continue
-            revenue_trend.append(RevenueByMonth(
-                contact_id=cid,
-                contact_name=contact_names.get(cid, f"Kontakt {cid}"),
-                months=dict(sorted(data["by_month"].items())[-12:]),
-            ))
-
-    except Exception as e:
-        logger.warning("Bexio-Debitoren nicht verfuegbar: %s", e)
-
-    result = DebtorsResponse(
+    return DebtorsResponse(
         toggl_month=toggl_month,
         debtors=debtors,
         revenue_trend=revenue_trend,
         total_open=round(total_open, 2),
         total_revenue_ytd=round(total_revenue_ytd, 2),
         dso_days=dso_days,
+        datenstand=Datenstand(**dl.stand()),
     )
-    _cache["debtors"] = result
-    return result
 
 
 @router.get("/toggl-month", response_model=TogglMonthSummary)
@@ -582,13 +438,15 @@ async def get_toggl_month(
                 raise ValueError
         except (ValueError, IndexError):
             raise HTTPException(status_code=400, detail="Ungueltiges Monatsformat, erwartet YYYY-MM")
-    return await _get_toggl_month_cached(user, year, mon)
+    try:
+        return _get_toggl_month_cached(user, year, mon)
+    except DatenraumUnbrauchbar as exc:
+        raise _datenraum_fehler(exc) from exc
 
 
 @router.post("/cache/clear")
 async def clear_cache(user: User = Depends(require_role("owner"))):
     _cache.clear()
-    _toggl_month_live.clear()
-    _toggl_month_past.clear()
+    _toggl_month_cache.clear()
     logger.info("Debtors-Cache manuell geleert")
     return {"status": "ok", "message": "Debtors-Cache geleert"}
