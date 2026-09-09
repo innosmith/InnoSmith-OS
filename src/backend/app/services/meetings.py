@@ -3,9 +3,9 @@
 Pipeline:
 1. Poller (alle 15 Min): beendete Teams-Meetings der letzten 24 h erkennen,
    Transkript (VTT) im Original abholen und speichern.
-2. Pro neuem Transkript ein ``AgentJob(job_type='meeting_summary')`` — der
-   Hermes-Worker erstellt daraus ein strukturiertes Protokoll inkl.
-   Action-Item-Vorschlägen (needs_review-Tasks, HITL).
+2. Protokoll nur, wenn der Owner-Schalter ``meeting_auto_summary`` an ist
+   (Default aus): dann ein ``AgentJob(job_type='meeting_summary')``. Sonst
+   bleibt das Transkript liegen, bis jemand «Neu analysieren» auslöst.
 3. Optionale Anonymisierung (zweistufig): Regex-Maskierung (E-Mail/Telefon)
    plus lokale LLM-Pseudonymisierung mit konsistenter Mapping-Tabelle. Die
    Mapping-Tabelle bleibt ausschliesslich lokal (wird nie exportiert).
@@ -24,7 +24,7 @@ from sqlalchemy import select
 from app.config import get_settings
 from app.database import async_session
 from app.models import AgentJob, MeetingTranscript
-from app.core.principal import system_principal_id
+from app.core.principal import get_owner, system_principal_id
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "..", "email-graph"))
 from graph_client import GraphClient, GraphConfig  # noqa: E402
@@ -33,6 +33,11 @@ logger = logging.getLogger("taskpilot.meetings")
 
 POLL_INTERVAL_SECONDS = 900          # 15 Minuten
 MEETING_LOOKBACK_HOURS = 24          # Fenster (Transkript-Erstellung) für "kürzlich"
+
+# Lange Transkripte belasten das lokale Modell (Map-Reduce). Darum ist die
+# automatische Protokoll-Erzeugung aus — manuell bleibt sie erreichbar.
+MEETING_AUTO_SUMMARY_DEFAULT = False
+_CANCEL_REASON = "Automatische Meeting-Zusammenfassung deaktiviert"
 
 
 def _get_graph_client() -> GraphClient | None:
@@ -45,6 +50,83 @@ def _get_graph_client() -> GraphClient | None:
         client_secret=s.graph_client_secret,
         user_email=s.graph_user_email,
     ))
+
+
+def meeting_auto_summary_enabled(settings: dict | None) -> bool:
+    """Liest den Owner-Schalter. Fehlt der Key, gilt der Default (aus)."""
+    if not settings:
+        return MEETING_AUTO_SUMMARY_DEFAULT
+    val = settings.get("meeting_auto_summary")
+    if val is None:
+        return MEETING_AUTO_SUMMARY_DEFAULT
+    return bool(val)
+
+
+async def _is_meeting_auto_summary_enabled() -> bool:
+    """Prüft meeting_auto_summary im Owner-Settings-JSONB (Runtime-Toggle)."""
+    try:
+        async with async_session() as db:
+            owner = await get_owner(db)
+            if owner is None:
+                return MEETING_AUTO_SUMMARY_DEFAULT
+            return meeting_auto_summary_enabled(owner.settings)
+    except Exception:
+        logger.warning(
+            "meeting_auto_summary konnte nicht aus DB gelesen werden, Default=%s",
+            MEETING_AUTO_SUMMARY_DEFAULT,
+        )
+        return MEETING_AUTO_SUMMARY_DEFAULT
+
+
+def is_auto_summary_job(job: AgentJob) -> bool:
+    """Ob dieser Job vom Poller stammt — nicht von «Neu analysieren».
+
+    Neue Jobs tragen ``source=poller`` bzw. ``source=reanalyze``. Altbestand
+    ohne Quelle gilt als Auto-Job, ausser die Beschreibung nennt eine Re-Analyse.
+    """
+    meta = job.metadata_json or {}
+    source = meta.get("source")
+    if source == "poller":
+        return True
+    if source == "reanalyze":
+        return False
+    desc = meta.get("description") or ""
+    return "Re-Analyse" not in desc
+
+
+async def cancel_queued_meeting_summaries(db) -> int:
+    """Bricht wartende Auto-Protokoll-Jobs ab. Laufende und Re-Analysen bleiben.
+
+    Gibt die Anzahl abgebrochener Jobs zurück.
+    """
+    jobs = (
+        await db.execute(
+            select(AgentJob).where(
+                AgentJob.job_type == "meeting_summary",
+                AgentJob.status == "queued",
+            )
+        )
+    ).scalars().all()
+    auto_jobs = [job for job in jobs if is_auto_summary_job(job)]
+    if not auto_jobs:
+        return 0
+    now = datetime.now(timezone.utc)
+    job_ids = [job.id for job in auto_jobs]
+    for job in auto_jobs:
+        job.status = "failed"
+        job.error_message = _CANCEL_REASON
+        job.completed_at = now
+    transcripts = (
+        await db.execute(
+            select(MeetingTranscript).where(
+                MeetingTranscript.agent_job_id.in_(job_ids),
+                MeetingTranscript.protocol_md.is_(None),
+            )
+        )
+    ).scalars().all()
+    for record in transcripts:
+        record.status = "pending"
+    return len(auto_jobs)
 
 
 # ── VTT-Parser ───────────────────────────────────────────────────────────────
@@ -139,6 +221,16 @@ async def poll_meeting_transcripts() -> int:
     zurück. Best-effort: Fehler einzelner Transkripte (z. B. 403 vor dem
     Admin-Setup) blockieren den Rest nicht.
     """
+    auto_summary = await _is_meeting_auto_summary_enabled()
+    if not auto_summary:
+        async with async_session() as db:
+            cancelled = await cancel_queued_meeting_summaries(db)
+            await db.commit()
+            if cancelled:
+                logger.info(
+                    "Auto-Protokoll aus: %d queued Job(s) abgebrochen", cancelled
+                )
+
     client = _get_graph_client()
     if client is None:
         return 0
@@ -210,29 +302,34 @@ async def poll_meeting_transcripts() -> int:
                 ended_at=ended_at,
                 raw_vtt=raw_vtt,
                 transcript_text=parsed,
-                status="processing",
+                status="processing" if auto_summary else "pending",
             )
             db.add(record)
             await db.flush()
-            job = AgentJob(
-                user_id=principal_id,
-                job_type="meeting_summary",
-                status="queued",
-                metadata_json={
-                    "meeting_transcript_id": str(record.id),
-                    "subject": subject,
-                    "description": f"Meeting-Protokoll: {subject}",
-                    "autonomy_level": "L2",
-                },
-            )
-            db.add(job)
-            await db.flush()
-            record.agent_job_id = job.id
+            if auto_summary:
+                job = AgentJob(
+                    user_id=principal_id,
+                    job_type="meeting_summary",
+                    status="queued",
+                    metadata_json={
+                        "meeting_transcript_id": str(record.id),
+                        "subject": subject,
+                        "description": f"Meeting-Protokoll: {subject}",
+                        "autonomy_level": "L2",
+                        "source": "poller",
+                    },
+                )
+                db.add(job)
+                await db.flush()
+                record.agent_job_id = job.id
             await db.commit()
 
         known.add(transcript_id)
         stored += 1
-        logger.info("Transkript gespeichert (%s) + AgentJob meeting_summary erzeugt", subject)
+        if auto_summary:
+            logger.info("Transkript gespeichert (%s) + AgentJob meeting_summary erzeugt", subject)
+        else:
+            logger.info("Transkript gespeichert (%s), Auto-Protokoll aus", subject)
 
     return stored
 

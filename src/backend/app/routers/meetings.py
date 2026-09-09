@@ -217,6 +217,7 @@ async def reanalyze_meeting(
                 "subject": m.subject,
                 "description": f"Meeting-Protokoll (Re-Analyse): {m.subject}",
                 "autonomy_level": "L2",
+                "source": "reanalyze",
                 **({"llm_override": override} if override else {}),
             },
             llm_model=override,

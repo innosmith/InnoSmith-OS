@@ -408,6 +408,7 @@ class IntegrationSettings(BaseModel):
 class IntegrationSettingsResponse(IntegrationSettings):
     integrations_active_env: bool = True
     triage_enabled: bool = True
+    meeting_auto_summary: bool = False
     app_env: str = "prod"
 
 
@@ -436,6 +437,7 @@ async def get_integration_settings(
         bexio_api_token=_mask_token(s.get("bexio_api_token") or ""),
         integrations_active_env=cfg.integrations_active,
         triage_enabled=s.get("triage_enabled", True),
+        meeting_auto_summary=s.get("meeting_auto_summary", False),
         app_env=cfg.app_env,
     )
 
@@ -479,6 +481,35 @@ async def toggle_triage(
         raise HTTPException(status_code=403, detail="Nur Owner")
     await _merge_settings(db, user, {"triage_enabled": body.triage_enabled})
     return {"triage_enabled": body.triage_enabled}
+
+
+class MeetingAutoSummaryPayload(BaseModel):
+    meeting_auto_summary: bool
+
+
+@router.patch("/integrations/meeting-auto-summary")
+async def toggle_meeting_auto_summary(
+    body: MeetingAutoSummaryPayload,
+    user: User = Depends(require_role("owner")),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Schaltet die automatische lokale Meeting-Zusammenfassung um.
+
+    Beim Ausschalten werden wartende Auto-Protokoll-Jobs abgebrochen;
+    laufende Jobs und manuelle Re-Analysen bleiben unangetastet.
+    """
+    if user.role != "owner":
+        raise HTTPException(status_code=403, detail="Nur Owner")
+    await _merge_settings(db, user, {"meeting_auto_summary": body.meeting_auto_summary})
+    cancelled = 0
+    if not body.meeting_auto_summary:
+        from app.services.meetings import cancel_queued_meeting_summaries
+
+        cancelled = await cancel_queued_meeting_summaries(db)
+    return {
+        "meeting_auto_summary": body.meeting_auto_summary,
+        "cancelled_jobs": cancelled,
+    }
 
 
 # --- LLM-Einstellungen ---

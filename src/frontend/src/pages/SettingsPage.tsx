@@ -158,6 +158,7 @@ export function SettingsPage() {
   const [indexStatus, setIndexStatus] = useState<IndexStatusData | null>(null);
   const [integrationsActiveEnv, setIntegrationsActiveEnv] = useState(true);
   const [appEnv, setAppEnv] = useState('prod');
+  const [meetingAutoSummary, setMeetingAutoSummary] = useState(false);
 
   const [pdToken, setPdToken] = useState('');
   const [pdDomain, setPdDomain] = useState('innosmith');
@@ -239,7 +240,7 @@ export function SettingsPage() {
 
   useEffect(() => {
     if (tab !== 'integrations') return;
-    api.get<{ pipedrive_api_token: string | null; pipedrive_domain: string | null; toggl_api_token: string | null; toggl_workspace_id: number | null; bexio_api_token: string | null; integrations_active_env?: boolean; triage_enabled?: boolean; app_env?: string }>('/api/settings/integrations')
+    api.get<{ pipedrive_api_token: string | null; pipedrive_domain: string | null; toggl_api_token: string | null; toggl_workspace_id: number | null; bexio_api_token: string | null; integrations_active_env?: boolean; triage_enabled?: boolean; meeting_auto_summary?: boolean; app_env?: string }>('/api/settings/integrations')
       .then((data) => {
         setPdToken(data.pipedrive_api_token || '');
         setPdDomain(data.pipedrive_domain || 'innosmith');
@@ -248,6 +249,7 @@ export function SettingsPage() {
         setBexioToken(data.bexio_api_token || '');
         if (data.integrations_active_env !== undefined) setIntegrationsActiveEnv(data.integrations_active_env);
         if (data.triage_enabled !== undefined) setTriageEnabled(data.triage_enabled);
+        if (data.meeting_auto_summary !== undefined) setMeetingAutoSummary(data.meeting_auto_summary);
         if (data.app_env) setAppEnv(data.app_env);
       })
       .catch(() => {});
@@ -1578,6 +1580,51 @@ export function SettingsPage() {
                         }`}
                       >
                         <span className={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform ${triageEnabled ? 'left-[22px]' : 'left-0.5'}`} />
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                <div className={`rounded-xl border p-5 ${
+                  meetingAutoSummary
+                    ? 'border-emerald-200 bg-emerald-50/50 dark:border-emerald-900 dark:bg-emerald-950/30'
+                    : 'border-gray-200 bg-gray-50/50 dark:border-gray-700 dark:bg-gray-800/50'
+                }`}>
+                  <div className="flex items-center justify-between gap-4">
+                    <div>
+                      <h3 className="text-sm font-semibold text-gray-900 dark:text-white">
+                        Meeting-Protokolle automatisch (lokal)
+                      </h3>
+                      <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                        Nach jedem Teams-Transkript ein Protokoll mit dem lokalen Modell.
+                        Lange Meetings belasten die GX10 stark. Aus: Transkripte werden
+                        weiter geholt; Zusammenfassung nur noch auf Wunsch (Anonymisieren
+                        und öffentliches Modell, oder «Neu analysieren»).
+                      </p>
+                    </div>
+                    <div className="flex shrink-0 items-center gap-3">
+                      <span className={`text-xs font-medium ${
+                        meetingAutoSummary ? 'text-emerald-600 dark:text-emerald-400' : 'text-gray-400'
+                      }`}>
+                        {meetingAutoSummary ? 'Aktiv' : 'Inaktiv'}
+                      </span>
+                      <button
+                        type="button"
+                        data-testid="meeting-auto-summary-toggle"
+                        onClick={async () => {
+                          const next = !meetingAutoSummary;
+                          try {
+                            await api.patch('/api/settings/integrations/meeting-auto-summary', {
+                              meeting_auto_summary: next,
+                            });
+                            setMeetingAutoSummary(next);
+                          } catch { /* */ }
+                        }}
+                        className={`relative h-6 w-11 rounded-full transition-colors ${
+                          meetingAutoSummary ? 'bg-emerald-600' : 'bg-gray-300 dark:bg-gray-600'
+                        }`}
+                      >
+                        <span className={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform ${meetingAutoSummary ? 'left-[22px]' : 'left-0.5'}`} />
                       </button>
                     </div>
                   </div>

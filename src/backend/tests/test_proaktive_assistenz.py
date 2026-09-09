@@ -3,11 +3,13 @@
 Abgedeckt (rein deterministisch, ohne DB/Netz):
 - Briefing-Scheduler: Soll-Zeitpunkt-Berechnung (Daily/Weekly/Monthly)
 - Meeting-Pipeline: VTT-Parser, Chunking, Anonymisierung (Regex + Pseudonyme)
+- Meeting-Auto-Summary: Default aus, Poller-vs-Re-Analyse, Storno nur Auto-Jobs
 - Follow-up-Erkennung: Arbeitstage, Antwort-Erkennung, Empfänger-Extraktion, Schalter
 """
 
 from datetime import datetime, date, timezone
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
+from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -24,7 +26,10 @@ from app.services.meetings import (
     _letter_label,
     apply_pseudonyms,
     chunk_transcript,
+    is_auto_summary_job,
     mask_deterministic,
+    meeting_auto_summary_enabled,
+    MEETING_AUTO_SUMMARY_DEFAULT,
     parse_vtt,
 )
 
@@ -499,3 +504,105 @@ class TestFollowupSchalter:
         from app.services.hermes_worker import _BRIEFING_INSTRUCTIONS
 
         assert "nachfass" not in _BRIEFING_INSTRUCTIONS["daily_briefing"].lower()
+
+
+# ── Meeting-Auto-Summary-Schalter ─────────────────────────────────────────────
+
+class _Job:
+    def __init__(self, *, source=None, description=None, status="queued"):
+        self.id = uuid4()
+        self.job_type = "meeting_summary"
+        self.status = status
+        self.metadata_json = {}
+        if source is not None:
+            self.metadata_json["source"] = source
+        if description is not None:
+            self.metadata_json["description"] = description
+        self.error_message = None
+        self.completed_at = None
+
+
+class TestMeetingAutoSummaryEnabled:
+    def test_default_ist_aus(self):
+        assert MEETING_AUTO_SUMMARY_DEFAULT is False
+        assert meeting_auto_summary_enabled(None) is False
+        assert meeting_auto_summary_enabled({}) is False
+
+    def test_explizit_an(self):
+        assert meeting_auto_summary_enabled({"meeting_auto_summary": True}) is True
+
+    def test_explizit_aus(self):
+        assert meeting_auto_summary_enabled({"meeting_auto_summary": False}) is False
+
+
+class TestIsAutoSummaryJob:
+    def test_poller_quelle(self):
+        assert is_auto_summary_job(_Job(source="poller")) is True
+
+    def test_reanalyse_quelle(self):
+        assert is_auto_summary_job(_Job(source="reanalyze")) is False
+
+    def test_altbestand_ohne_quelle_ist_auto(self):
+        assert is_auto_summary_job(_Job()) is True
+
+    def test_altbestand_reanalyse_an_beschreibung(self):
+        job = _Job(description="Meeting-Protokoll (Re-Analyse): Standup")
+        assert is_auto_summary_job(job) is False
+
+
+class TestCancelQueuedMeetingSummaries:
+    """Storno trifft nur queued Auto-Jobs, nie Re-Analysen und nie laufende."""
+
+    @pytest.mark.asyncio
+    async def test_bricht_nur_queued_auto_jobs_ab(self):
+        from app.services.meetings import cancel_queued_meeting_summaries
+
+        auto = _Job(source="poller")
+        reanalyze = _Job(source="reanalyze")
+        running = _Job(source="poller", status="running")
+
+        class _Transcript:
+            def __init__(self, job_id):
+                self.agent_job_id = job_id
+                self.protocol_md = None
+                self.status = "processing"
+
+        auto_tr = _Transcript(auto.id)
+
+        queued = [auto, reanalyze]
+        transcripts = [auto_tr]
+        calls = {"n": 0}
+
+        class _Db:
+            async def execute(self, _stmt):
+                calls["n"] += 1
+                items = queued if calls["n"] == 1 else transcripts
+                result = MagicMock()
+                result.scalars.return_value.all.return_value = items
+                return result
+
+        cancelled = await cancel_queued_meeting_summaries(_Db())
+        assert cancelled == 1
+        assert auto.status == "failed"
+        assert auto.error_message == "Automatische Meeting-Zusammenfassung deaktiviert"
+        assert reanalyze.status == "queued"
+        assert running.status == "running"
+        assert auto_tr.status == "pending"
+
+    def test_poller_liest_schalter_und_speichert_ohne_job(self):
+        import inspect
+        from app.services.meetings import poll_meeting_transcripts
+
+        quelle = inspect.getsource(poll_meeting_transcripts)
+        assert "_is_meeting_auto_summary_enabled" in quelle
+        assert "cancel_queued_meeting_summaries" in quelle
+        assert '"pending"' in quelle
+        assert '"source": "poller"' in quelle
+
+    def test_toggle_storniert_beim_ausschalten(self):
+        import inspect
+        from app.routers.settings import toggle_meeting_auto_summary
+
+        quelle = inspect.getsource(toggle_meeting_auto_summary)
+        assert "cancel_queued_meeting_summaries" in quelle
+        assert "meeting_auto_summary" in quelle

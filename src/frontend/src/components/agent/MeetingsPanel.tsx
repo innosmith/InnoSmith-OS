@@ -40,7 +40,7 @@ interface MeetingDetail extends MeetingListItem {
 }
 
 const STATUS_CONFIG: Record<string, { label: string; classes: string }> = {
-  pending: { label: 'Wartend', classes: 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300' },
+  pending: { label: 'Transkript bereit', classes: 'bg-gray-100 text-gray-700 dark:bg-gray-800 dark:text-gray-300' },
   processing: { label: 'Wird analysiert', classes: 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300' },
   completed: { label: 'Protokoll bereit', classes: 'bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-300' },
   failed: { label: 'Fehler', classes: 'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300' },
@@ -81,6 +81,7 @@ export function MeetingsPanel() {
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [details, setDetails] = useState<Record<string, MeetingDetail>>({});
   const [error, setError] = useState<string | null>(null);
+  const [autoSummary, setAutoSummary] = useState(false);
   const [searchParams] = useSearchParams();
   const cardRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const handledDeepLink = useRef<string | null>(null);
@@ -95,6 +96,26 @@ export function MeetingsPanel() {
 
   useEffect(() => { fetchMeetings(); }, [fetchMeetings]);
   useSSE(event => { if (event === 'agent_jobs_changed') fetchMeetings(); });
+
+  useEffect(() => {
+    api.get<{ meeting_auto_summary?: boolean }>('/api/settings/integrations')
+      .then((data) => {
+        if (data.meeting_auto_summary !== undefined) setAutoSummary(data.meeting_auto_summary);
+      })
+      .catch(() => {});
+  }, []);
+
+  const toggleAutoSummary = async () => {
+    const next = !autoSummary;
+    try {
+      await api.patch('/api/settings/integrations/meeting-auto-summary', {
+        meeting_auto_summary: next,
+      });
+      setAutoSummary(next);
+    } catch (e) {
+      setError(e instanceof Error ? e.message.slice(0, 200) : 'Schalter konnte nicht gesetzt werden');
+    }
+  };
 
   const loadDetail = useCallback(async (id: string) => {
     try {
@@ -131,29 +152,58 @@ export function MeetingsPanel() {
     );
   }
 
-  if (meetings.length === 0) {
-    return (
-      <div className="flex flex-col items-center justify-center rounded-xl border border-gray-200 bg-white/70 p-12 text-center backdrop-blur-sm dark:border-gray-800 dark:bg-gray-900/70">
-        <Video className="mb-3 h-10 w-10 text-gray-300 dark:text-gray-600" />
-        <p className="text-sm font-medium text-gray-700 dark:text-gray-300">Noch keine Meeting-Transkripte</p>
-        <p className="mt-1 max-w-md text-xs text-gray-500 dark:text-gray-400">
-          Beendete Teams-Meetings mit aktivierter Transkription werden automatisch geholt und
-          als Protokoll aufbereitet. Voraussetzung ist das einmalige Admin-Setup
-          (siehe docs/setup-teams-transkripte.md).
-        </p>
-      </div>
-    );
-  }
-
   return (
     <div className="space-y-3">
+      <div className="flex flex-wrap items-start justify-between gap-3 rounded-xl border border-white/60 bg-white/70 px-4 py-3 dark:border-gray-800 dark:bg-gray-900/70">
+        <div className="min-w-0">
+          <p className="text-sm font-medium text-gray-800 dark:text-gray-200">
+            Automatische lokale Zusammenfassung
+          </p>
+          <p className="mt-0.5 text-xs text-gray-500 dark:text-gray-400">
+            {autoSummary
+              ? 'Neue Transkripte werden lokal als Protokoll aufbereitet.'
+              : 'Transkripte werden geholt, aber nicht automatisch zusammengefasst. Anonymisieren und ein öffentliches Modell, oder «Neu analysieren».'}
+          </p>
+        </div>
+        <div className="flex shrink-0 items-center gap-3">
+          <span className={`text-xs font-medium ${
+            autoSummary ? 'text-emerald-600 dark:text-emerald-400' : 'text-gray-400'
+          }`}>
+            {autoSummary ? 'Aktiv' : 'Inaktiv'}
+          </span>
+          <button
+            type="button"
+            data-testid="meetings-auto-summary-toggle"
+            onClick={toggleAutoSummary}
+            className={`relative h-6 w-11 rounded-full transition-colors ${
+              autoSummary ? 'bg-emerald-600' : 'bg-gray-300 dark:bg-gray-600'
+            }`}
+            aria-pressed={autoSummary}
+            aria-label="Automatische lokale Meeting-Zusammenfassung"
+          >
+            <span className={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform ${autoSummary ? 'left-[22px]' : 'left-0.5'}`} />
+          </button>
+        </div>
+      </div>
+
       {error && (
         <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-800 dark:border-red-800 dark:bg-red-950/40 dark:text-red-200" role="alert">
           {error}
           <button type="button" onClick={() => setError(null)} className="ml-2 underline">Schliessen</button>
         </div>
       )}
-      {meetings.map(m => {
+
+      {meetings.length === 0 ? (
+        <div className="flex flex-col items-center justify-center rounded-xl border border-gray-200 bg-white/70 p-12 text-center backdrop-blur-sm dark:border-gray-800 dark:bg-gray-900/70">
+          <Video className="mb-3 h-10 w-10 text-gray-300 dark:text-gray-600" />
+          <p className="text-sm font-medium text-gray-700 dark:text-gray-300">Noch keine Meeting-Transkripte</p>
+          <p className="mt-1 max-w-md text-xs text-gray-500 dark:text-gray-400">
+            Beendete Teams-Meetings mit aktivierter Transkription werden automatisch geholt.
+            Voraussetzung ist das einmalige Admin-Setup (siehe docs/setup-teams-transkripte.md).
+          </p>
+        </div>
+      ) : (
+        meetings.map(m => {
         const cfg = STATUS_CONFIG[m.status] ?? { label: m.status, classes: 'bg-gray-100 text-gray-700 dark:bg-gray-800 dark:text-gray-300' };
         const isExpanded = expandedId === m.id;
         const detail = details[m.id];
@@ -212,7 +262,8 @@ export function MeetingsPanel() {
             )}
           </div>
         );
-      })}
+      })
+      )}
     </div>
   );
 }
@@ -397,7 +448,7 @@ function MeetingDetailView({
           {anonymized
             ? 'Anonymisierte Fassung noch nicht erstellt'
             : view === 'protokoll'
-              ? (detail.status === 'processing' ? 'Protokoll wird gerade erstellt…' : 'Noch kein Protokoll vorhanden')
+              ? (detail.status === 'processing' ? 'Protokoll wird gerade erstellt…' : 'Noch kein Protokoll — bei Bedarf «Neu analysieren»')
               : 'Kein Transkript-Text vorhanden'}
         </p>
       )}

@@ -1,8 +1,11 @@
 # Setup: Teams-Meeting-Transkripte via Graph API
 
 **Zweck:** TaskPilot holt Transkripte beendeter Teams-Meetings automatisch ab
-(Poller alle 15 Minuten), speichert das Original (VTT) und erstellt daraus ein
-strukturiertes Protokoll mit Action-Item-Vorschlägen.
+(Poller alle 15 Minuten) und speichert das Original (VTT). Die lokale
+Zusammenfassung zum strukturierten Protokoll ist **standardmässig aus**: lange
+Transkripte belasten das lokale Modell zu stark. Einschalten unter
+**Einstellungen → Integrationen** oder **Agenten → Meetings**. Manuell bleibt
+«Neu analysieren» und der Anonymisierungs-Pfad (danach öffentliches Modell).
 
 **Zeitkritisch:** Microsoft erzwingt ab **Ende Juli 2026** neue Admin-Controls
 für den Graph-Zugriff auf Transkripte und Aufzeichnungen. Ohne die untenstehende
@@ -91,8 +94,9 @@ docker logs -f taskpilot-backend 2>&1 | grep -i meeting
 ```
 
 Erwartete Sequenz: `Meeting-Poller: N beendete(s) Meeting(s) gefunden` →
-`Transkript gespeichert (…)` → `AgentJob meeting_summary erzeugt`. Das fertige
-Protokoll erscheint unter **Agenten → Meetings**.
+`Transkript gespeichert (…)`. Mit eingeschaltetem Auto-Protokoll folgt
+`AgentJob meeting_summary erzeugt`. Das Transkript (und ggf. das Protokoll)
+erscheint unter **Agenten → Meetings**.
 
 ## Fehlerbilder
 
@@ -101,4 +105,5 @@ Protokoll erscheint unter **Agenten → Meetings**.
 | `403 GraphAccessToTranscriptsDisabled` | Schritt 3 fehlt (Teams Admin Center) | App im Admin Center freigeben |
 | `403 Forbidden` auf `/onlineMeetings` | Access Policy fehlt/nicht propagiert | Schritt 2, 30 Min warten |
 | Meetings gelistet, aber keine Transkripte | Transkription im Meeting nicht aktiv | Schritt 4 |
+| Transkript da, kein Protokoll | Auto-Zusammenfassung ist aus (Default) | Schalter an, oder «Neu analysieren» |
 | Fremd organisierte Meetings fehlen | Microsoft-Einschränkung (nur eigene) | erwartetes Verhalten |
