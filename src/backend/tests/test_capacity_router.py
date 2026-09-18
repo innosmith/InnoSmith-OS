@@ -471,6 +471,158 @@ async def test_time_off_duplicate_409(client_as_owner):
             await client_as_owner.delete(f"/api/capacity/time-off/{entry['id']}")
 
 
+# ── Freie Tage: Abschnitte verschieben und ändern ────────────────────────────
+
+
+async def _lege_tage_an(client, tage: list[str], typ: str = "ferien", label: str | None = None):
+    """Legt freie Tage über den Ersetzen-Endpunkt an und gibt sie zurück."""
+    resp = await client.post(
+        "/api/capacity/time-off/replace",
+        json={
+            "remove_ids": [],
+            "days": [{"date": d, "type": typ, "label": label, "hours": 8} for d in tage],
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    return resp.json()
+
+
+async def _raeume_auf(client, jahre: tuple[int, ...] = (2029, 2030)):
+    for jahr in jahre:
+        resp = await client.get("/api/capacity/time-off", params={"year": jahr})
+        for entry in resp.json():
+            await client.delete(f"/api/capacity/time-off/{entry['id']}")
+
+
+@pytest.mark.db
+async def test_time_off_replace_forbidden_for_member(client_as_member):
+    """POST /api/capacity/time-off/replace als Member gibt 403 zurück."""
+    resp = await client_as_member.post(
+        "/api/capacity/time-off/replace", json={"remove_ids": [], "days": []}
+    )
+    assert resp.status_code == 403
+
+
+@pytest.mark.db
+async def test_time_off_replace_verschiebt_abschnitt(client_as_owner):
+    """Ein Abschnitt lässt sich um eine Woche verschieben.
+
+    Der Grund für den Endpunkt: Löschen und Anlegen getrennt auszuführen würde
+    an der Eindeutigkeit von ``date`` scheitern, sobald sich alter und neuer
+    Zeitraum überlappen.
+    """
+    await _raeume_auf(client_as_owner)
+    alt = await _lege_tage_an(client_as_owner, ["2029-03-05", "2029-03-06", "2029-03-07"])
+
+    resp = await client_as_owner.post(
+        "/api/capacity/time-off/replace",
+        json={
+            "remove_ids": [e["id"] for e in alt],
+            "days": [
+                {"date": "2029-03-12", "type": "ferien", "hours": 8},
+                {"date": "2029-03-13", "type": "ferien", "hours": 8},
+                {"date": "2029-03-14", "type": "ferien", "hours": 8},
+            ],
+        },
+    )
+    assert resp.status_code == 200
+    assert [e["date"] for e in resp.json()] == ["2029-03-12", "2029-03-13", "2029-03-14"]
+
+    liste = await client_as_owner.get("/api/capacity/time-off", params={"year": 2029})
+    assert [e["date"] for e in liste.json()] == ["2029-03-12", "2029-03-13", "2029-03-14"]
+
+    await _raeume_auf(client_as_owner)
+
+
+@pytest.mark.db
+async def test_time_off_replace_verlaengert_ueberlappend(client_as_owner):
+    """Verlängern behält Tage, die im alten und im neuen Zeitraum liegen."""
+    await _raeume_auf(client_as_owner)
+    alt = await _lege_tage_an(client_as_owner, ["2029-04-02", "2029-04-03"])
+
+    resp = await client_as_owner.post(
+        "/api/capacity/time-off/replace",
+        json={
+            "remove_ids": [e["id"] for e in alt],
+            "days": [
+                {"date": "2029-04-02", "type": "ferien", "hours": 8},
+                {"date": "2029-04-03", "type": "ferien", "hours": 8},
+                {"date": "2029-04-04", "type": "ferien", "hours": 4},
+            ],
+        },
+    )
+    assert resp.status_code == 200
+    assert len(resp.json()) == 3
+    assert resp.json()[2]["hours"] == 4
+
+    await _raeume_auf(client_as_owner)
+
+
+@pytest.mark.db
+async def test_time_off_replace_kollision_laesst_altbestand(client_as_owner):
+    """Kollision mit einem fremden Eintrag ändert nichts und nennt das Datum.
+
+    Ein teilweise angewandtes Verschieben wäre der schlimmste Ausgang: der
+    Abschnitt wäre gelöscht, der neue nicht angelegt, und der Nutzer hätte
+    stillschweigend Ferien verloren.
+    """
+    await _raeume_auf(client_as_owner)
+    abschnitt = await _lege_tage_an(client_as_owner, ["2029-05-07", "2029-05-08"])
+    await _lege_tage_an(client_as_owner, ["2029-05-14"], typ="krank")
+
+    resp = await client_as_owner.post(
+        "/api/capacity/time-off/replace",
+        json={
+            "remove_ids": [e["id"] for e in abschnitt],
+            "days": [
+                {"date": "2029-05-14", "type": "ferien", "hours": 8},
+                {"date": "2029-05-15", "type": "ferien", "hours": 8},
+            ],
+        },
+    )
+    assert resp.status_code == 409
+    assert "14.05.2029" in resp.json()["detail"]
+    assert "krank" in resp.json()["detail"]
+
+    liste = await client_as_owner.get("/api/capacity/time-off", params={"year": 2029})
+    assert [e["date"] for e in liste.json()] == ["2029-05-07", "2029-05-08", "2029-05-14"]
+
+    await _raeume_auf(client_as_owner)
+
+
+@pytest.mark.db
+async def test_time_off_zeitraum_ueber_jahresgrenze(client_as_owner):
+    """``from``/``to`` liest über die Jahresgrenze, ``year`` konnte das nicht.
+
+    Vorfall: Die Jahresansicht der Kapazitätsplanung lud mit ``year`` nur das
+    Jahr des Fensterstarts. Begann das Fenster im Dezember, fehlten alle Tage
+    des Folgejahres in der Ferien-Zeile — die Auslastung sank ohne sichtbaren
+    Grund, und der Abschnitt liess sich nicht anfassen.
+    """
+    await _raeume_auf(client_as_owner)
+    await _lege_tage_an(client_as_owner, ["2029-12-27", "2030-01-02"])
+
+    resp = await client_as_owner.get(
+        "/api/capacity/time-off", params={"from": "2029-12-01", "to": "2030-01-31"}
+    )
+    assert [e["date"] for e in resp.json()] == ["2029-12-27", "2030-01-02"]
+
+    nur_jahr = await client_as_owner.get("/api/capacity/time-off", params={"year": 2029})
+    assert [e["date"] for e in nur_jahr.json()] == ["2029-12-27"]
+
+    await _raeume_auf(client_as_owner)
+
+
+@pytest.mark.db
+async def test_time_off_unbekannter_typ_422(client_as_owner):
+    """Ein Typ ausserhalb der CHECK-Bedingung gibt 422 statt 500."""
+    resp = await client_as_owner.post(
+        "/api/capacity/time-off", json={"date": "2029-06-04", "type": "urlaub"}
+    )
+    assert resp.status_code == 422
+    assert "ferien" in resp.json()["detail"]
+
+
 # ── Umsatzprognose: Regressionstests zu falschen Monatszahlen ────────────────
 
 

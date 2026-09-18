@@ -156,7 +156,21 @@ class TimeOffCreate(BaseModel):
     date: str
     type: str = "ferien"
     label: str | None = None
-    hours: float = 8.0
+    hours: float = Field(default=8.0, ge=0, le=24)
+
+
+class TimeOffDay(BaseModel):
+    """Ein freier Tag im Ersetzen-Aufruf."""
+
+    date: str
+    type: str = "ferien"
+    label: str | None = None
+    hours: float = Field(default=8.0, ge=0, le=24)
+
+
+class TimeOffReplace(BaseModel):
+    remove_ids: list[str] = Field(default_factory=list)
+    days: list[TimeOffDay] = Field(default_factory=list)
 
 
 class TimeOffOut(BaseModel):
@@ -591,15 +605,55 @@ async def bulk_allocations(
 
 # ── Freie Tage ───────────────────────────────────────────────────────────────
 
+_TIME_OFF_TYPES = ("ferien", "feiertag", "krank", "sonstiges")
+
+
+def _validate_time_off_type(raw: str) -> str:
+    """Prüft den Typ gegen die CHECK-Bedingung der Tabelle.
+
+    Ohne diese Prüfung liefert ein Tippfehler einen IntegrityError und damit
+    einen 500er — der Aufrufer erfährt nicht, welche Typen es überhaupt gibt.
+    """
+    if raw not in _TIME_OFF_TYPES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Unbekannter Typ «{raw}» — erlaubt: {', '.join(_TIME_OFF_TYPES)}",
+        )
+    return raw
+
+
+def _parse_time_off_day(raw: str) -> date:
+    try:
+        return date.fromisoformat(raw)
+    except ValueError:
+        raise HTTPException(
+            status_code=422, detail=f"«{raw}» ist kein Datum im Format YYYY-MM-DD"
+        ) from None
+
 
 @router.get("/time-off", response_model=list[TimeOffOut])
 async def list_time_off(
     year: int = Query(default=None),
+    from_date: str = Query(default=None, alias="from"),
+    to_date: str = Query(default=None, alias="to"),
     user: User = Depends(require_role("owner")),
 ):
+    """Freie Tage, entweder für ein Kalenderjahr oder für einen Zeitraum.
+
+    ``from``/``to`` gibt es, weil das Cockpit ein gleitendes Fenster von bis zu
+    52 Wochen zeigt: mit ``year`` allein fehlten in einer Jahresansicht, die im
+    Dezember beginnt, alle Tage des Folgejahres. Die Auslastung war trotzdem
+    korrekt (``weekly-summary`` rechnet über den Zeitraum), nur unsichtbar und
+    darum nicht bearbeitbar.
+    """
     async with async_session() as session:
         stmt = select(CapacityTimeOff).order_by(CapacityTimeOff.date)
-        if year:
+        if from_date or to_date:
+            if from_date:
+                stmt = stmt.where(CapacityTimeOff.date >= _parse_time_off_day(from_date))
+            if to_date:
+                stmt = stmt.where(CapacityTimeOff.date <= _parse_time_off_day(to_date))
+        elif year:
             stmt = stmt.where(
                 CapacityTimeOff.date >= date(year, 1, 1),
                 CapacityTimeOff.date <= date(year, 12, 31),
@@ -614,18 +668,96 @@ async def create_time_off(
     body: TimeOffCreate,
     user: User = Depends(require_role("owner")),
 ):
-    d = date.fromisoformat(body.date)
+    d = _parse_time_off_day(body.date)
+    entry_type = _validate_time_off_type(body.type)
     async with async_session() as session:
         existing = await session.execute(
             select(CapacityTimeOff).where(CapacityTimeOff.date == d)
         )
         if existing.scalar_one_or_none():
             raise HTTPException(status_code=409, detail="Für dieses Datum existiert bereits ein Eintrag")
-        entry = CapacityTimeOff(date=d, type=body.type, label=body.label, hours=body.hours)
+        entry = CapacityTimeOff(date=d, type=entry_type, label=body.label, hours=body.hours)
         session.add(entry)
         await session.commit()
         await session.refresh(entry)
         return _timeoff_to_out(entry)
+
+
+@router.post("/time-off/replace", response_model=list[TimeOffOut])
+async def replace_time_off(
+    body: TimeOffReplace,
+    user: User = Depends(require_role("owner")),
+):
+    """Ersetzt einen Abschnitt freier Tage in **einem** Zug.
+
+    Bearbeiten, Verschieben, Verlängern und Verkürzen sind aus Sicht der Daten
+    dieselbe Operation: alte Tage weg, neue hin. Getrennt ausgeführt scheitert
+    das an der Eindeutigkeit von ``date``, sobald sich alter und neuer Zeitraum
+    überlappen — was beim Verlängern immer und beim Verschieben um wenige Tage
+    meistens der Fall ist. Darum eine Transaktion statt eines PATCH pro Tag.
+
+    Eine Kollision mit **fremden** Einträgen (Krankheitstag, anderer Abschnitt)
+    lässt den Altbestand unverändert und nennt die belegten Daten; ohne sie
+    wüsste der Aufrufer nur, dass es nicht ging.
+    """
+    try:
+        remove_ids = [uuid.UUID(i) for i in body.remove_ids]
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Ungültige Kennung in remove_ids") from None
+
+    days = [
+        (
+            _parse_time_off_day(d.date),
+            _validate_time_off_type(d.type),
+            d.label,
+            d.hours,
+        )
+        for d in body.days
+    ]
+    wanted = [d[0] for d in days]
+    if len(set(wanted)) != len(wanted):
+        raise HTTPException(status_code=422, detail="Doppeltes Datum in days")
+    if not remove_ids and not days:
+        raise HTTPException(status_code=422, detail="remove_ids oder days erforderlich")
+
+    async with async_session() as session:
+        if remove_ids:
+            await session.execute(
+                delete(CapacityTimeOff).where(CapacityTimeOff.id.in_(remove_ids))
+            )
+            await session.flush()
+
+        if wanted:
+            clashes = await session.execute(
+                select(CapacityTimeOff.date, CapacityTimeOff.type)
+                .where(CapacityTimeOff.date.in_(wanted))
+                .order_by(CapacityTimeOff.date)
+            )
+            belegt = clashes.all()
+            if belegt:
+                await session.rollback()
+                namen = ", ".join(f"{d.strftime('%d.%m.%Y')} ({t})" for d, t in belegt)
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Bereits belegt, nichts geändert: {namen}",
+                )
+
+        entries = [
+            CapacityTimeOff(date=d, type=t, label=label, hours=hours)
+            for d, t, label, hours in days
+        ]
+        session.add_all(entries)
+        try:
+            await session.commit()
+        except IntegrityError:
+            await session.rollback()
+            raise HTTPException(
+                status_code=409,
+                detail="Freie Tage konnten nicht gespeichert werden — Datum bereits belegt",
+            ) from None
+        for e in entries:
+            await session.refresh(e)
+        return [_timeoff_to_out(e) for e in sorted(entries, key=lambda e: e.date)]
 
 
 @router.delete("/time-off/{entry_id}", status_code=204)

@@ -63,6 +63,18 @@ interface TimeOffEntry {
   hours: number;
 }
 
+/** Zusammenhängender Abschnitt freier Tage — die Einheit, die man bedient. */
+interface TimeOffBlock {
+  key: string;
+  ids: string[];
+  from: string;
+  to: string;
+  type: string;
+  label: string | null;
+  hours: number;
+  dayCount: number;
+}
+
 interface PlanVsActualProject {
   toggl_project_id: number | null;
   capacity_project_id?: string;
@@ -104,6 +116,107 @@ function toIso(d: Date): string {
   const m = String(d.getMonth() + 1).padStart(2, '0');
   const day = String(d.getDate()).padStart(2, '0');
   return `${y}-${m}-${day}`;
+}
+
+/** Lokales Datum aus einem ISO-Tag — nie `new Date(iso)`, das liest UTC. */
+function fromIso(iso: string): Date {
+  return new Date(`${iso}T00:00:00`);
+}
+
+function addDays(d: Date, days: number): Date {
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate() + days);
+}
+
+/** Tag im Schweizer Format, für Listen und Fehlermeldungen. */
+function formatDay(iso: string): string {
+  return fromIso(iso).toLocaleDateString('de-CH', { day: '2-digit', month: '2-digit', year: 'numeric' });
+}
+
+/** Arbeitstage (Mo–Fr) von `from` bis `to`, beide inklusive. */
+function workdaysBetween(from: string, to: string): string[] {
+  const days: string[] = [];
+  const end = fromIso(to);
+  for (let d = fromIso(from); d <= end; d = addDays(d, 1)) {
+    const dow = d.getDay();
+    if (dow === 0 || dow === 6) continue;
+    days.push(toIso(d));
+  }
+  return days;
+}
+
+const TIME_OFF_TYPE_LABEL: Record<string, string> = {
+  ferien: 'Ferien',
+  feiertag: 'Feiertag',
+  krank: 'Krank',
+  sonstiges: 'Sonstiges',
+};
+
+/**
+ * Fasst Tageszeilen zu Abschnitten zusammen — der Einheit, die man bedient.
+ *
+ * Die Wochenend-Brücke ist dieselbe Regel wie im Backend
+ * (`_group_absence_ranges` in `hermes_worker.py`): `capacity_time_off` hält nur
+ * Arbeitstage, zwei Ferienwochen erscheinen deshalb als zwei Blöcke mit einer
+ * Lücke am Samstag/Sonntag. Ohne Brücke zeigte der Dialog zwei Abschnitte,
+ * während der Agent «bis in zwei Wochen» schreibt.
+ */
+function groupTimeOffBlocks(entries: TimeOffEntry[]): TimeOffBlock[] {
+  const sorted = [...entries].sort((a, b) => a.date.localeCompare(b.date));
+  const blocks: TimeOffBlock[] = [];
+  for (const entry of sorted) {
+    const last = blocks[blocks.length - 1];
+    const gapOnlyWeekend = (() => {
+      if (!last) return false;
+      let d = addDays(fromIso(last.to), 1);
+      const current = fromIso(entry.date);
+      while (d < current) {
+        if (d.getDay() !== 0 && d.getDay() !== 6) return false;
+        d = addDays(d, 1);
+      }
+      return true;
+    })();
+    const sameKind =
+      last && last.type === entry.type && last.label === entry.label && last.hours === entry.hours;
+    if (last && sameKind && gapOnlyWeekend) {
+      last.ids.push(entry.id);
+      last.to = entry.date;
+      last.dayCount += 1;
+      continue;
+    }
+    blocks.push({
+      key: entry.id,
+      ids: [entry.id],
+      from: entry.date,
+      to: entry.date,
+      type: entry.type,
+      label: entry.label,
+      hours: entry.hours,
+      dayCount: 1,
+    });
+  }
+  return blocks;
+}
+
+/**
+ * Meldungstext aus einem Fehler des API-Clients.
+ *
+ * `ApiError.message` trägt den rohen Antwortkörper. Ohne Auspacken stünde
+ * `{"detail":"..."}` am Bildschirm.
+ */
+function apiErrorText(err: unknown, fallback: string): string {
+  const raw = err instanceof Error ? err.message : '';
+  if (!raw) return fallback;
+  try {
+    const parsed = JSON.parse(raw);
+    if (typeof parsed?.detail === 'string') return parsed.detail;
+    if (Array.isArray(parsed?.detail)) {
+      const first = parsed.detail[0];
+      if (typeof first?.msg === 'string') return first.msg;
+    }
+  } catch {
+    /* kein JSON — Rohtext ist besser als nichts */
+  }
+  return raw.slice(0, 300) || fallback;
 }
 
 function getWeeksForRange(start: Date, range: ViewRange): Date[] {
@@ -1935,7 +2048,7 @@ export function CapacityPage() {
   // Dialogs
   const [allocDialog, setAllocDialog] = useState<{ open: boolean; projectId: string; weekStart: string; editAllocId?: string; editMinutes?: number; editScope?: 'single' | 'series' | 'series_from'; editSeriesId?: string; editAllocationType?: 'week' | 'day' }>({ open: false, projectId: '', weekStart: '' });
   const [projectDialog, setProjectDialog] = useState<{ open: boolean; editing: CapProject | null }>({ open: false, editing: null });
-  const [timeOffDialog, setTimeOffDialog] = useState(false);
+  const [timeOffDialog, setTimeOffDialog] = useState<{ open: boolean; focusKey?: string }>({ open: false });
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; alloc: Allocation } | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
 
@@ -1945,6 +2058,11 @@ export function CapacityPage() {
   const [toType, setToType] = useState('ferien');
   const [toLabel, setToLabel] = useState('');
   const [toHours, setToHours] = useState('8');
+  // Gesetzt = das Formular bearbeitet diesen Abschnitt, leer = neuer Eintrag.
+  const [toEditing, setToEditing] = useState<TimeOffBlock | null>(null);
+  const [toError, setToError] = useState<string | null>(null);
+  const [toBusy, setToBusy] = useState(false);
+  const [toShowPast, setToShowPast] = useState(false);
 
   const weeks = useMemo(() => getWeeksForRange(startDate, viewRange), [startDate, viewRange]);
   const endDate = useMemo(() => addWeeks(startDate, weeks.length), [startDate, weeks.length]);
@@ -2017,7 +2135,14 @@ export function CapacityPage() {
       api.get<CapProject[]>('/api/capacity/projects'),
       api.get<Allocation[]>(`/api/capacity/allocations?from=${from}&to=${to}&include_tentative=${showTentative}`),
       api.get<WeeklySummary[]>(`/api/capacity/weekly-summary?from=${from}&to=${to}&include_tentative=${showTentative}`),
-      api.get<TimeOffEntry[]>(`/api/capacity/time-off?year=${startDate.getFullYear()}`),
+      // Zeitraum statt Kalenderjahr: die Jahresansicht reicht über den
+      // Jahreswechsel hinaus, mit `year` fehlten die Tage des Folgejahres.
+      // Der Rand von 31 Tagen ist kein Luxus: ein Ferienblock, der über die
+      // Fenstergrenze ragt, wäre sonst nur zur Hälfte geladen — und «Löschen»
+      // träfe dann nur die geladene Hälfte.
+      api.get<TimeOffEntry[]>(
+        `/api/capacity/time-off?from=${toIso(addDays(startDate, -31))}&to=${toIso(addDays(endDate, 31))}`,
+      ),
     ]);
     if (projRes.status === 'fulfilled') setProjects(projRes.value);
     if (allocRes.status === 'fulfilled') setAllocations(allocRes.value);
@@ -2259,26 +2384,115 @@ export function CapacityPage() {
     setBgUrl(url);
   };
 
+  const resetTimeOffForm = () => {
+    setToEditing(null);
+    setToFromDate(''); setToToDate(''); setToType('ferien'); setToLabel(''); setToHours('8');
+  };
+
+  /**
+   * Legt einen Abschnitt an oder ersetzt einen bestehenden.
+   *
+   * Beides läuft über `/time-off/replace`: Anlegen mit leerer ID-Liste,
+   * Bearbeiten mit den IDs des alten Abschnitts. Ein Aufruf pro Tag hätte beim
+   * Verschieben an der Eindeutigkeit des Datums scheitern müssen, sobald sich
+   * alter und neuer Zeitraum überlappen.
+   */
   const handleSaveTimeOff = async () => {
     if (!toFromDate) return;
-    const start = new Date(toFromDate);
-    const end = toToDate ? new Date(toToDate) : start;
-    const hours = parseFloat(toHours) || 8;
-    for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
-      const day = d.getDay();
-      if (day === 0 || day === 6) continue;
-      try {
-        await api.post('/api/capacity/time-off', {
-          date: d.toISOString().slice(0, 10),
+    const bis = toToDate || toFromDate;
+    if (bis < toFromDate) {
+      setToError('«Bis» liegt vor «Von».');
+      return;
+    }
+    const hours = parseFloat(toHours);
+    const days = workdaysBetween(toFromDate, bis);
+    if (days.length === 0) {
+      setToError('Im gewählten Zeitraum liegt kein Arbeitstag (Wochenenden werden übersprungen).');
+      return;
+    }
+    setToError(null);
+    setToBusy(true);
+    try {
+      await api.post('/api/capacity/time-off/replace', {
+        remove_ids: toEditing?.ids ?? [],
+        days: days.map(date => ({
+          date,
           type: toType,
           label: toLabel || null,
-          hours,
-        });
-      } catch { /* Duplikat ignorieren */ }
+          hours: Number.isFinite(hours) ? hours : 8,
+        })),
+      });
+      resetTimeOffForm();
+      await fetchData();
+    } catch (err) {
+      setToError(apiErrorText(err, 'Speichern fehlgeschlagen.'));
+    } finally {
+      setToBusy(false);
     }
-    setTimeOffDialog(false);
-    setToFromDate(''); setToToDate(''); setToLabel(''); setToHours('8');
-    fetchData();
+  };
+
+  const handleEditTimeOffBlock = (block: TimeOffBlock) => {
+    setToError(null);
+    setToEditing(block);
+    setToFromDate(block.from);
+    setToToDate(block.to);
+    setToType(block.type);
+    setToLabel(block.label ?? '');
+    setToHours(String(block.hours));
+  };
+
+  const handleDeleteTimeOffBlock = async (block: TimeOffBlock) => {
+    setToError(null);
+    setToBusy(true);
+    try {
+      await Promise.all(block.ids.map(id => api.delete(`/api/capacity/time-off/${id}`)));
+      if (toEditing?.key === block.key) resetTimeOffForm();
+      await fetchData();
+    } catch (err) {
+      setToError(apiErrorText(err, 'Löschen fehlgeschlagen.'));
+    } finally {
+      setToBusy(false);
+    }
+  };
+
+  /** Verschiebt einen Abschnitt um ganze Wochen — der Wochentag bleibt gleich. */
+  const handleShiftTimeOffBlock = async (block: TimeOffBlock, weeksDelta: number) => {
+    setToError(null);
+    setToBusy(true);
+    try {
+      const von = toIso(addWeeks(fromIso(block.from), weeksDelta));
+      const bis = toIso(addWeeks(fromIso(block.to), weeksDelta));
+      await api.post('/api/capacity/time-off/replace', {
+        remove_ids: block.ids,
+        days: workdaysBetween(von, bis).map(date => ({
+          date,
+          type: block.type,
+          label: block.label,
+          hours: block.hours,
+        })),
+      });
+      if (toEditing?.key === block.key) resetTimeOffForm();
+      await fetchData();
+    } catch (err) {
+      setToError(apiErrorText(err, 'Verschieben fehlgeschlagen.'));
+    } finally {
+      setToBusy(false);
+    }
+  };
+
+  /** Öffnet die Verwaltung, optional auf einen Abschnitt gerichtet. */
+  const openTimeOffDialog = (focusKey?: string, presetFrom?: string) => {
+    resetTimeOffForm();
+    setToError(null);
+    setToShowPast(false);
+    if (presetFrom) setToFromDate(presetFrom);
+    setTimeOffDialog({ open: true, focusKey });
+  };
+
+  const closeTimeOffDialog = () => {
+    setTimeOffDialog({ open: false });
+    resetTimeOffForm();
+    setToError(null);
   };
 
   // ── Toggl Ist-Daten als Wochen-Map für Inline-Anzeige ──────────────────────
@@ -2331,21 +2545,39 @@ export function CapacityPage() {
   const timeOffWeekMap = useMemo(() => {
     const map: Record<string, number> = {};
     for (const t of timeOff) {
-      const d = new Date(t.date);
-      const monday = getMonday(d);
+      const monday = getMonday(fromIso(t.date));
       const key = toIso(monday);
       map[key] = (map[key] || 0) + t.hours;
     }
     const manualDates = new Set(timeOff.map(t => t.date));
     for (const h of computedHolidays) {
       if (manualDates.has(h.date)) continue;
-      const d = new Date(h.date + 'T00:00:00');
-      const monday = getMonday(d);
+      const monday = getMonday(fromIso(h.date));
       const key = toIso(monday);
       map[key] = (map[key] || 0) + 8;
     }
     return map;
   }, [timeOff, computedHolidays]);
+
+  // ── Freie Tage als bedienbare Abschnitte ───────────────────────────────────
+
+  const timeOffBlocks = useMemo(() => groupTimeOffBlocks(timeOff), [timeOff]);
+
+  /** Berner Feiertage im sichtbaren Fenster — Anzeige, nicht bearbeitbar. */
+  const visibleHolidays = useMemo(() => {
+    const manualDates = new Set(timeOff.map(t => t.date));
+    const von = toIso(startDate);
+    const bis = toIso(endDate);
+    return computedHolidays
+      .filter(h => !manualDates.has(h.date) && h.date >= von && h.date <= bis)
+      .sort((a, b) => a.date.localeCompare(b.date));
+  }, [computedHolidays, timeOff, startDate, endDate]);
+
+  /** Abschnitt, der in dieser Woche liegt — für den Klick in die Ferien-Zeile. */
+  const findBlockForWeek = useCallback((weekStart: string): TimeOffBlock | undefined => {
+    const weekEnd = toIso(addDays(fromIso(weekStart), 6));
+    return timeOffBlocks.find(b => b.from <= weekEnd && b.to >= weekStart);
+  }, [timeOffBlocks]);
 
   // ── Render ─────────────────────────────────────────────────────────────────
 
@@ -2417,8 +2649,9 @@ export function CapacityPage() {
             <ChevronRight className="h-4 w-4" />
           </button>
           <button
-            onClick={() => setTimeOffDialog(true)}
+            onClick={() => openTimeOffDialog()}
             className="flex min-h-10 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg border border-amber-300 px-3 py-1.5 text-xs font-medium text-amber-700 hover:bg-amber-50 lg:ml-3 lg:min-h-0 dark:border-amber-700 dark:text-amber-400 dark:hover:bg-amber-900/20"
+            title="Ferien und freie Tage verwalten"
             data-testid="capacity-add-timeoff"
           >
             <Palmtree className="h-3.5 w-3.5" /> Ferien
@@ -2599,10 +2832,15 @@ export function CapacityPage() {
           {/* Ferien-/Feiertags-Zeile */}
           {(timeOff.length > 0 || computedHolidays.length > 0) && (
             <div className="flex items-stretch border-b border-amber-200 dark:border-amber-800/50 bg-amber-50/50 dark:bg-amber-900/10">
-              <div className="flex w-40 min-w-40 shrink-0 lg:w-64 lg:min-w-64 items-center gap-2 border-r border-gray-200 bg-amber-50 px-3 py-1.5 dark:border-gray-700 dark:bg-amber-900/20">
+              <button
+                onClick={() => openTimeOffDialog()}
+                className="flex w-40 min-w-40 shrink-0 lg:w-64 lg:min-w-64 items-center gap-2 border-r border-gray-200 bg-amber-50 px-3 py-1.5 text-left hover:bg-amber-100 dark:border-gray-700 dark:bg-amber-900/20 dark:hover:bg-amber-900/40"
+                title="Ferien und freie Tage verwalten"
+                data-testid="capacity-timeoff-row-label"
+              >
                 <Palmtree className="h-4 w-4 text-amber-500" />
                 <span className="text-xs font-medium text-amber-700 dark:text-amber-400">Ferien / Feiertage</span>
-              </div>
+              </button>
               <div
                 className="shrink-0 border-r border-amber-100 dark:border-amber-900/30"
                 style={{ width: sollIstExpanded ? 120 : 32 }}
@@ -2622,11 +2860,23 @@ export function CapacityPage() {
                   const tooltipParts: string[] = [];
                   if (holidayInfo) tooltipParts.push(holidayInfo.entries.map(e => e.label).join(', '));
                   if (manualHoursOff > 0) tooltipParts.push(`${manualHoursOff}h Ferien`);
+                  const block = findBlockForWeek(weekStr);
+                  tooltipParts.push(block ? 'Klicken zum Ändern oder Löschen' : 'Klicken zum Erfassen');
                   return (
                     <div
                       key={weekStr}
-                      className={`relative flex ${getColClass(viewRange)} items-center justify-center border-r border-amber-100 dark:border-amber-900/30 ${totalOff > 0 ? (totalOff >= 40 ? 'bg-amber-300/60 dark:bg-amber-700/40' : 'bg-amber-200/50 dark:bg-amber-800/30') : ''}`}
-                      title={tooltipParts.length > 0 ? `${formatWeek(week)}: ${tooltipParts.join(' — ')}` : undefined}
+                      role="button"
+                      tabIndex={0}
+                      onClick={() => openTimeOffDialog(block?.key, block ? undefined : weekStr)}
+                      onKeyDown={e => {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                          e.preventDefault();
+                          openTimeOffDialog(block?.key, block ? undefined : weekStr);
+                        }
+                      }}
+                      className={`relative flex ${getColClass(viewRange)} cursor-pointer items-center justify-center border-r border-amber-100 hover:bg-amber-200/70 dark:border-amber-900/30 dark:hover:bg-amber-800/40 ${totalOff > 0 ? (totalOff >= 40 ? 'bg-amber-300/60 dark:bg-amber-700/40' : 'bg-amber-200/50 dark:bg-amber-800/30') : ''}`}
+                      title={`${formatWeek(week)}: ${tooltipParts.join(' — ')}`}
+                      data-testid={`capacity-timeoff-cell-${weekStr}`}
                     >
                       {totalOff > 0 && viewRange !== '1y' && (
                         <span className={`text-[9px] font-medium ${totalOff >= 40 ? 'text-amber-800 dark:text-amber-300' : 'text-amber-600 dark:text-amber-400'}`}>
@@ -2839,72 +3089,210 @@ export function CapacityPage() {
         );
       })()}
 
-      {/* Ferien-Dialog */}
-      {timeOffDialog && (
+      {/* Ferien-Dialog: Verwaltung bestehender Abschnitte plus Erfassung */}
+      {timeOffDialog.open && (() => {
+        const heute = toIso(new Date());
+        const kommend = timeOffBlocks.filter(b => b.to >= heute);
+        const vergangen = timeOffBlocks.filter(b => b.to < heute).reverse();
+
+        const blockZeile = (block: TimeOffBlock) => {
+          const inBearbeitung = toEditing?.key === block.key;
+          const fokussiert = timeOffDialog.focusKey === block.key;
+          return (
+            <li
+              key={block.key}
+              className={`rounded-lg border px-3 py-2 ${inBearbeitung || fokussiert
+                ? 'border-amber-400 bg-amber-50 dark:border-amber-600 dark:bg-amber-900/20'
+                : 'border-gray-200 dark:border-gray-700'}`}
+              data-testid="capacity-timeoff-block"
+            >
+              <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                <span className="text-sm font-medium text-gray-800 dark:text-gray-100">
+                  {block.from === block.to
+                    ? formatDay(block.from)
+                    : `${formatDay(block.from)} – ${formatDay(block.to)}`}
+                </span>
+                <span className="rounded-full bg-gray-100 px-2 py-0.5 text-[11px] text-gray-600 dark:bg-gray-800 dark:text-gray-300">
+                  {TIME_OFF_TYPE_LABEL[block.type] ?? block.type}
+                </span>
+                <span className="text-[11px] text-gray-500 dark:text-gray-400">
+                  {block.dayCount} {block.dayCount === 1 ? 'Tag' : 'Tage'} · {block.hours}h/Tag
+                </span>
+                {block.label && (
+                  <span className="text-[11px] text-gray-500 italic dark:text-gray-400">{block.label}</span>
+                )}
+              </div>
+              <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                <button
+                  onClick={() => handleEditTimeOffBlock(block)}
+                  disabled={toBusy}
+                  className="flex items-center gap-1 rounded-md border border-gray-300 px-2 py-1 text-[11px] font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50 dark:border-gray-600 dark:text-gray-200 dark:hover:bg-gray-800"
+                  data-testid="capacity-timeoff-edit"
+                >
+                  <Pencil className="h-3 w-3" /> Bearbeiten
+                </button>
+                <button
+                  onClick={() => handleShiftTimeOffBlock(block, -1)}
+                  disabled={toBusy}
+                  className="rounded-md border border-gray-300 px-2 py-1 text-[11px] font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50 dark:border-gray-600 dark:text-gray-200 dark:hover:bg-gray-800"
+                  data-testid="capacity-timeoff-shift-back"
+                >
+                  −1 Woche
+                </button>
+                <button
+                  onClick={() => handleShiftTimeOffBlock(block, 1)}
+                  disabled={toBusy}
+                  className="rounded-md border border-gray-300 px-2 py-1 text-[11px] font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50 dark:border-gray-600 dark:text-gray-200 dark:hover:bg-gray-800"
+                  data-testid="capacity-timeoff-shift-forward"
+                >
+                  +1 Woche
+                </button>
+                {/* Umfang im Text: zehn Zeilen verschwinden sonst unbemerkt. */}
+                <button
+                  onClick={() => handleDeleteTimeOffBlock(block)}
+                  disabled={toBusy}
+                  className="ml-auto flex items-center gap-1 rounded-md bg-red-600 px-2 py-1 text-[11px] font-medium text-white hover:bg-red-700 disabled:opacity-50"
+                  data-testid="capacity-timeoff-delete"
+                >
+                  <Trash2 className="h-3 w-3" /> Löschen ({block.dayCount} {block.dayCount === 1 ? 'Tag' : 'Tage'})
+                </button>
+              </div>
+            </li>
+          );
+        };
+
+        return (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm modal-safe" data-testid="capacity-timeoff-dialog">
-          <div className="w-full max-w-sm rounded-xl border border-gray-200 bg-white p-6 shadow-2xl dark:border-gray-700 dark:bg-gray-900">
+          <div className="max-h-[85vh] w-full max-w-2xl overflow-y-auto rounded-xl border border-gray-200 bg-white p-6 shadow-2xl dark:border-gray-700 dark:bg-gray-900">
             <div className="mb-4 flex items-center justify-between">
               <h3 className="text-lg font-semibold text-gray-800 dark:text-gray-100">Ferien / freie Tage</h3>
-              <button onClick={() => setTimeOffDialog(false)} className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300">
+              <button onClick={closeTimeOffDialog} className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300">
                 <X className="h-5 w-5" />
               </button>
             </div>
-            <div className="space-y-3">
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="mb-1 block text-xs font-medium text-gray-700 dark:text-gray-300">Von</label>
-                  <input type="date" value={toFromDate} onChange={e => setToFromDate(e.target.value)}
-                    className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm dark:border-gray-600 dark:bg-gray-800 dark:text-gray-200"
-                    data-testid="capacity-timeoff-from" />
-                </div>
-                <div>
-                  <label className="mb-1 block text-xs font-medium text-gray-700 dark:text-gray-300">Bis (optional)</label>
-                  <input type="date" value={toToDate} min={toFromDate || undefined} onChange={e => setToToDate(e.target.value)}
-                    className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm dark:border-gray-600 dark:bg-gray-800 dark:text-gray-200"
-                    data-testid="capacity-timeoff-to" />
-                </div>
+
+            {toError && (
+              <div className="mb-4 flex items-start gap-2 rounded-lg border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-700 dark:border-red-700 dark:bg-red-900/30 dark:text-red-200" data-testid="capacity-timeoff-error">
+                <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+                <span>{toError}</span>
               </div>
-              <div>
-                <label className="mb-1 block text-xs font-medium text-gray-700 dark:text-gray-300">Typ</label>
-                <select value={toType} onChange={e => setToType(e.target.value)}
-                  className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm dark:border-gray-600 dark:bg-gray-800 dark:text-gray-200"
-                  data-testid="capacity-timeoff-type">
-                  <option value="ferien">Ferien</option>
-                  <option value="feiertag">Feiertag</option>
-                  <option value="krank">Krank</option>
-                  <option value="sonstiges">Sonstiges</option>
-                </select>
-              </div>
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="mb-1 block text-xs font-medium text-gray-700 dark:text-gray-300">Bezeichnung</label>
-                  <input type="text" value={toLabel} onChange={e => setToLabel(e.target.value)}
-                    placeholder="z.B. Sommerferien"
-                    className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm dark:border-gray-600 dark:bg-gray-800 dark:text-gray-200"
-                    data-testid="capacity-timeoff-label" />
-                </div>
-                <div>
-                  <label className="mb-1 block text-xs font-medium text-gray-700 dark:text-gray-300">Stunden/Tag</label>
-                  <input type="number" min="1" max="12" value={toHours} onChange={e => setToHours(e.target.value)}
-                    className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm dark:border-gray-600 dark:bg-gray-800 dark:text-gray-200"
-                    data-testid="capacity-timeoff-hours" />
-                </div>
-              </div>
-              <p className="text-xs text-gray-400">8h = ganzer Tag, 4h = halber Tag. Wochenenden werden übersprungen.</p>
+            )}
+
+            {/* Bestehende Abschnitte zuerst — das ist der Grund, warum man hier ist. */}
+            <div className="mb-5">
+              <h4 className="mb-2 text-xs font-semibold uppercase text-gray-500 dark:text-gray-400">Erfasst</h4>
+              {timeOffBlocks.length === 0 ? (
+                <p className="text-sm text-gray-400 dark:text-gray-500">
+                  Im sichtbaren Zeitraum sind keine freien Tage erfasst.
+                </p>
+              ) : (
+                <ul className="space-y-2" data-testid="capacity-timeoff-list">
+                  {kommend.map(blockZeile)}
+                  {vergangen.length > 0 && (
+                    <li>
+                      <button
+                        onClick={() => setToShowPast(v => !v)}
+                        className="flex items-center gap-1.5 py-1 text-xs font-medium text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
+                        data-testid="capacity-timeoff-past-toggle"
+                      >
+                        {toShowPast ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
+                        Vergangene ({vergangen.length})
+                      </button>
+                    </li>
+                  )}
+                  {toShowPast && vergangen.map(blockZeile)}
+                </ul>
+              )}
             </div>
-            <div className="mt-5 flex justify-end gap-2">
-              <button onClick={() => setTimeOffDialog(false)} className="rounded-lg border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 dark:border-gray-600 dark:text-gray-300 dark:hover:bg-gray-800">
-                Abbrechen
-              </button>
-              <button onClick={handleSaveTimeOff} disabled={!toFromDate}
-                className="rounded-lg bg-amber-600 px-4 py-2 text-sm font-medium text-white hover:bg-amber-700 disabled:opacity-50"
-                data-testid="capacity-timeoff-save">
-                Speichern
-              </button>
+
+            {/* Feiertage: Formel, kein Datensatz — darum ohne Knöpfe. */}
+            {visibleHolidays.length > 0 && (
+              <div className="mb-5">
+                <h4 className="mb-2 text-xs font-semibold uppercase text-gray-500 dark:text-gray-400">Kalender (Bern)</h4>
+                <p className="mb-2 text-xs text-gray-400 dark:text-gray-500">
+                  Feiertage berechnet TaskPilot aus dem Kalender. Sie sind kein Eintrag und
+                  lassen sich darum nicht löschen oder verschieben. Wer an einem dieser Tage
+                  arbeitet, plant die Kapazität einfach wie gewohnt ein.
+                </p>
+                <ul className="flex flex-wrap gap-1.5" data-testid="capacity-timeoff-holidays">
+                  {visibleHolidays.map(h => (
+                    <li key={h.date} className="rounded-md bg-gray-100 px-2 py-1 text-[11px] text-gray-500 dark:bg-gray-800 dark:text-gray-400">
+                      {formatDay(h.date)} · {h.label}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            <div className="border-t border-gray-200 pt-4 dark:border-gray-700">
+              <h4 className="mb-2 text-xs font-semibold uppercase text-gray-500 dark:text-gray-400">
+                {toEditing ? 'Abschnitt bearbeiten' : 'Neu erfassen'}
+              </h4>
+              <div className="space-y-3">
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="mb-1 block text-xs font-medium text-gray-700 dark:text-gray-300">Von</label>
+                    <input type="date" value={toFromDate} onChange={e => setToFromDate(e.target.value)}
+                      className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm dark:border-gray-600 dark:bg-gray-800 dark:text-gray-200"
+                      data-testid="capacity-timeoff-from" />
+                  </div>
+                  <div>
+                    <label className="mb-1 block text-xs font-medium text-gray-700 dark:text-gray-300">Bis (optional)</label>
+                    <input type="date" value={toToDate} min={toFromDate || undefined} onChange={e => setToToDate(e.target.value)}
+                      className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm dark:border-gray-600 dark:bg-gray-800 dark:text-gray-200"
+                      data-testid="capacity-timeoff-to" />
+                  </div>
+                </div>
+                <div>
+                  <label className="mb-1 block text-xs font-medium text-gray-700 dark:text-gray-300">Typ</label>
+                  <select value={toType} onChange={e => setToType(e.target.value)}
+                    className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm dark:border-gray-600 dark:bg-gray-800 dark:text-gray-200"
+                    data-testid="capacity-timeoff-type">
+                    <option value="ferien">Ferien</option>
+                    <option value="feiertag">Feiertag</option>
+                    <option value="krank">Krank</option>
+                    <option value="sonstiges">Sonstiges</option>
+                  </select>
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="mb-1 block text-xs font-medium text-gray-700 dark:text-gray-300">Bezeichnung</label>
+                    <input type="text" value={toLabel} onChange={e => setToLabel(e.target.value)}
+                      placeholder="z.B. Sommerferien"
+                      className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm dark:border-gray-600 dark:bg-gray-800 dark:text-gray-200"
+                      data-testid="capacity-timeoff-label" />
+                  </div>
+                  <div>
+                    <label className="mb-1 block text-xs font-medium text-gray-700 dark:text-gray-300">Stunden/Tag</label>
+                    <input type="number" min="1" max="12" value={toHours} onChange={e => setToHours(e.target.value)}
+                      className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm dark:border-gray-600 dark:bg-gray-800 dark:text-gray-200"
+                      data-testid="capacity-timeoff-hours" />
+                  </div>
+                </div>
+                <p className="text-xs text-gray-400">8h = ganzer Tag, 4h = halber Tag. Wochenenden werden übersprungen.</p>
+              </div>
+              <div className="mt-5 flex justify-end gap-2">
+                {toEditing ? (
+                  <button onClick={resetTimeOffForm} disabled={toBusy}
+                    className="rounded-lg border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50 dark:border-gray-600 dark:text-gray-300 dark:hover:bg-gray-800">
+                    Bearbeiten abbrechen
+                  </button>
+                ) : (
+                  <button onClick={closeTimeOffDialog} className="rounded-lg border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 dark:border-gray-600 dark:text-gray-300 dark:hover:bg-gray-800">
+                    Schliessen
+                  </button>
+                )}
+                <button onClick={handleSaveTimeOff} disabled={!toFromDate || toBusy}
+                  className="rounded-lg bg-amber-600 px-4 py-2 text-sm font-medium text-white hover:bg-amber-700 disabled:opacity-50"
+                  data-testid="capacity-timeoff-save">
+                  {toEditing ? 'Änderung speichern' : 'Speichern'}
+                </button>
+              </div>
             </div>
           </div>
         </div>
-      )}
+        );
+      })()}
 
       {/* BackgroundPicker */}
       <BackgroundPicker
