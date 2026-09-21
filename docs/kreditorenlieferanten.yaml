@@ -1,0 +1,1413 @@
+# Kreditorenlieferanten — was wir über einen Lieferanten erwarten
+#
+# Die Datei hält fest, was bei einer eingehenden Rechnung erwartet wird: in
+# welchen Archivordner sie gehört, auf welches Konto sie üblicherweise läuft,
+# ob Bezugssteuer anfällt, wie bezahlt wird und in welchem Takt etwas kommt.
+#
+# ## Eine Erwartung ist keine Tatsache
+#
+# Jeder Wert hier ist ein **Vorschlag mit Datum**, keine Regel. Ein Lieferant
+# kann anfangen, Schweizer Mehrwertsteuer auszuweisen; dann ist die bisherige
+# Bezugssteuer nicht falsch gewesen, sondern überholt — und bekommt eine neue
+# Zeile mit `ab:`, statt dass die alte überschrieben wird. Eine Abweichung ist
+# deshalb eine **Frage**, deren Antwort diese Datei fortschreibt, und kein
+# Fehler.
+#
+# ## Das Konto hängt an der Rechnung, nicht am Lieferanten
+#
+# Gemessen am 21.09.2026: bei 87 % der Kartenbuchungen 2026 hat der Lieferant
+# historisch immer dasselbe Konto — dort trägt ein Vorschlag. Bei Hosttech und
+# Metanet trägt er nicht, weil dieselbe Domain einmal eigener Aufwand (6512)
+# und einmal weiterverrechnete Leistung (4200) ist. Solche Einträge führen
+# `sollkonto_kandidaten` statt `sollkonto` und verlangen eine Entscheidung je
+# Rechnung. Ein einzelner erwarteter Wert wäre dort Scheingenauigkeit.
+#
+# ## Die Schreibweisen sind eine Altlast mit Verfallsdatum
+#
+# Solange die Treuhänderin bucht, ist der Beschreibungstext die einzige Spur
+# vom Beleg zur Buchung — und das Journal führt `Anthropic` neben `Antrophic`,
+# `Euromaster` neben `Eruomaster`. Sobald TaskPilot selbst bucht, schreibt es
+# seine eigene Kennung in die Buchung, und der Abgleich hängt nicht mehr am
+# Namen.
+#
+# ## Gepflegt wird sie nicht von Hand
+#
+# Sie wird geschrieben, nicht editiert — wie `kundenschluessel.yaml`. Eine
+# Maschine darf **hinzufügen, nie ändern oder entfernen**. `bestaetigt: false`
+# heisst: aus der Historie vorgeschlagen, von niemandem geprüft.
+
+version: 1
+stand: 2026-09-21
+
+lieferanten:
+
+  - schluessel: 1password
+    ordner: 1Password
+    sollkonto: "6570"   # einstimmig, 5 Buchungen
+    zahlweg: karte
+    steuer:
+      - ab: null
+        behandlung: unbekannt   # weder Rechnung noch Buchung geben Auskunft
+    rhythmus: jaehrlich   # 5 belegte Monate, 2022-08-10..2026-08-10
+    aktiv: true
+    bestaetigt: false
+
+  - schluessel: 2checkout
+    ordner: 2checkout
+    # Keine eigene Buchung im Journal seit 2019 —
+    # der Ordner besteht, die Deklaration wartet auf den ersten Beleg.
+    belege_bis: 2022
+    bestaetigt: false
+
+  - schluessel: 99designs
+    ordner: 99Designs
+    # Keine eigene Buchung im Journal seit 2019 —
+    # der Ordner besteht, die Deklaration wartet auf den ersten Beleg.
+    belege_bis: 2019
+    bestaetigt: false
+
+  - schluessel: affinity
+    ordner: Affinity
+    # Keine eigene Buchung im Journal seit 2019 —
+    # der Ordner besteht, die Deklaration wartet auf den ersten Beleg.
+    belege_bis: 2022
+    bestaetigt: false
+
+  - schluessel: aioseo
+    ordner: AIOSEO
+    sollkonto: "6570"   # einstimmig, 3 Buchungen
+    zahlweg: karte
+    steuer:
+      - ab: 2025-05-23
+        behandlung: bezugssteuer   # keine von 1 Rechnungen weist MWST aus, Sitz im Ausland
+    rhythmus: jaehrlich   # 3 belegte Monate, 2023-05-22..2025-05-23
+    aktiv: true
+    bestaetigt: false
+
+  - schluessel: amazon
+    ordner: Amazon
+    # Keine eigene Buchung im Journal seit 2019 —
+    # der Ordner besteht, die Deklaration wartet auf den ersten Beleg.
+    belege_bis: 2023
+    bestaetigt: false
+
+  - schluessel: anthropic
+    ordner: Anthropic
+    sollkonto: "6570"   # einstimmig, 5 Buchungen
+    zahlweg: karte
+    steuer:
+      - ab: 2026-02-15
+        behandlung: inland_mwst   # 4 von 4 Rechnungen weisen MWST aus
+    rhythmus: unregelmaessig   # 5 belegte Monate, 2026-02-15..2026-09-10
+    aktiv: true
+    bestaetigt: false
+
+  - schluessel: apfelkiste
+    ordner: Apfelkiste
+    # Keine eigene Buchung im Journal seit 2019 —
+    # der Ordner besteht, die Deklaration wartet auf den ersten Beleg.
+    belege_bis: 2022
+    bestaetigt: false
+
+  - schluessel: apple
+    ordner: Apple
+    sollkonto_kandidaten: ["6510", "6570"]   # 6510: 1, 6570: 1
+    sollkonto_entscheid: je_rechnung
+    zahlweg: karte
+    steuer:
+      - ab: 2019-09-08
+        behandlung: inland_mwst   # 20 von 20 Rechnungen weisen MWST aus
+    rhythmus: unbekannt   # 2 belegte Monate, 2021-03-01..2021-05-14
+    aktiv: true
+    bestaetigt: false
+
+  - schluessel: argyou
+    ordner: ArgYou
+    # Keine eigene Buchung im Journal seit 2019 —
+    # der Ordner besteht, die Deklaration wartet auf den ersten Beleg.
+    belege_bis: 2022
+    bestaetigt: false
+
+  - schluessel: arlo
+    ordner: Arlo
+    # Keine eigene Buchung im Journal seit 2019 —
+    # der Ordner besteht, die Deklaration wartet auf den ersten Beleg.
+    belege_bis: 2023
+    bestaetigt: false
+
+  - schluessel: asga
+    ordner: Asga
+    nebenordner: [_DOKUMENTE]
+    sollkonto: "5720"   # einstimmig, 3 Buchungen
+    zahlweg: rechnung
+    steuer:
+      - ab: null
+        behandlung: unbekannt   # weder Rechnung noch Buchung geben Auskunft
+    rhythmus: unregelmaessig   # 3 belegte Monate, 2026-03-12..2026-09-10
+    aktiv: true
+    bestaetigt: false
+
+  - schluessel: assist_admin
+    ordner: Assist-admin
+    # Keine eigene Buchung im Journal seit 2019 —
+    # der Ordner besteht, die Deklaration wartet auf den ersten Beleg.
+    belege_bis: 2025
+    bestaetigt: false
+
+  - schluessel: ausgleichskasse
+    ordner: Ausgleichskasse
+    nebenordner: [_DOKUMENTE]
+    sollkonto_kandidaten: ["5700", "8610"]   # 5700: 74, 8610: 1
+    sollkonto_entscheid: je_rechnung
+    zahlweg: rechnung
+    steuer:
+      - ab: 2019-05-09
+        behandlung: ohne_mwst   # keine von 62 Rechnungen weist MWST aus, inländisch befreit
+    rhythmus: monatlich   # 72 belegte Monate, 2019-12-04..2026-09-07
+    aktiv: true
+    bestaetigt: false
+
+  - schluessel: axa_winterthur
+    ordner: AXA Winterthur
+    # Keine eigene Buchung im Journal seit 2019 —
+    # der Ordner besteht, die Deklaration wartet auf den ersten Beleg.
+    belege_bis: 2023
+    bestaetigt: false
+
+  - schluessel: bazg
+    ordner: BAZG
+    # Keine eigene Buchung im Journal seit 2019 —
+    # der Ordner besteht, die Deklaration wartet auf den ersten Beleg.
+    belege_bis: 2025
+    bestaetigt: false
+
+  - schluessel: beat_buergin_elektro
+    ordner: Beat Bürgin Elektro
+    # Keine eigene Buchung im Journal seit 2019 —
+    # der Ordner besteht, die Deklaration wartet auf den ersten Beleg.
+    belege_bis: 2021
+    bestaetigt: false
+
+  - schluessel: bestwebsoft
+    ordner: BestWebSoft
+    # Keine eigene Buchung im Journal seit 2019 —
+    # der Ordner besteht, die Deklaration wartet auf den ersten Beleg.
+    belege_bis: 2019
+    bestaetigt: false
+
+  - schluessel: bexio
+    ordner: Bexio
+    sollkonto_kandidaten: ["6570", "4200"]   # 6570: 6, 4200: 2
+    sollkonto_entscheid: je_rechnung
+    zahlweg: rechnung
+    steuer:
+      - ab: null
+        behandlung: unbekannt   # weder Rechnung noch Buchung geben Auskunft
+    rhythmus: jaehrlich   # 8 belegte Monate, 2019-03-28..2026-04-21
+    aktiv: true
+    bestaetigt: false
+
+  - schluessel: blinkist
+    ordner: Blinkist
+    # Keine eigene Buchung im Journal seit 2019 —
+    # der Ordner besteht, die Deklaration wartet auf den ersten Beleg.
+    belege_bis: 2019
+    bestaetigt: false
+
+  - schluessel: brainstorm
+    ordner: Brainstorm
+    # Keine eigene Buchung im Journal seit 2019 —
+    # der Ordner besteht, die Deklaration wartet auf den ersten Beleg.
+    belege_bis: 2022
+    bestaetigt: false
+
+  - schluessel: branding_fotografie
+    ordner: Branding Fotografie
+    # Keine eigene Buchung im Journal seit 2019 —
+    # der Ordner besteht, die Deklaration wartet auf den ersten Beleg.
+    belege_bis: 2025
+    bestaetigt: false
+
+  - schluessel: buddyboss
+    ordner: BuddyBoss
+    # Keine eigene Buchung im Journal seit 2019 —
+    # der Ordner besteht, die Deklaration wartet auf den ersten Beleg.
+    belege_bis: 2020
+    bestaetigt: false
+
+  - schluessel: calendly_llc
+    ordner: Calendly LLC
+    sollkonto: "6570"   # einstimmig, 7 Buchungen
+    zahlweg: karte
+    steuer:
+      - ab: 2020-03-05
+        behandlung: bezugssteuer   # keine von 3 Rechnungen weist MWST aus, Sitz im Ausland
+    rhythmus: jaehrlich   # 7 belegte Monate, 2020-03-05..2026-03-05
+    aktiv: true
+    bestaetigt: false
+
+  - schluessel: casa_nobile
+    ordner: Casa Nobile
+    # Keine eigene Buchung im Journal seit 2019 —
+    # der Ordner besteht, die Deklaration wartet auf den ersten Beleg.
+    belege_bis: 2021
+    bestaetigt: false
+
+  - schluessel: cloudflare
+    ordner: Cloudflare
+    sollkonto: "6512"   # einstimmig, 1 Buchungen
+    zahlweg: karte
+    steuer:
+      - ab: 2026-03-20
+        behandlung: bezugssteuer   # keine von 1 Rechnungen weist MWST aus, Sitz im Ausland
+    rhythmus: unbekannt   # 1 belegte Monate, 2026-03-20..2026-03-20
+    aktiv: true
+    bestaetigt: false
+
+  - schluessel: compass_group
+    ordner: Compass Group
+    # Keine eigene Buchung im Journal seit 2019 —
+    # der Ordner besteht, die Deklaration wartet auf den ersten Beleg.
+    belege_bis: 2019
+    bestaetigt: false
+
+  - schluessel: css_hero_hasanudin
+    ordner: CSS Hero Hasanudin
+    # Keine eigene Buchung im Journal seit 2019 —
+    # der Ordner besteht, die Deklaration wartet auf den ersten Beleg.
+    belege_bis: 2020
+    bestaetigt: false
+
+  - schluessel: cursor
+    ordner: Cursor
+    sollkonto: "6570"   # einstimmig, 48 Buchungen
+    zahlweg: karte
+    steuer:
+      - ab: 2024-10-20
+        behandlung: bezugssteuer   # keine von 50 Rechnungen weist MWST aus, Sitz im Ausland
+    rhythmus: monatlich   # 19 belegte Monate, 2024-10-20..2026-09-21
+    aktiv: true
+    bestaetigt: false
+
+  - schluessel: decidim
+    ordner: Decidim
+    sollkonto: "6520"   # einstimmig, 1 Buchungen
+    zahlweg: karte
+    steuer:
+      - ab: 2026-02-09
+        behandlung: bezugssteuer   # 1 Gegenzeilen auf 2203, keine Rechnung gelesen
+    rhythmus: unbekannt   # 1 belegte Monate, 2026-02-09..2026-02-09
+    aktiv: true
+    bestaetigt: false
+
+  - schluessel: dextra
+    ordner: Dextra
+    # Keine eigene Buchung im Journal seit 2019 —
+    # der Ordner besteht, die Deklaration wartet auf den ersten Beleg.
+    belege_bis: 2024
+    bestaetigt: false
+
+  - schluessel: dhl
+    ordner: DHL
+    # Keine eigene Buchung im Journal seit 2019 —
+    # der Ordner besteht, die Deklaration wartet auf den ersten Beleg.
+    belege_bis: 2023
+    bestaetigt: false
+
+  - schluessel: digital_impact_network
+    ordner: Digital Impact Network
+    sollkonto: "6520"   # einstimmig, 1 Buchungen
+    zahlweg: rechnung
+    steuer:
+      - ab: null
+        behandlung: unbekannt   # weder Rechnung noch Buchung geben Auskunft
+    rhythmus: unbekannt   # 1 belegte Monate, 2026-05-06..2026-05-06
+    aktiv: true
+    bestaetigt: false
+
+  - schluessel: digitec
+    ordner: Digitec
+    sollkonto_kandidaten: ["6571", "6500"]   # 6571: 5, 6500: 1
+    sollkonto_entscheid: je_rechnung
+    regel: >-
+      in der Regel 6571 Hardware fuer den eigenen Bedarf
+    zahlweg: karte
+    steuer:
+      - ab: 2019-02-20
+        behandlung: inland_mwst   # 28 von 28 Rechnungen weisen MWST aus
+    rhythmus: jaehrlich   # 4 belegte Monate, 2022-07-15..2026-07-28
+    aktiv: true
+    bestaetigt: false
+
+  - schluessel: diverse
+    ordner: Diverse
+    nebenordner: [_DOKUMENTE]
+    # Keine eigene Buchung im Journal seit 2019 —
+    # der Ordner besteht, die Deklaration wartet auf den ersten Beleg.
+    belege_bis: 2019
+    bestaetigt: false
+
+  - schluessel: dpd
+    ordner: DPD
+    # Keine eigene Buchung im Journal seit 2019 —
+    # der Ordner besteht, die Deklaration wartet auf den ersten Beleg.
+    belege_bis: 2025
+    bestaetigt: false
+
+  - schluessel: dropbox
+    ordner: DropBox
+    beendet: 2026-09-21   # Anthony: kein offener Dienst mehr
+    sollkonto: "6570"   # einstimmig, 6 Buchungen
+    zahlweg: karte
+    steuer:
+      - ab: 2022-08-16
+        behandlung: inland_mwst   # 4 von 6 Rechnungen weisen MWST aus
+    rhythmus: jaehrlich   # 5 belegte Monate, 2020-01-28..2025-01-28
+    aktiv: false
+    bestaetigt: false
+
+  - schluessel: dyson
+    ordner: Dyson
+    # Keine eigene Buchung im Journal seit 2019 —
+    # der Ordner besteht, die Deklaration wartet auf den ersten Beleg.
+    belege_bis: 2023
+    bestaetigt: false
+
+  - schluessel: elementor
+    ordner: Elementor
+    sollkonto_kandidaten: ["6570", "4200"]   # 6570: 5, 4200: 1
+    sollkonto_entscheid: je_rechnung
+    zahlweg: karte
+    steuer:
+      - ab: 2021-01-02
+        behandlung: bezugssteuer   # keine von 6 Rechnungen weist MWST aus, Sitz im Ausland
+    rhythmus: jaehrlich   # 6 belegte Monate, 2021-01-02..2025-08-28
+    aktiv: true
+    bestaetigt: false
+
+  - schluessel: enuvo
+    ordner: Enuvo
+    # Keine eigene Buchung im Journal seit 2019 —
+    # der Ordner besteht, die Deklaration wartet auf den ersten Beleg.
+    belege_bis: 2021
+    bestaetigt: false
+
+  - schluessel: essensspesen
+    ordner: Essensspesen
+    # Keine eigene Buchung im Journal seit 2019 —
+    # der Ordner besteht, die Deklaration wartet auf den ersten Beleg.
+    belege_bis: 2021
+    bestaetigt: false
+
+  - schluessel: estv
+    ordner: ESTV
+    # Keine eigene Buchung im Journal seit 2019 —
+    # der Ordner besteht, die Deklaration wartet auf den ersten Beleg.
+    belege_bis: 2026
+    bestaetigt: false
+
+  - schluessel: euromaster
+    ordner: EuroMaster
+    sollkonto: "6200"   # einstimmig, 8 Buchungen
+    zahlweg: karte
+    steuer:
+      - ab: 2022-04-22
+        behandlung: inland_mwst   # 7 von 7 Rechnungen weisen MWST aus
+    rhythmus: jaehrlich   # 8 belegte Monate, 2022-11-11..2026-05-07
+    aktiv: true
+    bestaetigt: false
+
+  - schluessel: ex_libris
+    ordner: ex-libris
+    # Keine eigene Buchung im Journal seit 2019 —
+    # der Ordner besteht, die Deklaration wartet auf den ersten Beleg.
+    belege_bis: 2022
+    bestaetigt: false
+
+  - schluessel: excitor
+    ordner: Excitor
+    # Keine eigene Buchung im Journal seit 2019 —
+    # der Ordner besteht, die Deklaration wartet auf den ersten Beleg.
+    belege_bis: 2020
+    bestaetigt: false
+
+  - schluessel: figma
+    ordner: Figma
+    sollkonto: "6570"   # einstimmig, 1 Buchungen
+    zahlweg: karte
+    steuer:
+      - ab: 2025-09-11
+        behandlung: inland_mwst   # 1 von 1 Rechnungen weisen MWST aus
+    rhythmus: unbekannt   # 1 belegte Monate, 2025-09-11..2025-09-11
+    aktiv: true
+    bestaetigt: false
+
+  - schluessel: filament
+    ordner: Filament
+    # Keine eigene Buchung im Journal seit 2019 —
+    # der Ordner besteht, die Deklaration wartet auf den ersten Beleg.
+    belege_bis: 2022
+    bestaetigt: false
+
+  - schluessel: florian_salman_ug
+    ordner: Florian Salman UG
+    sollkonto: "6512"   # einstimmig, 1 Buchungen
+    zahlweg: karte
+    steuer:
+      - ab: 2025-06-13
+        behandlung: bezugssteuer   # keine von 1 Rechnungen weist MWST aus, Sitz im Ausland
+    rhythmus: unbekannt   # 1 belegte Monate, 2025-06-24..2025-06-24
+    aktiv: true
+    bestaetigt: false
+
+  - schluessel: flyerking
+    ordner: Flyerking
+    # Keine eigene Buchung im Journal seit 2019 —
+    # der Ordner besteht, die Deklaration wartet auf den ersten Beleg.
+    belege_bis: 2019
+    bestaetigt: false
+
+  - schluessel: freepik
+    ordner: Freepik
+    beendet: 2026-09-21   # Anthony: kein offener Dienst mehr
+    sollkonto: "6570"   # einstimmig, 4 Buchungen
+    zahlweg: karte
+    steuer:
+      - ab: 2024-08-20
+        behandlung: bezugssteuer   # 2 Gegenzeilen auf 2203, keine Rechnung gelesen
+    rhythmus: jaehrlich   # 4 belegte Monate, 2022-08-20..2025-08-20
+    aktiv: false
+    bestaetigt: false
+
+  - schluessel: fruugo
+    ordner: Fruugo
+    # Keine eigene Buchung im Journal seit 2019 —
+    # der Ordner besteht, die Deklaration wartet auf den ersten Beleg.
+    belege_bis: 2023
+    bestaetigt: false
+
+  - schluessel: galaxus
+    ordner: Galaxus
+    sollkonto: "6500"   # einstimmig, 1 Buchungen
+    zahlweg: karte
+    steuer:
+      - ab: null
+        behandlung: unbekannt   # weder Rechnung noch Buchung geben Auskunft
+    rhythmus: unbekannt   # 1 belegte Monate, 2026-07-24..2026-07-24
+    aktiv: true
+    bestaetigt: false
+
+  - schluessel: gasser_bertschy_elektro
+    ordner: Gasser Bertschy Elektro
+    sollkonto: "6200"   # einstimmig, 1 Buchungen
+    zahlweg: rechnung
+    steuer:
+      - ab: null
+        behandlung: unbekannt   # weder Rechnung noch Buchung geben Auskunft
+    rhythmus: unbekannt   # 1 belegte Monate, 2025-10-17..2025-10-17
+    aktiv: true
+    bestaetigt: false
+
+  - schluessel: getabstract
+    ordner: getAbstract
+    sollkonto: "6570"   # einstimmig, 6 Buchungen
+    zahlweg: karte
+    steuer:
+      - ab: 2018-12-30
+        behandlung: inland_mwst   # 4 von 4 Rechnungen weisen MWST aus
+    rhythmus: jaehrlich   # 6 belegte Monate, 2019-07-14..2026-01-01
+    aktiv: true
+    bestaetigt: false
+
+  - schluessel: godaddy
+    ordner: GoDaddy
+    # Keine eigene Buchung im Journal seit 2019 —
+    # der Ordner besteht, die Deklaration wartet auf den ersten Beleg.
+    belege_bis: 2019
+    bestaetigt: false
+
+  - schluessel: gomo_salt
+    ordner: GoMo Salt
+    nebenordner: [Tarife GoMo+, Vertrag]
+    sollkonto: "6510"   # einstimmig, 26 Buchungen
+    zahlweg: karte
+    steuer:
+      - ab: 2022-07-13
+        behandlung: inland_mwst   # 29 von 29 Rechnungen weisen MWST aus
+    rhythmus: monatlich   # 26 belegte Monate, 2022-07-13..2024-11-05
+    aktiv: false
+    bestaetigt: false
+
+  - schluessel: google
+    ordner: Google
+    sollkonto: "6570"   # einstimmig, 32 Buchungen
+    zahlweg: karte
+    steuer:
+      - ab: 2025-01-08
+        behandlung: inland_mwst   # 37 von 37 Rechnungen weisen MWST aus
+    rhythmus: monatlich   # 15 belegte Monate, 2025-06-25..2026-09-20
+    aktiv: true
+    bestaetigt: false
+
+  - schluessel: gpgtools
+    ordner: GPGTools
+    # Keine eigene Buchung im Journal seit 2019 —
+    # der Ordner besteht, die Deklaration wartet auf den ersten Beleg.
+    belege_bis: 2022
+    bestaetigt: false
+
+  - schluessel: handelsregisteramt_kt_bern
+    ordner: Handelsregisteramt Kt. Bern
+    sollkonto: "6520"   # einstimmig, 1 Buchungen
+    zahlweg: rechnung
+    steuer:
+      - ab: null
+        behandlung: unbekannt   # weder Rechnung noch Buchung geben Auskunft
+    rhythmus: unbekannt   # 1 belegte Monate, 2025-09-12..2025-09-12
+    aktiv: true
+    bestaetigt: false
+
+  - schluessel: harvest_forecast
+    ordner: Harvest Forecast
+    # Keine eigene Buchung im Journal seit 2019 —
+    # der Ordner besteht, die Deklaration wartet auf den ersten Beleg.
+    belege_bis: 2023
+    bestaetigt: false
+
+  - schluessel: hbada
+    ordner: HBADA
+    # Keine eigene Buchung im Journal seit 2019 —
+    # der Ordner besteht, die Deklaration wartet auf den ersten Beleg.
+    belege_bis: 2025
+    bestaetigt: false
+
+  - schluessel: hostinger
+    ordner: Hostinger
+    sollkonto: "6570"   # einstimmig, 2 Buchungen
+    zahlweg: karte
+    steuer:
+      - ab: 2025-11-03
+        behandlung: inland_mwst   # 2 von 2 Rechnungen weisen MWST aus
+    rhythmus: unbekannt   # 2 belegte Monate, 2025-11-03..2026-01-29
+    aktiv: true
+    bestaetigt: false
+
+  - schluessel: hostpoint
+    ordner: Hostpoint
+    sollkonto: "6512"   # einstimmig, 2 Buchungen
+    zahlweg: karte
+    steuer:
+      - ab: 2022-03-14
+        behandlung: inland_mwst   # 2 von 2 Rechnungen weisen MWST aus
+    rhythmus: unbekannt   # 1 belegte Monate, 2026-01-12..2026-01-17
+    aktiv: true
+    bestaetigt: false
+
+  - schluessel: hosttech
+    ordner: Hosttech
+    sollkonto_kandidaten: ["4200", "6512"]   # 4200: 3, 6512: 1
+    sollkonto_entscheid: je_rechnung
+    regel: >-
+      Domains: 6512 fuer eigene, 4200 wenn fuer Kundschaft gekauft -- je Rechnung zu entscheiden
+    zahlweg: karte
+    steuer:
+      - ab: 2019-02-20
+        behandlung: inland_mwst   # 18 von 18 Rechnungen weisen MWST aus
+    rhythmus: jaehrlich   # 4 belegte Monate, 2024-03-02..2026-03-03
+    aktiv: true
+    bestaetigt: false
+
+  - schluessel: innoarchitects
+    ordner: InnoArchitects
+    # Keine eigene Buchung im Journal seit 2019 —
+    # der Ordner besteht, die Deklaration wartet auf den ersten Beleg.
+    belege_bis: 2023
+    bestaetigt: false
+
+  - schluessel: innohack
+    ordner: InnoHack
+    # Keine eigene Buchung im Journal seit 2019 —
+    # der Ordner besteht, die Deklaration wartet auf den ersten Beleg.
+    belege_bis: 2021
+    bestaetigt: false
+
+  - schluessel: iterativ
+    ordner: Iterativ
+    # Keine eigene Buchung im Journal seit 2019 —
+    # der Ordner besteht, die Deklaration wartet auf den ersten Beleg.
+    belege_bis: 2019
+    bestaetigt: false
+
+  - schluessel: kantonspolizei
+    ordner: Kantonspolizei
+    # Keine eigene Buchung im Journal seit 2019 —
+    # der Ordner besteht, die Deklaration wartet auf den ersten Beleg.
+    belege_bis: 2022
+    bestaetigt: false
+
+  - schluessel: kanzlei_berger
+    ordner: Kanzlei Berger
+    sollkonto_kandidaten: ["4200", "4400"]   # 4200: 1, 4400: 1
+    sollkonto_entscheid: je_rechnung
+    zahlweg: rechnung
+    steuer:
+      - ab: null
+        behandlung: unbekannt   # weder Rechnung noch Buchung geben Auskunft
+    rhythmus: jaehrlich   # 2 belegte Monate, 2022-07-06..2025-03-03
+    aktiv: true
+    bestaetigt: false
+
+  - schluessel: leadfeeder
+    ordner: Leadfeeder
+    # Keine eigene Buchung im Journal seit 2019 —
+    # der Ordner besteht, die Deklaration wartet auf den ersten Beleg.
+    belege_bis: 2022
+    bestaetigt: false
+
+  - schluessel: learndash
+    ordner: LearnDash
+    # Keine eigene Buchung im Journal seit 2019 —
+    # der Ordner besteht, die Deklaration wartet auf den ersten Beleg.
+    belege_bis: 2022
+    bestaetigt: false
+
+  - schluessel: licensenow
+    ordner: Licensenow
+    # Keine eigene Buchung im Journal seit 2019 —
+    # der Ordner besteht, die Deklaration wartet auf den ersten Beleg.
+    belege_bis: 2023
+    bestaetigt: false
+
+  - schluessel: linkedin
+    ordner: LinkedIn
+    # Keine eigene Buchung im Journal seit 2019 —
+    # der Ordner besteht, die Deklaration wartet auf den ersten Beleg.
+    belege_bis: 2024
+    bestaetigt: false
+
+  - schluessel: linkmatch
+    ordner: LinkMatch
+    # Keine eigene Buchung im Journal seit 2019 —
+    # der Ordner besteht, die Deklaration wartet auf den ersten Beleg.
+    belege_bis: 2023
+    bestaetigt: false
+
+  - schluessel: lipo
+    ordner: Lipo
+    # Keine eigene Buchung im Journal seit 2019 —
+    # der Ordner besteht, die Deklaration wartet auf den ersten Beleg.
+    belege_bis: 2023
+    bestaetigt: false
+
+  - schluessel: mailchimp
+    ordner: Mailchimp
+    # Keine eigene Buchung im Journal seit 2019 —
+    # der Ordner besteht, die Deklaration wartet auf den ersten Beleg.
+    belege_bis: 2019
+    bestaetigt: false
+
+  - schluessel: manufakturwerk
+    ordner: Manufakturwerk
+    # Keine eigene Buchung im Journal seit 2019 —
+    # der Ordner besteht, die Deklaration wartet auf den ersten Beleg.
+    belege_bis: 2023
+    bestaetigt: false
+
+  - schluessel: mein_stehtisch
+    ordner: Mein Stehtisch
+    # Keine eigene Buchung im Journal seit 2019 —
+    # der Ordner besteht, die Deklaration wartet auf den ersten Beleg.
+    belege_bis: 2025
+    bestaetigt: false
+
+  - schluessel: meisterlabs
+    ordner: MeisterLabs
+    sollkonto: "6570"   # einstimmig, 8 Buchungen
+    zahlweg: karte
+    steuer:
+      - ab: null
+        behandlung: unbekannt   # weder Rechnung noch Buchung geben Auskunft
+    rhythmus: jaehrlich   # 8 belegte Monate, 2019-09-08..2025-09-05
+    aktiv: true
+    bestaetigt: false
+
+  - schluessel: metanet
+    ordner: Metanet
+    sollkonto_kandidaten: ["6512", "4200", "6570"]   # 6512: 81, 4200: 21, 6570: 1
+    sollkonto_entscheid: je_rechnung
+    regel: >-
+      wie Hosttech: 6512 eigen, 4200 weiterverrechnet
+    zahlweg: [karte, rechnung]
+    steuer:
+      - ab: null
+        behandlung: unbekannt   # weder Rechnung noch Buchung geben Auskunft
+    rhythmus: unregelmaessig   # 52 belegte Monate, 2019-03-01..2026-07-15
+    aktiv: true
+    bestaetigt: false
+
+  - schluessel: micasa
+    ordner: Micasa
+    # Keine eigene Buchung im Journal seit 2019 —
+    # der Ordner besteht, die Deklaration wartet auf den ersten Beleg.
+    belege_bis: 2021
+    bestaetigt: false
+
+  - schluessel: microsoft
+    ordner: Microsoft
+    sollkonto: "6570"   # einstimmig, 16 Buchungen
+    zahlweg: karte
+    steuer:
+      - ab: 2019-02-24
+        behandlung: inland_mwst   # 19 von 19 Rechnungen weisen MWST aus
+    rhythmus: unregelmaessig   # 14 belegte Monate, 2021-02-24..2026-07-01
+    aktiv: true
+    bestaetigt: false
+
+  - schluessel: microspot
+    ordner: Microspot
+    # Keine eigene Buchung im Journal seit 2019 —
+    # der Ordner besteht, die Deklaration wartet auf den ersten Beleg.
+    belege_bis: 2023
+    bestaetigt: false
+
+  - schluessel: migros
+    ordner: Migros
+    # Keine eigene Buchung im Journal seit 2019 —
+    # der Ordner besteht, die Deklaration wartet auf den ersten Beleg.
+    belege_bis: 2019
+    bestaetigt: false
+
+  - schluessel: miro
+    ordner: Miro
+    sollkonto_kandidaten: ["6570", "4200"]   # 6570: 9, 4200: 1
+    sollkonto_entscheid: je_rechnung
+    regel: >-
+      in der Regel 6570 Software; einmalig an Kundschaft weiterverrechnet
+    zahlweg: karte
+    steuer:
+      - ab: 2025-02-21
+        behandlung: bezugssteuer   # keine von 1 Rechnungen weist MWST aus, Sitz im Ausland
+    rhythmus: jaehrlich   # 6 belegte Monate, 2020-12-31..2026-01-10
+    aktiv: true
+    bestaetigt: false
+
+  - schluessel: mobiliar
+    ordner: Mobiliar
+    sollkonto_kandidaten: ["5730", "6220", "6300"]   # 5730: 10, 6220: 6, 6300: 5
+    sollkonto_entscheid: je_rechnung
+    zahlweg: [bank_direkt, rechnung]
+    steuer:
+      - ab: null
+        behandlung: unbekannt   # weder Rechnung noch Buchung geben Auskunft
+    rhythmus: jaehrlich   # 13 belegte Monate, 2019-06-07..2026-05-09
+    aktiv: true
+    bestaetigt: false
+
+  - schluessel: mway
+    ordner: mway
+    # Keine eigene Buchung im Journal seit 2019 —
+    # der Ordner besteht, die Deklaration wartet auf den ersten Beleg.
+    belege_bis: 2024
+    bestaetigt: false
+
+  - schluessel: namecheap
+    ordner: Namecheap
+    sollkonto: "6512"   # einstimmig, 1 Buchungen
+    zahlweg: karte
+    steuer:
+      - ab: 2024-10-08
+        behandlung: bezugssteuer   # 1 Gegenzeilen auf 2203, keine Rechnung gelesen
+    rhythmus: unbekannt   # 1 belegte Monate, 2024-10-08..2024-10-08
+    aktiv: false
+    bestaetigt: false
+
+  - schluessel: napkin
+    ordner: Napkin
+    sollkonto: "6570"   # einstimmig, 2 Buchungen
+    zahlweg: karte
+    steuer:
+      - ab: 2025-10-28
+        behandlung: bezugssteuer   # keine von 2 Rechnungen weist MWST aus, Sitz im Ausland
+    rhythmus: unbekannt   # 2 belegte Monate, 2025-10-28..2025-12-13
+    aktiv: true
+    bestaetigt: false
+
+  - schluessel: neulandpro
+    ordner: Neulandpro
+    sollkonto: "6570"   # einstimmig, 1 Buchungen
+    zahlweg: karte
+    steuer:
+      - ab: 2024-10-02
+        behandlung: bezugssteuer   # 1 Gegenzeilen auf 2203, keine Rechnung gelesen
+    rhythmus: unbekannt   # 1 belegte Monate, 2024-10-02..2024-10-02
+    aktiv: false
+    bestaetigt: false
+
+  - schluessel: openai
+    ordner: OpenAI
+    sollkonto: "6570"   # einstimmig, 29 Buchungen
+    zahlweg: karte
+    steuer:
+      - ab: 2024-03-12
+        behandlung: inland_mwst   # 28 von 28 Rechnungen weisen MWST aus
+    rhythmus: monatlich   # 24 belegte Monate, 2024-03-23..2026-02-28
+    aktiv: true
+    bestaetigt: false
+
+  - schluessel: orderflow
+    ordner: Orderflow
+    # Keine eigene Buchung im Journal seit 2019 —
+    # der Ordner besteht, die Deklaration wartet auf den ersten Beleg.
+    belege_bis: 2023
+    bestaetigt: false
+
+  - schluessel: orellfuessli
+    ordner: Orellfüssli
+    sollkonto: "6503"   # einstimmig, 2 Buchungen
+    zahlweg: karte
+    steuer:
+      - ab: 2022-07-27
+        behandlung: inland_mwst   # 3 von 3 Rechnungen weisen MWST aus
+    rhythmus: jaehrlich   # 2 belegte Monate, 2024-01-03..2025-09-12
+    aktiv: true
+    bestaetigt: false
+
+  - schluessel: payrollplus
+    ordner: PayrollPlus
+    # Keine eigene Buchung im Journal seit 2019 —
+    # der Ordner besteht, die Deklaration wartet auf den ersten Beleg.
+    belege_bis: 2021
+    bestaetigt: false
+
+  - schluessel: perplexity
+    ordner: Perplexity
+    sollkonto: "6570"   # einstimmig, 2 Buchungen
+    zahlweg: karte
+    steuer:
+      - ab: 2024-04-06
+        behandlung: bezugssteuer   # 2 Gegenzeilen auf 2203, keine Rechnung gelesen
+    rhythmus: jaehrlich   # 2 belegte Monate, 2024-04-06..2025-04-06
+    aktiv: true
+    bestaetigt: false
+
+  - schluessel: phantombuster
+    ordner: Phantombuster
+    sollkonto_kandidaten: ["4200", "6570"]   # 4200: 3, 6570: 2
+    sollkonto_entscheid: je_rechnung
+    zahlweg: karte
+    steuer:
+      - ab: 2021-10-31
+        behandlung: bezugssteuer   # keine von 2 Rechnungen weist MWST aus, Sitz im Ausland
+    rhythmus: jaehrlich   # 3 belegte Monate, 2022-01-01..2024-03-13
+    aktiv: false
+    bestaetigt: false
+
+  - schluessel: pi_shop
+    ordner: Pi-Shop
+    # Keine eigene Buchung im Journal seit 2019 —
+    # der Ordner besteht, die Deklaration wartet auf den ersten Beleg.
+    belege_bis: 2023
+    bestaetigt: false
+
+  - schluessel: pipedrive
+    ordner: Pipedrive
+    sollkonto: "6570"   # einstimmig, 7 Buchungen
+    zahlweg: karte
+    steuer:
+      - ab: null
+        behandlung: unbekannt   # weder Rechnung noch Buchung geben Auskunft
+    rhythmus: jaehrlich   # 7 belegte Monate, 2019-05-01..2026-05-01
+    aktiv: true
+    bestaetigt: false
+
+  - schluessel: post
+    ordner: Post
+    sollkonto_kandidaten: ["6513", "6940", "6570"]   # 6513: 4, 6940: 1, 6570: 1
+    sollkonto_entscheid: je_rechnung
+    zahlweg: [bank_direkt, karte]
+    steuer:
+      - ab: null
+        behandlung: unbekannt   # weder Rechnung noch Buchung geben Auskunft
+    rhythmus: jaehrlich   # 5 belegte Monate, 2019-04-30..2025-10-22
+    aktiv: true
+    bestaetigt: false
+
+  - schluessel: printzessin
+    ordner: Printzessin
+    # Keine eigene Buchung im Journal seit 2019 —
+    # der Ordner besteht, die Deklaration wartet auf den ersten Beleg.
+    belege_bis: 2021
+    bestaetigt: false
+
+  - schluessel: protekta
+    ordner: Protekta
+    sollkonto: "6300"   # einstimmig, 1 Buchungen
+    zahlweg: rechnung
+    steuer:
+      - ab: 2025-07-07
+        behandlung: ohne_mwst   # keine von 2 Rechnungen weist MWST aus, inländisch befreit
+    rhythmus: unbekannt   # 1 belegte Monate, 2026-09-01..2026-09-01
+    aktiv: true
+    bestaetigt: false
+
+  - schluessel: prusa_research
+    ordner: PRUSA Research
+    # Keine eigene Buchung im Journal seit 2019 —
+    # der Ordner besteht, die Deklaration wartet auf den ersten Beleg.
+    belege_bis: 2022
+    bestaetigt: false
+
+  - schluessel: puzzle
+    ordner: Puzzle
+    # Keine eigene Buchung im Journal seit 2019 —
+    # der Ordner besteht, die Deklaration wartet auf den ersten Beleg.
+    belege_bis: 2019
+    bestaetigt: false
+
+  - schluessel: quickrent
+    ordner: Quickrent
+    # Keine eigene Buchung im Journal seit 2019 —
+    # der Ordner besteht, die Deklaration wartet auf den ersten Beleg.
+    belege_bis: 2023
+    bestaetigt: false
+
+  - schluessel: quimbaya
+    ordner: Quimbaya
+    sollkonto: "6640"   # einstimmig, 1 Buchungen
+    zahlweg: rechnung
+    steuer:
+      - ab: 2025-12-31
+        behandlung: inland_mwst   # 1 von 1 Rechnungen weisen MWST aus
+    rhythmus: unbekannt   # 1 belegte Monate, 2025-12-31..2025-12-31
+    aktiv: true
+    bestaetigt: false
+
+  - schluessel: rain_task
+    ordner: Rain-Task
+    # Keine eigene Buchung im Journal seit 2019 —
+    # der Ordner besteht, die Deklaration wartet auf den ersten Beleg.
+    belege_bis: 2020
+    bestaetigt: false
+
+  - schluessel: rapidapi
+    ordner: RapidAPI
+    sollkonto: "6570"   # einstimmig, 9 Buchungen
+    zahlweg: karte
+    steuer:
+      - ab: 2025-12-22
+        behandlung: bezugssteuer   # 9 Gegenzeilen auf 2203, keine Rechnung gelesen
+    rhythmus: monatlich   # 8 belegte Monate, 2025-12-22..2026-08-22
+    aktiv: true
+    bestaetigt: false
+
+  - schluessel: rara_theme
+    ordner: Rara Theme
+    # Keine eigene Buchung im Journal seit 2019 —
+    # der Ordner besteht, die Deklaration wartet auf den ersten Beleg.
+    belege_bis: 2019
+    bestaetigt: false
+
+  - schluessel: rb_consulting
+    ordner: RB Consulting
+    # Keine eigene Buchung im Journal seit 2019 —
+    # der Ordner besteht, die Deklaration wartet auf den ersten Beleg.
+    belege_bis: 2022
+    bestaetigt: false
+
+  - schluessel: render
+    ordner: Render
+    sollkonto_kandidaten: ["4200", "4400"]   # 4200: 10, 4400: 1
+    sollkonto_entscheid: je_rechnung
+    regel: >-
+      in der Regel 4200 -- wird weiterverrechnet, nicht mehr selbst genutzt
+    zahlweg: karte
+    steuer:
+      - ab: 2025-03-03
+        behandlung: bezugssteuer   # keine von 8 Rechnungen weist MWST aus, Sitz im Ausland
+    rhythmus: unregelmaessig   # 11 belegte Monate, 2025-02-03..2026-09-01
+    aktiv: true
+    bestaetigt: false
+
+  - schluessel: roborock_zubehoer
+    ordner: Roborock-Zubehör
+    # Keine eigene Buchung im Journal seit 2019 —
+    # der Ordner besteht, die Deklaration wartet auf den ersten Beleg.
+    belege_bis: 2023
+    bestaetigt: false
+
+  - schluessel: rose_bikes
+    ordner: Rose Bikes
+    # Keine eigene Buchung im Journal seit 2019 —
+    # der Ordner besteht, die Deklaration wartet auf den ersten Beleg.
+    belege_bis: 2019
+    bestaetigt: false
+
+  - schluessel: rueedu
+    ordner: Rüedu
+    # Keine eigene Buchung im Journal seit 2019 —
+    # der Ordner besteht, die Deklaration wartet auf den ersten Beleg.
+    belege_bis: 2025
+    bestaetigt: false
+
+  - schluessel: salt
+    ordner: Salt
+    sollkonto: "6510"   # einstimmig, 40 Buchungen
+    zahlweg: karte
+    steuer:
+      - ab: 2023-07-05
+        behandlung: inland_mwst   # 38 von 38 Rechnungen weisen MWST aus
+    rhythmus: monatlich   # 40 belegte Monate, 2023-06-18..2026-09-03
+    aktiv: true
+    bestaetigt: false
+
+  - schluessel: shop4tesla
+    ordner: Shop4Tesla
+    # Keine eigene Buchung im Journal seit 2019 —
+    # der Ordner besteht, die Deklaration wartet auf den ersten Beleg.
+    belege_bis: 2021
+    bestaetigt: false
+
+  - schluessel: shutterstock
+    ordner: Shutterstock
+    # Keine eigene Buchung im Journal seit 2019 —
+    # der Ordner besteht, die Deklaration wartet auf den ersten Beleg.
+    belege_bis: 2020
+    bestaetigt: false
+
+  - schluessel: solar_communications
+    ordner: Solar Communications
+    sollkonto: "4200"   # einstimmig, 1 Buchungen
+    zahlweg: karte
+    steuer:
+      - ab: 2026-07-27
+        behandlung: inland_mwst   # 1 von 1 Rechnungen weisen MWST aus
+    rhythmus: unbekannt   # 1 belegte Monate, 2026-07-27..2026-07-27
+    aktiv: true
+    bestaetigt: false
+
+  - schluessel: solnet
+    ordner: Solnet
+    # Keine eigene Buchung im Journal seit 2019 —
+    # der Ordner besteht, die Deklaration wartet auf den ersten Beleg.
+    belege_bis: 2023
+    bestaetigt: false
+
+  - schluessel: spesen
+    ordner: Spesen
+    # Keine eigene Buchung im Journal seit 2019 —
+    # der Ordner besteht, die Deklaration wartet auf den ersten Beleg.
+    belege_bis: 2026
+    bestaetigt: false
+
+  - schluessel: springer_verlag
+    ordner: Springer Verlag
+    # Keine eigene Buchung im Journal seit 2019 —
+    # der Ordner besteht, die Deklaration wartet auf den ersten Beleg.
+    belege_bis: 2023
+    bestaetigt: false
+
+  - schluessel: spusu
+    ordner: Spusu
+    sollkonto: "6510"   # einstimmig, 23 Buchungen
+    zahlweg: karte
+    steuer:
+      - ab: null
+        behandlung: unbekannt   # weder Rechnung noch Buchung geben Auskunft
+    rhythmus: monatlich   # 23 belegte Monate, 2024-10-09..2026-09-01
+    aktiv: true
+    bestaetigt: false
+
+  - schluessel: steg
+    ordner: Steg
+    # Keine eigene Buchung im Journal seit 2019 —
+    # der Ordner besteht, die Deklaration wartet auf den ersten Beleg.
+    belege_bis: 2023
+    bestaetigt: false
+
+  - schluessel: steuerverwaltung_kt_bern
+    ordner: Steuerverwaltung Kt. Bern
+    nebenordner: [_DOKUMENTE]
+    sollkonto_kandidaten: ["8900", "8901"]   # 8900: 17, 8901: 14
+    sollkonto_entscheid: je_rechnung
+    zahlweg: rechnung
+    steuer:
+      - ab: null
+        behandlung: unbekannt   # weder Rechnung noch Buchung geben Auskunft
+    rhythmus: unregelmaessig   # 25 belegte Monate, 2020-08-20..2026-09-03
+    aktiv: true
+    bestaetigt: false
+
+  - schluessel: strassenverkehrsamt
+    ordner: Strassenverkehrsamt
+    sollkonto: "6230"   # einstimmig, 1 Buchungen
+    zahlweg: rechnung
+    steuer:
+      - ab: null
+        behandlung: unbekannt   # weder Rechnung noch Buchung geben Auskunft
+    rhythmus: unbekannt   # 1 belegte Monate, 2026-02-10..2026-02-10
+    aktiv: true
+    bestaetigt: false
+
+  - schluessel: svc
+    ordner: SVC
+    # Keine eigene Buchung im Journal seit 2019 —
+    # der Ordner besteht, die Deklaration wartet auf den ersten Beleg.
+    belege_bis: 2023
+    bestaetigt: false
+
+  - schluessel: t_r
+    ordner: T-R
+    nebenordner: [Vertragliches]
+    sollkonto: "6530"   # einstimmig, 14 Buchungen
+    zahlweg: rechnung
+    steuer:
+      - ab: null
+        behandlung: unbekannt   # weder Rechnung noch Buchung geben Auskunft
+    rhythmus: jaehrlich   # 14 belegte Monate, 2019-07-08..2026-06-05
+    aktiv: true
+    bestaetigt: false
+
+  - schluessel: techclub
+    ordner: Techclub
+    # Keine eigene Buchung im Journal seit 2019 —
+    # der Ordner besteht, die Deklaration wartet auf den ersten Beleg.
+    belege_bis: 2023
+    bestaetigt: false
+
+  - schluessel: techmania
+    ordner: Techmania
+    # Keine eigene Buchung im Journal seit 2019 —
+    # der Ordner besteht, die Deklaration wartet auf den ersten Beleg.
+    belege_bis: 2023
+    bestaetigt: false
+
+  - schluessel: ten_dance_media
+    ordner: Ten Dance Media
+    # Keine eigene Buchung im Journal seit 2019 —
+    # der Ordner besteht, die Deklaration wartet auf den ersten Beleg.
+    belege_bis: 2021
+    bestaetigt: false
+
+  - schluessel: tesla
+    ordner: Tesla
+    nebenordner: [Bestellung und Anzahlung, Betriebsdaten, Reparaturen, Strassenverkehrsamt, Unterlagen, Versicherungen]
+    sollkonto: "6200"   # einstimmig, 18 Buchungen
+    zahlweg: karte
+    steuer:
+      - ab: 2021-09-11
+        behandlung: inland_mwst   # 11 von 11 Rechnungen weisen MWST aus
+    rhythmus: unregelmaessig   # 14 belegte Monate, 2021-12-31..2025-12-31
+    aktiv: true
+    bestaetigt: false
+
+  - schluessel: testingtime
+    ordner: TestingTime
+    # Keine eigene Buchung im Journal seit 2019 —
+    # der Ordner besteht, die Deklaration wartet auf den ersten Beleg.
+    belege_bis: 2019
+    bestaetigt: false
+
+  - schluessel: ticketpark
+    ordner: Ticketpark
+    # Keine eigene Buchung im Journal seit 2019 —
+    # der Ordner besteht, die Deklaration wartet auf den ersten Beleg.
+    belege_bis: 2021
+    bestaetigt: false
+
+  - schluessel: toggl
+    ordner: Toggl
+    sollkonto: "6570"   # einstimmig, 8 Buchungen
+    zahlweg: karte
+    steuer:
+      - ab: 2020-06-12
+        behandlung: bezugssteuer   # keine von 7 Rechnungen weist MWST aus, Sitz im Ausland
+    rhythmus: jaehrlich   # 8 belegte Monate, 2020-06-13..2026-06-12
+    aktiv: true
+    bestaetigt: false
+
+  - schluessel: top_domains_ch
+    ordner: top-domains.ch
+    # Keine eigene Buchung im Journal seit 2019 —
+    # der Ordner besteht, die Deklaration wartet auf den ersten Beleg.
+    belege_bis: 2021
+    bestaetigt: false
+
+  - schluessel: torok
+    ordner: Torok
+    # Keine eigene Buchung im Journal seit 2019 —
+    # der Ordner besteht, die Deklaration wartet auf den ersten Beleg.
+    belege_bis: 2022
+    bestaetigt: false
+
+  - schluessel: trendone
+    ordner: TrendOne
+    # Keine eigene Buchung im Journal seit 2019 —
+    # der Ordner besteht, die Deklaration wartet auf den ersten Beleg.
+    belege_bis: 2021
+    bestaetigt: false
+
+  - schluessel: typeform
+    ordner: Typeform
+    # Keine eigene Buchung im Journal seit 2019 —
+    # der Ordner besteht, die Deklaration wartet auf den ersten Beleg.
+    belege_bis: 2022
+    bestaetigt: false
+
+  - schluessel: ugreen
+    ordner: UGREEN
+    # Keine eigene Buchung im Journal seit 2019 —
+    # der Ordner besteht, die Deklaration wartet auf den ersten Beleg.
+    belege_bis: 2022
+    bestaetigt: false
+
+  - schluessel: uizard
+    ordner: Uizard
+    sollkonto: "6570"   # einstimmig, 1 Buchungen
+    zahlweg: karte
+    steuer:
+      - ab: 2025-02-21
+        behandlung: bezugssteuer   # 1 Gegenzeilen auf 2203, keine Rechnung gelesen
+    rhythmus: unbekannt   # 1 belegte Monate, 2025-02-21..2025-02-21
+    aktiv: true
+    bestaetigt: false
+
+  - schluessel: updraftplus
+    ordner: UpdraftPlus
+    # Keine eigene Buchung im Journal seit 2019 —
+    # der Ordner besteht, die Deklaration wartet auf den ersten Beleg.
+    belege_bis: 2019
+    bestaetigt: false
+
+  - schluessel: velogfeller
+    ordner: VeloGfeller
+    sollkonto: "6200"   # einstimmig, 2 Buchungen
+    zahlweg: karte
+    steuer:
+      - ab: null
+        behandlung: unbekannt   # weder Rechnung noch Buchung geben Auskunft
+    rhythmus: unbekannt   # 1 belegte Monate, 2025-10-10..2025-10-14
+    aktiv: true
+    bestaetigt: false
+
+  - schluessel: vz
+    ordner: VZ
+    nebenordner: [_DOKUMENTE]
+    sollkonto_kandidaten: ["5720", "8000"]   # 5720: 4, 8000: 1
+    sollkonto_entscheid: je_rechnung
+    zahlweg: rechnung
+    steuer:
+      - ab: 2020-08-05
+        behandlung: ohne_mwst   # keine von 6 Rechnungen weist MWST aus, inländisch befreit
+    rhythmus: jaehrlich   # 4 belegte Monate, 2023-06-01..2025-03-03
+    aktiv: true
+    bestaetigt: false
+
+  - schluessel: wispr_flow
+    ordner: Wispr Flow
+    sollkonto: "6570"   # einstimmig, 1 Buchungen
+    zahlweg: karte
+    steuer:
+      - ab: 2025-11-07
+        behandlung: bezugssteuer   # keine von 1 Rechnungen weist MWST aus, Sitz im Ausland
+    rhythmus: unbekannt   # 1 belegte Monate, 2025-11-07..2025-11-07
+    aktiv: true
+    bestaetigt: false
+
+  - schluessel: wordfence
+    ordner: Wordfence
+    sollkonto: "6570"   # einstimmig, 4 Buchungen
+    zahlweg: karte
+    steuer:
+      - ab: 2023-04-24
+        behandlung: bezugssteuer   # 4 Gegenzeilen auf 2203, keine Rechnung gelesen
+    rhythmus: jaehrlich   # 4 belegte Monate, 2023-04-24..2026-04-22
+    aktiv: true
+    bestaetigt: false
+
+  - schluessel: xantron
+    ordner: Xantron
+    # Keine eigene Buchung im Journal seit 2019 —
+    # der Ordner besteht, die Deklaration wartet auf den ersten Beleg.
+    belege_bis: 2023
+    bestaetigt: false
+
+  - schluessel: yallo
+    ordner: Yallo
+    nebenordner: [Vertrag]
+    # Keine eigene Buchung im Journal seit 2019 —
+    # der Ordner besteht, die Deklaration wartet auf den ersten Beleg.
+    belege_bis: 2023
+    bestaetigt: false
+
+  - schluessel: youtube
+    ordner: YouTube
+    sollkonto: "6570"   # einstimmig, 1 Buchungen
+    zahlweg: karte
+    steuer:
+      - ab: null
+        behandlung: unbekannt   # weder Rechnung noch Buchung geben Auskunft
+    rhythmus: unbekannt   # 1 belegte Monate, 2024-12-31..2024-12-31
+    aktiv: true
+    bestaetigt: false
+
+  - schluessel: zapier
+    ordner: Zapier
+    sollkonto: "6570"   # einstimmig, 3 Buchungen
+    zahlweg: karte
+    steuer:
+      - ab: 2023-12-29
+        behandlung: bezugssteuer   # keine von 1 Rechnungen weist MWST aus, Sitz im Ausland
+    rhythmus: jaehrlich   # 3 belegte Monate, 2020-12-31..2024-01-01
+    aktiv: false
+    bestaetigt: false
+
+  - schluessel: zoom
+    ordner: Zoom
+    beendet: 2026-09-21   # Anthony: kein offener Dienst mehr
+    sollkonto: "6570"   # einstimmig, 9 Buchungen
+    zahlweg: karte
+    steuer:
+      - ab: 2023-06-14
+        behandlung: inland_mwst   # 2 von 8 Rechnungen weisen MWST aus
+    rhythmus: jaehrlich   # 9 belegte Monate, 2020-03-16..2024-06-14
+    aktiv: false
+    bestaetigt: false
+
+# Was niemand entscheiden konnte. Steht im Wortlaut, nicht als Etikett —
+# eine Frage, die niemand hört, ist so gut wie keine.
+offen:
+  - >-
+      Rüedu hat sechs Lieferantenrechnungen in Bexio, aber unter keiner Schreibweise des Namens eine Journalbuchung. Unter welchem Text laufen sie?
+  - >-
+      Der Ordner «Spesen» sammelt Quittungen (Business-Lunch, gelegentlich Büromaterial) statt eines einzelnen Lieferanten. Er trägt deshalb keine Kontoerwartung; die Belegart entscheidet im Register.
+  - >-
+      Post: die letzte Rechnung (2025-09-19, Einschreiben (R) (A)) weist MWST aus, die 3 davor nicht — 2020-04-08 PostPac Priority bis 2 kg; 2021-03-26 Postverzollung (Zollgebühren); 2021-04-19 Briefmarken (Markenheftchen). Ein Wechsel, ein Lesefehler, oder hängt die Behandlung an der Leistung statt am Lieferanten? Ein einzelner Beleg trägt keine Erwartung — was im Eintrag steht, kommt aus dem Journal, nicht aus den Rechnungen.
+
+# ── Was die Prüfung ergab ───────────────────────────────────
+# Tote Zuordnungen (Schreibweise ohne Treffer): 0
+# Nicht zugeordnete Buchungen seit 2024-01-01: 57 auf 51 Schreibweisen. Die häufigsten:
+#      3x Fahrzeugsteuer
+#      2x Kontrollmarke und Versicherungsprämie St
+#      2x Mitgliederbeitrag
+#      2x Weihnachtsgeschenke Kunden
+#      2x (leer)
+#      1x BaZG
+#      1x Coop
+#      1x Linkedin
+#      1x Hirschen
+#      1x Darling
+#      1x Rest Frohegg
+#      1x Spesen
+#      1x Rechtsschutzversicherung
+#      1x Halbtax Anthony Smith
+#      1x MWay
+#      1x Au Trappiste
+#      1x Verwaltungskosten
+#      1x Verwaltungsksoten
+#      1x KTG
+#      1x OnTap
+#      1x Miete Büroräumlichkeiten
+#      1x Nebenkosten Nachtrag
+#      1x BKW
+#      1x BAZG E-Vignette
+#      1x Branding Fotografie

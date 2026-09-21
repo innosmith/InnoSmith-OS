@@ -657,6 +657,59 @@ CREATE TRIGGER debitorenlauf_rechnungen_updated_at BEFORE UPDATE ON debitorenlau
     FOR EACH ROW EXECUTE FUNCTION update_updated_at();
 
 -- ─────────────────────────────────────────────────────────
+-- Kreditorenregister (Stufe 0)
+--
+-- Das Register ist keine Kopie der Rechnung. Betrag, Währung, Positionen und
+-- Leistungszeitraum leben im InvoiceInsight-Modul, die Buchung in Bexio; hier
+-- steht, was sonst nirgends eine Spur hinterlässt: die Identität der Datei,
+-- ihr jeweiliger Ort und die Entscheidungen des Menschen.
+--
+-- Der Hash ist die Identität, der Pfad ein Handle. Am 21.09.2026 an der
+-- Moduldatenbank gemessen: sie erkennt Dokumente am Pfad und lässt den Hash
+-- ungenutzt -- Ergebnis sind vier doppelt erfasste Rechnungen, darunter
+-- dieselbe Datei unter «Google Cloud» und «Google Workspace». Verschiebt
+-- TaskPilot eine Datei ins Archiv, ändert sich der Pfad; wäre er die
+-- Identität, zählte jede Auswertung ab der Ablage doppelt.
+-- ─────────────────────────────────────────────────────────
+
+CREATE TABLE kreditorenbelege (
+    id                      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    datei_hash              TEXT NOT NULL,      -- SHA-256, die Identität
+    dateiname               TEXT NOT NULL,
+    graph_item_id           TEXT,               -- Handle, ändert sich beim Verschieben
+    graph_pfad              TEXT,               -- letzter bekannter Ort
+    archiv_pfad             TEXT,               -- gesetzt mit abgelegt_am
+    quelle                  TEXT NOT NULL CHECK (quelle IN
+                                ('autodownload', 'ablage_hand', 'postfach', 'upload')),
+    belegart                TEXT NOT NULL DEFAULT 'rechnung' CHECK (belegart IN
+                                ('rechnung', 'spese', 'sammelbeleg')),
+    eingang_am              TIMESTAMPTZ DEFAULT now(),
+    lieferant_schluessel    TEXT,               -- aus docs/kreditorenlieferanten.yaml
+    modul_dokument_id       INTEGER,            -- dort steht der Inhalt
+    zurueckgestellt         BOOLEAN NOT NULL DEFAULT false,
+    grund                   TEXT,
+    freigegeben_am          TIMESTAMPTZ,        -- vom Menschen bestätigt
+    freigegeben_von         UUID REFERENCES users(id) ON DELETE SET NULL,
+    gebucht_am              TIMESTAMPTZ,
+    bexio_referenz          TEXT,               -- gegen die zweite Buchung
+    abgelegt_am             TIMESTAMPTZ,
+    sammelbeleg_id          UUID REFERENCES kreditorenbelege(id) ON DELETE SET NULL,
+    created_at              TIMESTAMPTZ DEFAULT now(),
+    updated_at              TIMESTAMPTZ DEFAULT now(),
+    CONSTRAINT uq_kreditorenbeleg_hash UNIQUE (datei_hash)
+);
+
+-- Die Warteliste: was offen ist, steht ohne Freigabe da. Der häufigste Zugriff.
+CREATE INDEX idx_kreditorenbelege_offen ON kreditorenbelege(eingang_am)
+    WHERE freigegeben_am IS NULL;
+CREATE INDEX idx_kreditorenbelege_lieferant ON kreditorenbelege(lieferant_schluessel);
+CREATE INDEX idx_kreditorenbelege_sammelbeleg ON kreditorenbelege(sammelbeleg_id)
+    WHERE sammelbeleg_id IS NOT NULL;
+
+CREATE TRIGGER kreditorenbelege_updated_at BEFORE UPDATE ON kreditorenbelege
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+
+-- ─────────────────────────────────────────────────────────
 -- Agent-Lern-Schicht (Memory & Self-Learning, Migration 005)
 -- ─────────────────────────────────────────────────────────
 

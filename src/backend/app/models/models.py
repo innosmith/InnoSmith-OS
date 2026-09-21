@@ -828,3 +828,95 @@ class DebitorenlaufRechnung(Base):
     updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=func.now(), onupdate=func.now())
 
     lauf: Mapped["Debitorenlauf"] = relationship(back_populates="rechnungen")
+
+
+class Kreditorenbeleg(Base):
+    """Ein eingehender Beleg — wo er liegt, wem er gehört, wie weit er ist.
+
+    Das Register ist **keine Kopie der Rechnung**. Betrag, Währung, Positionen
+    und der Leistungszeitraum leben im InvoiceInsight-Modul, die Buchung in
+    Bexio; hier steht, was sonst nirgends eine Spur hinterlässt: die Identität
+    der Datei, ihr jeweiliger Ort und die Entscheidungen des Menschen. Stünde
+    der Betrag hier ebenfalls, gäbe es zwei Wahrheiten über Geld, und die
+    ältere gewönne genau dann, wenn jemand die Extraktion korrigiert hat.
+
+    ## Der Hash ist die Identität, der Pfad ein Handle
+
+    Gemessen am 21.09.2026 an der Datenbank des Moduls: sie erkennt ein
+    Dokument am ``file_path`` und speichert den Hash, ohne ihn je zum
+    Wiedererkennen zu benutzen. Ergebnis sind heute schon **vier** doppelt
+    erfasste Rechnungen — darunter dieselbe Datei einmal unter «Google Cloud»
+    und einmal unter «Google Workspace». Verschiebt TaskPilot eine Datei vom
+    Eingang ins Archiv, ändert sich der Pfad; bliebe er die Identität, entstünde
+    bei jeder Ablage eine zweite Zeile, und jede Auswertung zählte doppelt.
+    Deshalb ist ``datei_hash`` eindeutig und ``graph_pfad`` nur der letzte
+    bekannte Ort.
+
+    ## Eine Wahrheit, zwei Projektionen
+
+    Wie beim Mailpfad: die Wahrheit ist die Zeile mit ``freigegeben_am IS
+    NULL``, die Projektion ist die Datei im Eingangsordner. Beide setzt und
+    löst derselbe Weg. Liegt nichts im Eingang, ist nichts offen — und die
+    Datei wandert nur **vorwärts**, Richtung Archiv. Rückwärts nur der Mensch.
+    """
+
+    __tablename__ = "kreditorenbelege"
+    __table_args__ = (
+        UniqueConstraint("datei_hash", name="uq_kreditorenbeleg_hash"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
+
+    datei_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    """SHA-256 über den Dateiinhalt. Gleiche Bytes heisst derselbe Beleg."""
+    dateiname: Mapped[str] = mapped_column(Text, nullable=False)
+
+    graph_item_id: Mapped[str | None] = mapped_column(Text)
+    """Graph-Handle. Ändert sich bei jedem Verschieben — nie als Identität."""
+    graph_pfad: Mapped[str | None] = mapped_column(Text)
+    """Der letzte bekannte Ort. Beim Ablegen überschrieben."""
+    archiv_pfad: Mapped[str | None] = mapped_column(Text)
+    """Wohin abgelegt wurde. Gesetzt zusammen mit ``abgelegt_am``."""
+
+    quelle: Mapped[str] = mapped_column(Text, nullable=False)
+    """Durch welche Tür der Beleg kam: ``autodownload``, ``ablage_hand``,
+    ``postfach``, ``upload``. Unterscheidet «diesen Monat kam nichts» von
+    «der Bezug ist kaputt», sobald der erwartete Rhythmus dagegensteht."""
+    belegart: Mapped[str] = mapped_column(Text, nullable=False, server_default="rechnung")
+    """``rechnung``, ``spese`` oder ``sammelbeleg``. Eine Spese durchläuft
+    denselben Buchungs- und Ablageweg, aber keine Extraktion — das Modul liest
+    heute keine Quittungen."""
+    eingang_am: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=func.now())
+
+    lieferant_schluessel: Mapped[str | None] = mapped_column(Text)
+    """Schlüssel aus ``docs/kreditorenlieferanten.yaml``. Kein Fremdschlüssel,
+    weil die Deklaration eine Datei ist; die Prüfung übernimmt der Wächter.
+    ``NULL`` heisst «keinem Lieferanten zugeordnet» und wird gemeldet, nicht
+    geraten."""
+    modul_dokument_id: Mapped[int | None] = mapped_column(Integer)
+    """Verweis auf die Zeile im InvoiceInsight-Modul, wo der Inhalt steht."""
+
+    zurueckgestellt: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
+    grund: Mapped[str | None] = mapped_column(Text)
+    """Warum zurückgestellt. Eine Ausnahme ohne Begründung ist in drei Wochen
+    nicht mehr nachvollziehbar."""
+
+    freigegeben_am: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    """Vom Menschen bestätigt, nicht gemessen. Erst danach darf gebucht und
+    abgelegt werden."""
+    freigegeben_von: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    gebucht_am: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    bexio_referenz: Mapped[str | None] = mapped_column(Text)
+    """Kennung der Buchung in Bexio — manuelle Buchung oder Lieferantenrechnung.
+    Ohne sie entstünde beim zweiten Anlauf eine zweite Buchung."""
+    abgelegt_am: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+
+    sammelbeleg_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("kreditorenbelege.id", ondelete="SET NULL")
+    )
+    """Bei Cursor werden Einzelrechnungen zu einem Sammelbeleg gebündelt. Die
+    Einzelnen bleiben im Register — gebucht wird der Sammelbeleg. Wer über
+    beide summiert, zählt doppelt."""
+
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=func.now(), onupdate=func.now())

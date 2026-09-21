@@ -242,3 +242,56 @@ def test_die_beiden_grenzen_sind_verschieden():
     assert gc._ANHANG_EINFACH_MAX == 3 * 1024 * 1024
     assert gc._UPLOAD_EINFACH_MAX == 4 * 1024 * 1024
     assert gc._UPLOAD_STUECK % (320 * 1024) == 0
+
+
+# ── Blätterung ───────────────────────────────────────────
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_ordnerinhalt_folgt_dem_verweis_auf_die_naechste_seite(graph):
+    """Der Fehler, der aussieht wie ein Ergebnis.
+
+    Graph liefert Ordnerinhalte seitenweise. Ohne ``@odata.nextLink`` zu
+    folgen, gelingt der Aufruf, wirft nichts und liefert die erste Seite --
+    eine Liste, die aussieht wie das Ganze. Der Lieferantenordner hat 149
+    Unterordner und lieferte 20; die Sperrklinke in ``debitoren_ablage``
+    hätte bei einem Kunden ab dem 21. Ordner «kein Projektordner vorhanden»
+    geantwortet und flach abgelegt.
+    """
+    seite2 = f"{GRAPH}/naechste-seite"
+    respx.get(f"{WURZEL}:/Finanzen:/children").mock(return_value=httpx.Response(
+        200, json={
+            "value": [{"id": "1", "name": "A"}, {"id": "2", "name": "B"}],
+            "@odata.nextLink": seite2,
+        },
+    ))
+    respx.get(seite2).mock(return_value=httpx.Response(
+        200, json={"value": [{"id": "3", "name": "C"}]},
+    ))
+
+    eintraege = await graph.list_drive_items("Finanzen")
+
+    assert [e["name"] for e in eintraege] == ["A", "B", "C"]
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_derselbe_verweis_zweimal_beendet_die_blaetterung(graph):
+    """Gegen die Verschlimmbesserung.
+
+    Ein stiller Abbruch bei 20 Einträgen ist schlecht; ein Aufruf, der nie
+    zurückkehrt, ist schlimmer. Zeigt Graph zweimal auf dieselbe Seite, ist
+    Schluss.
+    """
+    selbstbezug = f"{GRAPH}/immer-dieselbe"
+    respx.get(f"{WURZEL}:/Finanzen:/children").mock(return_value=httpx.Response(
+        200, json={"value": [{"id": "1", "name": "A"}], "@odata.nextLink": selbstbezug},
+    ))
+    respx.get(selbstbezug).mock(return_value=httpx.Response(
+        200, json={"value": [{"id": "2", "name": "B"}], "@odata.nextLink": selbstbezug},
+    ))
+
+    eintraege = await graph.list_drive_items("Finanzen")
+
+    assert [e["name"] for e in eintraege] == ["A", "B"]

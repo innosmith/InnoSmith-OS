@@ -1288,8 +1288,23 @@ class GraphClient:
 
     # ── OneDrive / SharePoint Files ──────────────────────────────
 
-    async def list_drive_items(self, path: str = "/", top: int = 20) -> list[dict]:
-        """Inhalte eines OneDrive-Ordners auflisten."""
+    async def list_drive_items(self, path: str = "/", top: int = 200) -> list[dict]:
+        """Inhalte eines OneDrive-Ordners auflisten -- vollständig.
+
+        Graph liefert Ordnerinhalte seitenweise und verweist mit
+        ``@odata.nextLink`` auf den Rest. Wer dem Verweis nicht folgt, bekommt
+        eine Liste, die aussieht wie das Ganze und es nicht ist: der Aufruf
+        gelingt, es gibt keine Warnung, nur weniger Einträge als vorhanden.
+
+        Das traf zwei Stellen. Der Lieferantenordner ``Finanzen/Kreditoren``
+        hat 149 Unterordner und lieferte 20. Und die Sperrklinke in
+        ``debitoren_ablage`` prüft, ob für ein Projekt schon ein Unterordner
+        besteht -- sie hätte bei einem Kunden ab dem 21. Ordner «nein»
+        geantwortet und die Rechnung flach abgelegt, entgegen der Regel
+        «einmal Projektordner, immer Projektordner».
+
+        ``top`` ist damit die Seitengrösse, nicht die Obergrenze.
+        """
         if path == "/":
             endpoint = f"{self._user_path}/drive/root/children"
         else:
@@ -1303,7 +1318,19 @@ class GraphClient:
                            "parentReference",
             },
         )
-        return data.get("value", [])
+        eintraege = list(data.get("value", []))
+        weiter = data.get("@odata.nextLink")
+        gesehen: set[str] = set()
+        while weiter and weiter not in gesehen:
+            # Gegen die Schleife, die sich im Kreis dreht: derselbe Verweis
+            # zweimal bedeutet, dass keine neue Seite kommt. Ohne diese
+            # Schranke ersetzt ein stiller Abbruch bei 20 Einträgen einen
+            # Aufruf, der nie zurückkehrt -- die Verschlimmbesserung.
+            gesehen.add(weiter)
+            data = await self._get(weiter)
+            eintraege.extend(data.get("value", []))
+            weiter = data.get("@odata.nextLink")
+        return eintraege
 
     async def get_drive_item(self, item_id: str) -> dict:
         """Metadaten eines einzelnen OneDrive-Elements."""
