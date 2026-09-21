@@ -101,6 +101,10 @@ class UserSettings(BaseModel):
     # Follow-up-Erkennung (unbeantwortete gesendete E-Mails)
     followup_enabled: bool | None = None
     followup_wait_days: int | None = None       # Arbeitstage bis Vorschlag
+    # Rechnungslauf: ob die Oberfläche vor jedem Schreibzugriff erst zeigt, was
+    # geschähe. Die Sicherung selbst liegt im Vorgabewert der Endpunkte — diese
+    # Einstellung bestimmt allein, ob es zwei Klicks braucht oder einen.
+    debitoren_trockenlauf: bool | None = None
 
 
 SETTINGS_FIELDS = [
@@ -122,6 +126,7 @@ SETTINGS_FIELDS = [
     "briefing_weekly_enabled", "briefing_weekly_day", "briefing_weekly_time",
     "briefing_monthly_enabled", "briefing_monthly_time",
     "followup_enabled", "followup_wait_days",
+    "debitoren_trockenlauf",
 ]
 
 

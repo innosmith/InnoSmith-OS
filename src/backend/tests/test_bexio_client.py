@@ -215,6 +215,276 @@ async def test_list_invoices(bx_client):
     assert len(invoices) == 1
 
 
+@respx.mock
+@pytest.mark.asyncio
+async def test_get_invoice_positions_vereint_beide_arten(bx_client):
+    """Produktzeilen und Textzeilen kommen aus zwei Pfaden und muessen unterscheidbar bleiben.
+
+    Beide Rohantworten tragen ``id`` und ``text``; ohne ``positionsart`` saehe
+    eine Textzeile aus wie eine Produktzeile mit Menge null.
+    """
+    respx.get(f"{BASE_URL_V2}/kb_invoice/20/kb_position_custom").mock(
+        return_value=httpx.Response(200, json=[
+            {"id": 1, "pos": 1, "amount": "20.00", "unit_id": 2, "text": "20h/Monat fix"},
+            {"id": 2, "pos": 3, "amount": "2.50", "unit_id": 2, "text": "Variable Zusatzstunden"},
+        ])
+    )
+    respx.get(f"{BASE_URL_V2}/kb_invoice/20/kb_position_text").mock(
+        return_value=httpx.Response(200, json=[
+            {"id": 9, "pos": 2, "text": "Per 31.08.2026 sind 3h verrechnet aber noch nicht geleistet."},
+        ])
+    )
+
+    positionen = await bx_client.get_invoice_positions(20)
+
+    assert [p["positionsart"] for p in positionen] == ["custom", "text", "custom"]
+    assert [p["pos"] for p in positionen] == [1, 2, 3]
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_get_invoice_positions_verschluckt_keinen_fehler(bx_client):
+    """Die Vorlage gab bei jedem Netzfehler ``None`` zurueck.
+
+    In ``admin_core.get_invoice_with_positions`` stand
+    ``except requests.exceptions.RequestException: return None``. Ein abgelaufener
+    Token ergab damit eine Rechnung ohne Positionen -- also ohne Stunden -- und
+    jede Pruefung darueber haette sie als leer durchgewunken, ohne zu murren.
+    """
+    respx.get(f"{BASE_URL_V2}/kb_invoice/20/kb_position_custom").mock(
+        return_value=httpx.Response(401, json={"message": "Unauthorized"})
+    )
+
+    with pytest.raises(httpx.HTTPStatusError):
+        await bx_client.get_invoice_positions(20)
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_rechnung_aus_auftrag_geht_ohne_rumpf(bx_client):
+    """Ein leeres ``{}`` quittiert Bexio mit 415 -- gemessen am 21.09.2026.
+
+    Der Test haelt das fest, kann es aber nicht beweisen: ein nachgebildeter
+    Server nimmt jeden Rumpf an. Geprueft wird deshalb, dass **nichts**
+    gesendet wird; die Gegenprobe lief gegen das echte Bexio.
+    """
+    route = respx.post(f"{BASE_URL_V2}/kb_order/31/invoice").mock(
+        return_value=httpx.Response(201, json={"id": 900, "document_nr": "RE-00700"})
+    )
+
+    rechnung = await bx_client.create_invoice_from_order(31)
+
+    assert rechnung["document_nr"] == "RE-00700"
+    assert route.calls[0].request.content == b""
+    assert "content-type" not in route.calls[0].request.headers
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_entwurf_wird_ausgestellt(bx_client):
+    respx.get(f"{BASE_URL_V2}/kb_invoice/706").mock(
+        return_value=httpx.Response(200, json={"id": 706, "kb_item_status_id": 7})
+    )
+    route = respx.post(f"{BASE_URL_V2}/kb_invoice/706/issue").mock(
+        return_value=httpx.Response(200, json={"success": True})
+    )
+
+    assert await bx_client.issue_invoice(706) is True
+    assert route.call_count == 1
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_bereits_ausgestellte_rechnung_ist_nichts_zu_tun(bx_client):
+    """Sonst scheiterte jedes Wiederholen nach einem Abbruch an genau den
+    Rechnungen, die schon durch sind."""
+    respx.get(f"{BASE_URL_V2}/kb_invoice/706").mock(
+        return_value=httpx.Response(200, json={"id": 706, "kb_item_status_id": 8})
+    )
+    route = respx.post(f"{BASE_URL_V2}/kb_invoice/706/issue").mock(
+        return_value=httpx.Response(200, json={"success": True})
+    )
+
+    assert await bx_client.issue_invoice(706) is False
+    assert route.call_count == 0
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_ausstellen_verschickt_nichts(bx_client):
+    """``send`` stellt aus **und** mailt an die Kundschaft. Ein Tippfehler im
+    Pfad waere der Unterschied zwischen einem Statuswechsel und zwanzig
+    ungeprueften Mails."""
+    respx.get(f"{BASE_URL_V2}/kb_invoice/706").mock(
+        return_value=httpx.Response(200, json={"id": 706, "kb_item_status_id": 7})
+    )
+    respx.post(f"{BASE_URL_V2}/kb_invoice/706/issue").mock(
+        return_value=httpx.Response(200, json={"success": True})
+    )
+    versand = respx.post(f"{BASE_URL_V2}/kb_invoice/706/send").mock(
+        return_value=httpx.Response(200, json={"success": True})
+    )
+    vermerk = respx.post(f"{BASE_URL_V2}/kb_invoice/706/mark_as_sent").mock(
+        return_value=httpx.Response(200, json={"success": True})
+    )
+
+    await bx_client.issue_invoice(706)
+
+    assert versand.call_count == 0
+    assert vermerk.call_count == 0
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_pdf_wird_aus_base64_dekodiert(bx_client):
+    """Bexio liefert JSON mit Base64, nicht das PDF.
+
+    Am 21.09.2026 an RE-00706 gemessen: Felder ``name``, ``size``, ``mime``,
+    ``content``; ``size`` = 310436 entsprach der dekodierten Laenge, Signatur
+    ``%PDF-1.5``.
+    """
+    inhalt = b"%PDF-1.5\nhier stuende das Dokument\n%%EOF"
+    respx.get(f"{BASE_URL_V2}/kb_invoice/706/pdf").mock(
+        return_value=httpx.Response(200, json={
+            "name": "re-00706.pdf", "size": len(inhalt), "mime": "application/pdf",
+            "content": base64.b64encode(inhalt).decode(),
+        })
+    )
+
+    assert await bx_client.get_invoice_pdf(706) == inhalt
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_pdf_ohne_signatur_wird_abgewiesen(bx_client):
+    """Eine Datei, die wie ein PDF heisst und keines ist, faellt sonst erst
+    auf, wenn jemand sie oeffnet -- moeglicherweise die Kundschaft."""
+    respx.get(f"{BASE_URL_V2}/kb_invoice/706/pdf").mock(
+        return_value=httpx.Response(200, json={
+            "content": base64.b64encode(b"<html>Sitzung abgelaufen</html>").decode(),
+        })
+    )
+
+    with pytest.raises(ValueError, match="Signatur"):
+        await bx_client.get_invoice_pdf(706)
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_pdf_ohne_inhalt_wird_abgewiesen(bx_client):
+    """Null Bytes sehen auf jedem Verzeichnislisting aus wie ein Ergebnis."""
+    respx.get(f"{BASE_URL_V2}/kb_invoice/706/pdf").mock(
+        return_value=httpx.Response(200, json={"name": "re-00706.pdf", "content": ""})
+    )
+
+    with pytest.raises(ValueError, match="kein PDF"):
+        await bx_client.get_invoice_pdf(706)
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_pdf_fehler_wird_nicht_verschluckt(bx_client):
+    respx.get(f"{BASE_URL_V2}/kb_invoice/706/pdf").mock(
+        return_value=httpx.Response(404, json={"message": "not found"})
+    )
+
+    with pytest.raises(httpx.HTTPStatusError):
+        await bx_client.get_invoice_pdf(706)
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_update_invoice_schickt_nur_die_genannten_felder(bx_client):
+    """Ein mitgeschicktes Feld mit Vorgabewert ueberschriebe stillschweigend,
+    was auf der Rechnung steht -- etwa den Titel oder die Kontaktadresse."""
+    route = respx.post(f"{BASE_URL_V2}/kb_invoice/900").mock(
+        return_value=httpx.Response(200, json={"id": 900, "is_valid_from": "2026-09-30"})
+    )
+
+    await bx_client.update_invoice(
+        900, is_valid_from="2026-09-30", is_valid_to="2026-10-29"
+    )
+
+    assert json.loads(route.calls[0].request.content) == {
+        "is_valid_from": "2026-09-30", "is_valid_to": "2026-10-29",
+    }
+
+
+@pytest.mark.asyncio
+async def test_update_invoice_ohne_felder_ist_ein_fehler(bx_client):
+    """Ein Aufruf ohne Inhalt waere ein Schreibzugriff ohne Absicht."""
+    with pytest.raises(ValueError):
+        await bx_client.update_invoice(900)
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_fehler_beim_erzeugen_wird_nicht_verschluckt(bx_client):
+    respx.post(f"{BASE_URL_V2}/kb_order/31/invoice").mock(
+        return_value=httpx.Response(422, json={"message": "Auftrag bereits verrechnet"})
+    )
+
+    with pytest.raises(httpx.HTTPStatusError):
+        await bx_client.create_invoice_from_order(31)
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_update_invoice_position_schickt_genau_die_uebergebenen_felder(bx_client):
+    """Nichts wird ergaenzt und nichts mit Vorgabewerten aufgefuellt.
+
+    Die Vorlage setzte ``unit_price`` notfalls auf ``'200'``. Bei einem Vertrag
+    zu 250 CHF waeren das 50 CHF je Stunde Schaden -- auf einer Rechnung, die
+    zum Kunden geht, und ohne Meldung.
+    """
+    route = respx.put(f"{BASE_URL_V2}/kb_invoice/20/kb_position_custom/7").mock(
+        return_value=httpx.Response(200, json={"id": 7, "amount": "35.25"})
+    )
+
+    await bx_client.update_invoice_position(20, 7, "custom", {
+        "amount": "35.25", "unit_price": "250.000000", "tax_id": 36,
+        "text": "Effektiver Aufwand", "unit_id": 2,
+    })
+
+    assert json.loads(route.calls[0].request.content) == {
+        "amount": "35.25", "unit_price": "250.000000", "tax_id": 36,
+        "text": "Effektiver Aufwand", "unit_id": 2,
+    }
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_textposition_geht_an_den_eigenen_pfad(bx_client):
+    """Zwei Ressourcen, zwei Pfade -- sonst 404 auf eine Position, die es gibt."""
+    route = respx.put(f"{BASE_URL_V2}/kb_invoice/20/kb_position_text/9").mock(
+        return_value=httpx.Response(200, json={"id": 9})
+    )
+
+    await bx_client.update_invoice_position(20, 9, "text", {"text": "Per 30.09.2026 …"})
+
+    assert route.called
+
+
+@pytest.mark.asyncio
+async def test_unbekannte_positionsart_wird_abgewiesen(bx_client):
+    """Sonst entstuende der Pfad ``kb_position_article`` aus einem Tippfehler."""
+    with pytest.raises(ValueError):
+        await bx_client.update_invoice_position(20, 7, "produkt", {"amount": "1"})
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_delete_invoice_position_verschluckt_keinen_fehler(bx_client):
+    """``admin_core`` gab hier ``False`` zurueck -- ununterscheidbar von
+    «die Position liess sich nicht loeschen»."""
+    respx.delete(f"{BASE_URL_V2}/kb_invoice/20/kb_position_custom/7").mock(
+        return_value=httpx.Response(401, json={"message": "Unauthorized"})
+    )
+
+    with pytest.raises(httpx.HTTPStatusError):
+        await bx_client.delete_invoice_position(20, 7, "custom")
+
+
 # ── Projekte ─────────────────────────────────────────────
 
 @respx.mock

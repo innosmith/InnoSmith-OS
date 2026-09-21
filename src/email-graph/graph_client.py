@@ -13,6 +13,7 @@ GRAPH_CLIENT_SECRET, GRAPH_USER_EMAIL.
 """
 
 import asyncio
+import base64
 import logging
 import os
 import random
@@ -33,6 +34,17 @@ TOKEN_URL_TPL = "https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token"
 _RETRY_STATUS = (429, 503, 504)
 _MAX_ATTEMPTS = 3
 _MAX_WAIT_SECONDS = 30.0
+
+# Anhaenge: bis 3 MB **kodiert** direkt im Rumpf, darueber Upload-Sitzung.
+# Der Bezug auf die Base64-Laenge ist kein Detail -- kodiert waechst eine Datei
+# um ein Drittel, und eine Pruefung auf die Rohgroesse laege in einem Streifen
+# von 750 KB Breite falsch.
+_ANHANG_EINFACH_MAX = 3 * 1024 * 1024
+# Graph verlangt Vielfache von 320 KiB; nur das letzte Stueck darf kleiner sein.
+_UPLOAD_STUECK = 320 * 1024 * 10
+# Dateien nach OneDrive: bis 4 MB in einem PUT, darueber Upload-Sitzung. Hier
+# zaehlt die Rohgroesse, nicht die kodierte -- der Rumpf ist binaer.
+_UPLOAD_EINFACH_MAX = 4 * 1024 * 1024
 
 _FORBIDDEN_BASE = (
     "Graph API 403 Forbidden -- die App-Registration braucht passende "
@@ -593,6 +605,93 @@ class GraphClient:
                 {"emailAddress": {"address": addr}} for addr in cc_recipients
             ]
         return await self._post(f"{self._user_path}/messages", message)
+
+    async def add_attachment(
+        self, message_id: str, dateiname: str, inhalt: bytes,
+        mime: str = "application/pdf",
+    ) -> str:
+        """Eine Datei an einen bestehenden Entwurf haengen. Liefert die Anhang-Kennung.
+
+        **Zwei Wege, und die Grenze liegt nicht dort, wo man sie vermutet.**
+        Bis 3 MB nimmt Graph den Anhang als Base64 im Rumpf entgegen. Darueber
+        verlangt es eine Upload-Sitzung -- und zwar nicht mit einer sprechenden
+        Fehlermeldung, sondern mit ``RequestEntityTooLarge`` oder, je nach
+        Postfach, einem 400 auf ein Feld, das gar nicht falsch ist. Wer nur den
+        einfachen Weg kennt, baut eine Grenze ein, die erst beim ersten grossen
+        Leistungsrapport zuschlaegt: mitten im Rechnungslauf, bei einem Kunden.
+
+        Der Schwellwert ist auf die **Base64-Laenge** bezogen, nicht auf die
+        Rohgroesse -- Base64 blaeht um ein Drittel auf, und eine 2.4-MB-Datei
+        liegt kodiert schon ueber der Grenze. Die naheliegende Pruefung
+        ``len(inhalt) > 3 MB`` waere also in einem Streifen von 750 KB Breite
+        falsch, und dort gaebe es keinen Fehler, sondern einen abgelehnten
+        Anhang.
+        """
+        kodiert = base64.b64encode(inhalt).decode()
+        if len(kodiert) <= _ANHANG_EINFACH_MAX:
+            antwort = await self._post(
+                f"{self._user_path}/messages/{message_id}/attachments",
+                {
+                    "@odata.type": "#microsoft.graph.fileAttachment",
+                    "name": dateiname,
+                    "contentType": mime,
+                    "contentBytes": kodiert,
+                },
+            )
+            return str(antwort.get("id") or "")
+
+        return await self._anhang_per_sitzung(message_id, dateiname, inhalt, mime)
+
+    async def _anhang_per_sitzung(
+        self, message_id: str, dateiname: str, inhalt: bytes, mime: str
+    ) -> str:
+        """Grosser Anhang ueber eine Upload-Sitzung, stueckweise.
+
+        Die Stuecke muessen **ein Vielfaches von 320 KiB** sein -- das steht so
+        in der Graph-Dokumentation, und ein krummes Stueck quittiert der Dienst
+        mit 400 auf einen ``Content-Range``, der richtig aussieht. Nur das
+        letzte Stueck darf kleiner sein.
+
+        Die Stueck-PUTs gehen **ohne Bearer-Token** an die ``uploadUrl``: die
+        URL traegt ihre eigene Ermaechtigung, und ein mitgeschickter
+        Authorization-Header fuehrt zu 401. Deshalb hier ein eigener Client und
+        nicht ``_request``.
+        """
+        sitzung = await self._post(
+            f"{self._user_path}/messages/{message_id}/attachments/createUploadSession",
+            {"AttachmentItem": {
+                "attachmentType": "file", "name": dateiname, "size": len(inhalt),
+                "contentType": mime,
+            }},
+        )
+        url = sitzung.get("uploadUrl")
+        if not url:
+            raise RuntimeError(
+                f"Graph lieferte keine uploadUrl fuer «{dateiname}» ({len(inhalt)} Bytes)"
+            )
+
+        gesamt = len(inhalt)
+        async with httpx.AsyncClient(timeout=120.0) as roh_client:
+            for beginn in range(0, gesamt, _UPLOAD_STUECK):
+                ende = min(beginn + _UPLOAD_STUECK, gesamt) - 1
+                antwort = await roh_client.put(
+                    url,
+                    content=inhalt[beginn:ende + 1],
+                    headers={
+                        "Content-Length": str(ende - beginn + 1),
+                        "Content-Range": f"bytes {beginn}-{ende}/{gesamt}",
+                    },
+                )
+                antwort.raise_for_status()
+                # Das letzte Stueck quittiert Graph mit 201 und der Kennung des
+                # fertigen Anhangs; die davor mit 200 und der Liste der noch
+                # erwarteten Bereiche.
+                if antwort.status_code == 201:
+                    try:
+                        return str(antwort.json().get("id") or "")
+                    except Exception:  # noqa: BLE001 - Kennung ist Kuer, nicht Pflicht
+                        return ""
+        return ""
 
     async def send_draft(self, message_id: str) -> None:
         """Existierenden Entwurf versenden."""
@@ -1261,6 +1360,129 @@ class GraphClient:
                 else:
                     break
         return out
+
+    async def drive_item_by_path(self, pfad: str) -> dict | None:
+        """Ein OneDrive-Element über seinen Pfad holen. ``None``, wenn es fehlt.
+
+        Der Unterschied zwischen «gibt es nicht» und «ging schief» ist hier
+        tragend: nur der 404 wird zu ``None``, jeder andere Fehler fliegt
+        weiter. Ein verschluckter Zeitausfall sähe sonst aus wie eine freie
+        Stelle — und der Aufrufer schriebe über eine Datei, die er für
+        abwesend hält.
+        """
+        clean = pfad.strip("/")
+        try:
+            return await self._get(
+                f"{self._user_path}/drive/root:/{clean}",
+                {"$select": "id,name,size,lastModifiedDateTime,file,folder,webUrl"},
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                return None
+            raise
+
+    async def ensure_drive_folder(self, pfad: str) -> dict:
+        """Eine Ordnerkette anlegen, soweit sie fehlt, und den Endordner liefern.
+
+        Jede Ebene einzeln, weil Graph keinen Aufruf kennt, der einen ganzen
+        Pfad erzeugt. ``fail`` als Konfliktverhalten: entsteht der Ordner in
+        der Zwischenzeit durch eine andere Hand, wird er gelesen statt ersetzt.
+        """
+        teile = [t for t in pfad.strip("/").split("/") if t]
+        if not teile:
+            raise ValueError("Leerer Ordnerpfad")
+
+        bisher = ""
+        letzter: dict = {}
+        for teil in teile:
+            bisher = f"{bisher}/{teil}" if bisher else teil
+            vorhanden = await self.drive_item_by_path(bisher)
+            if vorhanden is not None:
+                # Auf **Vorhandensein** der Facette prüfen, nicht auf ihren
+                # Wahrheitswert: ``"folder": {}`` ist ein Ordner und in Python
+                # zugleich falsch. Mit ``not vorhanden.get("folder")`` hätte ein
+                # leerer Ordner die ganze Ablage abgebrochen — mit der Meldung,
+                # er sei eine Datei.
+                if "folder" not in vorhanden:
+                    raise ValueError(
+                        f"«{bisher}» ist eine Datei, kein Ordner — "
+                        "die Ablage würde am falschen Ort landen"
+                    )
+                letzter = vorhanden
+                continue
+            eltern = bisher.rsplit("/", 1)[0] if "/" in bisher else ""
+            ziel = (
+                f"{self._user_path}/drive/root/children"
+                if not eltern
+                else f"{self._user_path}/drive/root:/{eltern}:/children"
+            )
+            letzter = await self._post(
+                ziel,
+                {
+                    "name": teil,
+                    "folder": {},
+                    "@microsoft.graph.conflictBehavior": "fail",
+                },
+            )
+            logger.info("OneDrive-Ordner angelegt: %s", bisher)
+        return letzter
+
+    async def upload_drive_file(
+        self, pfad: str, inhalt: bytes, *, ueberschreiben: bool = False
+    ) -> dict:
+        """Eine Datei nach OneDrive schreiben. Liefert das erzeugte Element.
+
+        **Standardmässig wird nicht überschrieben.** Graph bekommt
+        ``conflictBehavior=fail``, und der Aufrufer sieht einen Fehler statt
+        einer stillen Ersetzung: in einem Archiv ist eine überschriebene
+        Rechnung nicht wiederherstellbar, und dass sie es war, sieht man ihr
+        nicht an.
+
+        Bis 4 MB in einem Zug, darüber über eine Upload-Sitzung in
+        320-KiB-Vielfachen — dieselbe Grenze und dieselbe Stückelung wie beim
+        Mailanhang, nur dass hier die **Rohgrösse** zählt: der Rumpf ist
+        binär, nicht Base64.
+        """
+        clean = pfad.strip("/")
+        verhalten = "replace" if ueberschreiben else "fail"
+
+        if len(inhalt) <= _UPLOAD_EINFACH_MAX:
+            resp = await self._request(
+                "PUT",
+                f"{self._user_path}/drive/root:/{clean}:/content",
+                params={"@microsoft.graph.conflictBehavior": verhalten},
+                content=inhalt,
+                extra_headers={"Content-Type": "application/octet-stream"},
+                timeout=120.0,
+            )
+            return resp.json() if resp.content else {}
+
+        sitzung = await self._post(
+            f"{self._user_path}/drive/root:/{clean}:/createUploadSession",
+            {"item": {"@microsoft.graph.conflictBehavior": verhalten}},
+        )
+        url = sitzung.get("uploadUrl")
+        if not url:
+            raise RuntimeError(f"Graph lieferte keine uploadUrl für {clean}")
+
+        gesamt = len(inhalt)
+        # Die Sitzungs-URL trägt ihre Berechtigung selbst. Ein Bearer-Header
+        # darauf wird von Graph mit 401 quittiert — deshalb ein roher Client.
+        async with httpx.AsyncClient(timeout=120.0) as roh:
+            for beginn in range(0, gesamt, _UPLOAD_STUECK):
+                ende = min(beginn + _UPLOAD_STUECK, gesamt) - 1
+                antwort = await roh.put(
+                    url,
+                    content=inhalt[beginn:ende + 1],
+                    headers={
+                        "Content-Length": str(ende - beginn + 1),
+                        "Content-Range": f"bytes {beginn}-{ende}/{gesamt}",
+                    },
+                )
+                antwort.raise_for_status()
+                if antwort.status_code in (200, 201):
+                    return antwort.json() if antwort.content else {}
+        return {}
 
     async def get_drive_item_thumbnail(self, item_id: str) -> str | None:
         """Kleine Vorschau-URL (Thumbnail) eines OneDrive-Items, falls vorhanden."""

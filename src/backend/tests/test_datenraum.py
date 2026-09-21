@@ -438,6 +438,10 @@ class TestTogglAuffaltung:
                 assert status == "both"
                 return [{"id": 3, "name": "GSW Treuhand AG"}]
 
+            async def list_tags(self, ws=None):
+                # Die Tags tragen die Verrechnungsart.
+                return [{"id": 8280154, "name": "Fixpreis"}]
+
             async def search_all_time_entries(self, ws, von, bis):
                 return [gruppe]
 
@@ -471,6 +475,10 @@ class TestTogglAuffaltung:
 
             async def list_clients(self, status=None):
                 return [{"id": 3, "name": "GSW Treuhand AG"}]
+
+            async def list_tags(self, ws=None):
+                # Die Tags tragen die Verrechnungsart.
+                return [{"id": 8280154, "name": "Fixpreis"}]
 
             async def search_all_time_entries(self, ws, von, bis):
                 return [gruppe]

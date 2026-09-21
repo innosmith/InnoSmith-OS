@@ -230,19 +230,17 @@ async def _search_toggl(user: User, term: str) -> list[TogglHit]:
 async def _search_bexio(user: User, term: str) -> list[BexioHit]:
     """Bexio-Suche: Kontakte nach Name."""
     try:
-        sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "bexio"))
-        from bexio_client import BexioClient, BexioConfig
+        from fastapi import HTTPException
 
-        settings = user.settings or {}
-        token = settings.get("bexio_api_token") or ""
-        if not token:
-            from app.config import get_settings
-            cfg = get_settings()
-            token = cfg.bexio_api_token
-        if not token:
+        from app.services.fachsysteme import bexio_zugang
+
+        try:
+            client = bexio_zugang(user)
+        except HTTPException:
+            # Eine Suche ohne Bexio-Zugang liefert keine Bexio-Treffer und
+            # scheitert deshalb nicht -- anders als ein Fachendpunkt.
             return []
 
-        client = BexioClient(BexioConfig(api_token=token))
         contacts_raw = await asyncio.wait_for(
             client.search_contact_by_name(term),
             timeout=5.0,

@@ -749,3 +749,82 @@ class CapacityTimeOff(Base):
     label: Mapped[str | None] = mapped_column(Text)
     hours: Mapped[float] = mapped_column(Float, server_default="8.0")
     created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=func.now())
+
+
+class Debitorenlauf(Base):
+    """Ein Rechnungslauf für einen Leistungsmonat.
+
+    Die Tabelle hält **keine** Zahlen und keinen Prüfzustand. Ob eine Rechnung
+    stimmt, wie viele Stunden dahinterstehen und was in den Positionen stehen
+    müsste, wird bei jedem Aufruf neu aus Bexio und Toggl gelesen. Stünde es
+    hier, gäbe es zwei Wahrheiten, und die ältere gewönne genau dann, wenn
+    jemand in Bexio nachgebessert hat.
+
+    Gespeichert wird nur, was **sonst nirgends eine Spur hinterlässt**: die
+    Entscheidungen des Menschen und die Schritte, die sich nicht wiederholen
+    dürfen. Dass ein Entwurf existiert, steht in Bexio; dass jemand ihn bewusst
+    zurückgestellt hat, steht nur hier.
+    """
+
+    __tablename__ = "debitorenlaeufe"
+    __table_args__ = (UniqueConstraint("jahr", "monat", name="uq_debitorenlauf_periode"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
+    jahr: Mapped[int] = mapped_column(Integer, nullable=False)
+    monat: Mapped[int] = mapped_column(Integer, nullable=False)
+    stichtag: Mapped[date] = mapped_column(Date, nullable=False)
+    """Der Monatsletzte — das Datum, das jede Rechnung des Laufs trägt."""
+    abgeschlossen_am: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    notiz: Mapped[str | None] = mapped_column(Text)
+    user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    rechnungen: Mapped[list["DebitorenlaufRechnung"]] = relationship(
+        back_populates="lauf", cascade="all, delete-orphan"
+    )
+
+
+class DebitorenlaufRechnung(Base):
+    """Was mit einer Rechnung des Laufs geschehen ist — und nur das.
+
+    Jedes Zeitfeld beantwortet «ist dieser Schritt passiert und wann». Ein
+    Zeitstempel statt eines Wahrheitswerts, weil ``NULL`` dann eindeutig «noch
+    nicht» heisst und die Frage «wann war das» ohne zweite Spalte beantwortet
+    ist.
+
+    Aufgenommen ist nur, was sich **nicht wiederholen darf** oder sonst
+    verloren ginge. Bewusst *nicht* aufgenommen: dass ein Entwurf erzeugt wurde
+    (er steht in Bexio) und dass Positionen angepasst wurden (sie stehen in
+    Bexio, und die Prüfung rechnet jedes Mal nach, ob sie stimmen).
+    """
+
+    __tablename__ = "debitorenlauf_rechnungen"
+    __table_args__ = (
+        UniqueConstraint("lauf_id", "rechnung_id", name="uq_debitorenlauf_rechnung"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
+    lauf_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("debitorenlaeufe.id", ondelete="CASCADE"), nullable=False)
+    rechnung_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    """Die Bexio-Kennung. Sie ist die Identität; die Nummer ist für Menschen."""
+    nummer: Mapped[str | None] = mapped_column(Text)
+
+    zurueckgestellt: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
+    grund: Mapped[str | None] = mapped_column(Text)
+    """Warum zurückgestellt. Eine Ausnahme ohne Begründung ist in drei Wochen
+    nicht mehr nachvollziehbar."""
+
+    dokumente_erzeugt_am: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    mailentwurf_id: Mapped[str | None] = mapped_column(Text)
+    """Graph-Handle des Entwurfs. Ohne ihn entstünde beim zweiten Anlauf ein
+    zweiter Entwurf im Postfach."""
+    versendet_am: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    """Vom Menschen bestätigt, nicht gemessen. Erst danach darf die Rechnung in
+    Bexio ausgestellt und ins Kundenarchiv gelegt werden."""
+    abgelegt_am: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    lauf: Mapped["Debitorenlauf"] = relationship(back_populates="rechnungen")

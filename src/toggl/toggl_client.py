@@ -222,6 +222,81 @@ class TogglClient:
         data = await self._get(f"/workspaces/{workspace_id}/projects/{project_id}")
         return data if isinstance(data, dict) else {}
 
+    async def list_tags(self, workspace_id: int | None = None) -> list[dict]:
+        """Die Tags des Workspaces — sie tragen die Verrechnungsart.
+
+        Die Reports-API liefert an jeder Gruppe nur ``tag_ids``. Ohne diese
+        Tabelle stuende in jeder Auswertung eine Zahl statt «Fixpreis».
+
+        Am 21.09.2026 gab es genau vier: «Kunde verrechnet», «Fixpreis»,
+        «Extern rapportiert», «keine Verrechnung».
+        """
+        ws = workspace_id or self.config.workspace_id
+        if not ws:
+            return []
+        data = await self._get(f"/workspaces/{ws}/tags")
+        return data if isinstance(data, list) else []
+
+    async def add_time_entry_tag(
+        self,
+        time_entry_id: int,
+        tag_id: int,
+        workspace_id: int | None = None,
+    ) -> dict:
+        """Einen Tag an einen bestehenden Zeiteintrag hängen.
+
+        ## Warum ``tag_ids`` und nicht ``tags``
+
+        Toggl nimmt beides. Bei ``tags`` gilt aber laut eigener Dokumentation:
+        «If name does not exist as tag, one will be created automatically» —
+        aus einem Tippfehler entsteht damit lautlos ein fünftes Tag, das
+        aussieht wie eine Verrechnungsart und keine ist. Über die Kennung
+        scheitert derselbe Tippfehler laut.
+
+        ## Warum ``tag_action: add`` und nicht der Sammelaufruf
+
+        Der Sammelweg ``PATCH …/time_entries/{ids}`` fasst bis zu hundert
+        Einträge, arbeitet aber nach RFC 6902 — und dort **ersetzt** ``add``
+        auf einem vorhandenen Feld dessen Wert. Ein Eintrag, der schon ein
+        anderes Tag trägt, verlöre es. ``tag_action: add`` ist der
+        ausdrücklich dokumentierte additive Weg; er kostet einen Aufruf je
+        Eintrag, und bei rund achtzig Einträgen im Monat ist das der
+        günstigere Preis.
+
+        Zurück kommt der geänderte Eintrag. Ihn zu prüfen ist Sache des
+        Aufrufers: ein ``PUT``, das mehr ändert als das Tag, wäre ein stiller
+        Datenverlust.
+        """
+        ws = workspace_id or self.config.workspace_id
+        if not ws:
+            raise ValueError("Ohne Workspace kein Tag — Kennung fehlt")
+        data = await self._put(
+            f"/workspaces/{ws}/time_entries/{time_entry_id}",
+            {
+                "tag_ids": [tag_id],
+                "tag_action": "add",
+                "created_with": "TaskPilot",
+            },
+        )
+        return data if isinstance(data, dict) else {}
+
+    async def list_tasks(
+        self, project_id: int, workspace_id: int | None = None
+    ) -> list[dict]:
+        """Die Aufgaben **eines Projekts**.
+
+        Der Workspace-Pfad ``/workspaces/{id}/tasks`` existiert und liefert
+        eine leere Liste, obwohl Aufgaben vorhanden sind — am 21.09.2026
+        gemessen: 0 Eintraege, waehrend das Projekt «Administrative
+        Unterstuetzung» drei hat. Eine leere Antwort statt einer
+        Fehlermeldung; wer ihr glaubt, haelt den Bestand fuer leer.
+        """
+        ws = workspace_id or self.config.workspace_id
+        if not ws:
+            return []
+        data = await self._get(f"/workspaces/{ws}/projects/{project_id}/tasks")
+        return data if isinstance(data, list) else []
+
     async def create_project(
         self,
         workspace_id: int | None,

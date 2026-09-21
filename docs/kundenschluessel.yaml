@@ -40,7 +40,7 @@
 #   dort nicht gibt, wird verworfen und gemeldet.
 
 version: 1
-stand: 2026-09-03
+stand: 2026-09-20
 
 kundschaften:
   - schluessel: mba
@@ -336,6 +336,8 @@ ohne_gegenstueck:
   - 'bexio:75'
   - 'pipedrive:133'
   - 'pipedrive:730'
+  - 'pipedrive:774'
+  - 'pipedrive:775'
 
 # Was sich nicht eindeutig zuordnen laesst. Wird nicht geraten --
 # hier steht die Frage, bis ein Mensch sie beantwortet.

@@ -96,14 +96,9 @@ def _is_expense_account(acc_no: int) -> bool:
 
 def _get_bexio_client(user: User) -> BexioClient:
     """Live-Client -- ausschliesslich für die Kreuzprobe in ``/validate``."""
-    settings = user.settings or {}
-    token = settings.get("bexio_api_token") or ""
-    if not token:
-        from app.config import get_settings
-        token = get_settings().bexio_api_token
-    if not token:
-        raise HTTPException(status_code=400, detail="Bexio API-Token nicht konfiguriert")
-    return BexioClient(BexioConfig(api_token=token))
+    from app.services.fachsysteme import bexio_zugang
+
+    return bexio_zugang(user)
 
 
 def _datenraum_fehler(exc: DatenraumUnbrauchbar) -> HTTPException:

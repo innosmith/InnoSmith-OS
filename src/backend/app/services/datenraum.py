@@ -408,20 +408,13 @@ async def _lade_bexio(settings: dict) -> tuple[dict[str, list[dict]], dict]:
 async def _lade_toggl(settings: dict) -> tuple[dict[str, list[dict]], dict]:
     """Zeiteinträge und Projekte aus Toggl (rollende 24 Monate).
 
-    Die Reports-API v3 antwortet **gruppiert**, nicht als flache Liste. Eine Zeile
-    trägt ``project_id``, ``description``, ``billable`` und darunter ein Feld
-    ``time_entries`` mit den eigentlichen Buchungen (``id``, ``start``, ``seconds``).
-
-    Zwei Felder, die man auf der obersten Ebene erwartet, gibt es dort nicht:
-    ``start`` und ``client_id``. Der erste Entwurf las beide dort -- mit dem Ergebnis,
-    dass **alle 2639 Zeiteinträge** ohne Datum und ohne Kunde in den Datenraum gingen.
-    Die Tabelle war vollzählig, jede Zeitfrage wäre trotzdem falsch beantwortet
-    worden: nach Stunden für einen Kunden gefragt, hätte sie null ergeben.
-
-    Deshalb wird hier aufgefaltet -- eine Zeile je tatsächlicher Buchung -- und der
-    Kunde über das Projekt aufgelöst, wo er in Toggl hängt.
+    Das Auffalten der gruppierten Reports-Antwort steht in
+    ``src/toggl/zeiteintraege.py`` und nicht hier, weil der Rechnungslauf
+    dieselbe Deutung braucht -- er liest allerdings live statt aus dem
+    Datenraum. Die Begründung und die Falle stehen dort im Modulkopf.
     """
     from toggl_client import TogglClient, TogglConfig
+    from zeiteintraege import auffalten, projektzeilen
 
     cfg = get_settings()
     token = settings.get("toggl_api_token") or cfg.toggl_api_token
@@ -434,66 +427,22 @@ async def _lade_toggl(settings: dict) -> tuple[dict[str, list[dict]], dict]:
     von = (heute - timedelta(days=730)).isoformat()
 
     projekte = await client.list_projects(active="both")
-    projektnamen = {p.get("id"): p.get("name") or "" for p in projekte}
-    kunden = {c.get("id"): c.get("name") or "" for c in await client.list_clients(status="both")}
-    # Der Kunde hängt am Projekt, nicht am Zeiteintrag -- siehe unten.
-    projekt_kunde = {p.get("id"): p.get("client_id") for p in projekte}
+    kunden = await client.list_clients(status="both")
+    gruppen = await client.search_all_time_entries(workspace, von, heute.isoformat())
+    # Die Tags tragen die Verrechnungsart. Ohne diese Tabelle stuende in jeder
+    # Auswertung eine Kennung statt «Fixpreis».
+    tags = await client.list_tags(workspace)
 
-    eintraege: list[dict] = []
-    ohne_projekt = 0
-    for gruppe in await client.search_all_time_entries(workspace, von, heute.isoformat()):
-        projekt_id = gruppe.get("project_id")
-        if projekt_id is None:
-            ohne_projekt += 1
-        kunden_id = projekt_kunde.get(projekt_id)
+    eintraege, befund = auffalten(gruppen, projekte, kunden, tags)
 
-        satz_rappen = gruppe.get("hourly_rate_in_cents") or 0
-        untereintraege = gruppe.get("time_entries") or []
-        sekunden_gesamt = sum(u.get("seconds") or 0 for u in untereintraege)
-        betrag_rappen = gruppe.get("billable_amount_in_cents") or 0
-
-        for u in untereintraege:
-            sekunden = u.get("seconds") or 0
-            # Der Betrag gilt für die Gruppe. Ihn nach Sekunden aufzuteilen ist keine
-            # Schätzung, sondern die Umkehrung seiner Entstehung (Satz mal Zeit).
-            anteil = (sekunden / sekunden_gesamt) if sekunden_gesamt else 0
-            eintraege.append({
-                "eintrag_id": u.get("id"),
-                "datum": (u.get("start") or "")[:10] or None,
-                "beginn": u.get("start") or None,
-                "projekt_id": projekt_id,
-                "projekt": projektnamen.get(projekt_id, ""),
-                "kunden_id": kunden_id,
-                "kunde": kunden.get(kunden_id, ""),
-                "person": gruppe.get("username") or "",
-                "beschreibung": gruppe.get("description") or "",
-                "stunden": round(sekunden / 3600, 4),
-                "verrechenbar": bool(gruppe.get("billable")),
-                "stundensatz": round(satz_rappen / 100, 2),
-                "betrag": round(betrag_rappen * anteil / 100, 2),
-                "waehrung": gruppe.get("currency") or "",
-            })
-
-    projektzeilen = [{
-        "projekt_id": p.get("id"),
-        "projekt": p.get("name") or "",
-        "kunden_id": p.get("client_id"),
-        "kunde": kunden.get(p.get("client_id"), ""),
-        "aktiv": bool(p.get("active")),
-        "verrechenbar": bool(p.get("billable")),
-    } for p in projekte]
-
-    # Gezählt wird der unaufgelöste Name, nicht die fehlende Kennung: ein Projekt mit
-    # Kundennummer, zu der es keinen Namen gibt, sieht in der Tabelle genauso aus wie
-    # eines ganz ohne Kunden -- und ist doch ein Mangel statt einer Tatsache.
-    hinweise: dict = {
-        "zeitraum": f"{von} bis {heute.isoformat()}",
-        "eintraege_ohne_kundennamen": sum(1 for e in eintraege if not e["kunde"]),
-    }
-    if ohne_projekt:
-        hinweise["gruppen_ohne_projekt"] = ohne_projekt
-
-    return {"toggl_zeiteintraege": eintraege, "toggl_projekte": projektzeilen}, hinweise
+    hinweise: dict = {"zeitraum": f"{von} bis {heute.isoformat()}", **befund}
+    return (
+        {
+            "toggl_zeiteintraege": eintraege,
+            "toggl_projekte": projektzeilen(projekte, kunden),
+        },
+        hinweise,
+    )
 
 
 async def _lade_pipedrive(settings: dict) -> tuple[dict[str, list[dict]], dict]:

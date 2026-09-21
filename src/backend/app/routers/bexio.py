@@ -28,18 +28,9 @@ _static_cache: TTLCache = TTLCache(maxsize=50, ttl=3600)
 
 def _get_bexio_client(user: User) -> BexioClient:
     """Bexio-Client aus User-Settings oder Env-Variablen erstellen."""
-    settings = user.settings or {}
-    token = settings.get("bexio_api_token") or ""
+    from app.services.fachsysteme import bexio_zugang
 
-    if not token:
-        from app.config import get_settings
-        app_cfg = get_settings()
-        token = app_cfg.bexio_api_token
-
-    if not token:
-        raise HTTPException(status_code=400, detail="Bexio API-Token nicht konfiguriert")
-
-    return BexioClient(BexioConfig(api_token=token))
+    return bexio_zugang(user)
 
 
 # ── Verbindungstest ──────────────────────────────────────

@@ -1,0 +1,655 @@
+# Debitorenverträge — was je Projekt vereinbart ist
+#
+# Übertragen aus `config.yml` von InnoSmithAdmin, Stand 20.09.2026. Die Datei
+# ersetzt dort drei Abschnitte: `projects`, `settings.referenz_pflicht_kunden`
+# und `customers`. Sie ist das Stammdatum, gegen das die Rechnungsprüfung
+# (`app/services/debitoren_pruefung.py`) misst.
+#
+# ## Warum das ein Stammdatum ist und kein Text
+#
+# Die vereinbarten Fixstunden standen bisher nirgends deklariert. Sie wurden aus
+# dem Positionstext der Bexio-Rechnung zurückgelesen, mit zwei regulären
+# Ausdrücken, die sich nicht einig waren: `admin_core` verlangte «Xh fix
+# inklusive», `D2_updateDraftRechnungen` begnügte sich mit «Xh/Monat fix», und
+# beide akzeptierten nur ganze Zahlen — ein Vertrag über 7.5 Stunden war nicht
+# darstellbar. Wer den Text änderte, änderte damit unbemerkt den Vertrag.
+#
+# Hier steht die Zahl. Der Positionstext wird weiterhin gelesen, aber nur noch
+# zum Abgleich: weicht er ab, ist das ein Befund und keine stille Übernahme.
+#
+# ## Aufbau
+#
+# `kunden`
+#     Was für alle Projekte einer Kundschaft gilt: Empfänger, Referenzpflicht,
+#     Ordnername im Archiv. Der `schluessel` zeigt auf `kundenschluessel.yaml`
+#     und wird beim Laden dagegen geprüft — ein Vertrag, der auf eine
+#     unbekannte Kundschaft zeigt, wird verworfen und gemeldet.
+# `vertraege`
+#     Was je Projekt gilt. Leere Felder bedeuten «Vorgabe der Kundschaft bzw.
+#     des Systems», nicht «null».
+# `interne_projekte`
+#     Die eigenen Toggl-Projekte ohne Kundschaft. Namentlich, nicht als Regel
+#     «kein Vertrag heisst intern» — siehe die Begründung am Block selbst.
+#
+# ## Die Verrechnungsart
+#
+# `verrechnungsart` benennt das Toggl-Tag, das nach bestätigtem Versand gesetzt
+# wird, und erbt wie der Empfänger: Vorgabe, dann Kundschaft, dann Vertrag. Vier
+# Werte sind zulässig (`Kunde verrechnet`, `Fixpreis`, `Extern rapportiert`,
+# `keine Verrechnung`); ein fünfter wird bemängelt und nicht übernommen, weil
+# Toggl einen unbekannten Tagnamen stillschweigend anlegt.
+#
+# Abgelesen statt entschieden: von 797 Buchungen zwischen Januar und August 2026
+# tragen 639 genau die hier deklarierte Art, und keine eine andere. Die Zuordnung
+# ist damit eine geschlossene Menge und gehört deklariert.
+#
+# Der Empfänger steht an der Kundschaft und nicht mehr am Projekt. In den 37
+# übertragenen Projekten gibt es keinen Fall, in dem zwei Projekte derselben
+# Kundschaft an verschiedene Adressen gingen — die Angabe stand 37-mal da, wo
+# 11-mal genügt, und jede Wiederholung war eine Stelle, die abweichen konnte.
+#
+# ## Was hier bewusst fehlt
+#
+# * **Die Merge-Liste.** Rechnung und Leistungsrapport werden neu für alle
+#   Kundschaften zu einem PDF zusammengeführt (bestätigt 20.09.2026). Damit
+#   entfällt `settings.pdf_merge_kunden`.
+# * **`match_keywords`.** Das war der Behelf, um aus dem Text eines erzeugten
+#   PDFs auf das Projekt zurückzuschliessen. Die Zuordnung läuft künftig über
+#   Kennungen; die Stichwörter stehen übergangsweise noch unter `erkennung`.
+#
+# ## Regeln
+#
+# * `bestaetigt: true` heisst «von einem Menschen geprüft». Voreingestellt ist
+#   `false`: die Übertragung aus `config.yml` ist eine Maschinenleistung.
+# * Wer `fix_stunden` setzt, muss auch `uebertragbar` setzen. Ohne die zweite
+#   Angabe ist nicht entscheidbar, ob nicht verbrauchte Stunden in den Folgemonat
+#   wandern — und die Prüfung meldet die Stundenregeln als offen, statt sich
+#   für eine Lesart zu entscheiden.
+# * Unsicherheit ist ein zulässiges Ergebnis. Was nicht feststeht, steht unter
+#   `offen` und wird nicht geraten.
+
+version: 1
+stand: 2026-09-20
+
+vorgaben:
+  # Kann jährlich ändern. Bildungsleistungen sind steuerfrei und stehen am Vertrag.
+  mwst: 8.1
+  # Nur Bank-Identifikation, keine Kontonummer.
+  iban_praefix: 'CH60 3080'
+  anrede: ich
+  # Das Toggl-Tag, das nach bestätigtem Versand gesetzt wird. Erbt wie der
+  # Empfänger: Vorgabe, dann Kundschaft, dann Vertrag. Abgelesen aus Januar bis
+  # August 2026 — dort trägt kein Projekt zwei verschiedene Arten, und ausser
+  # den unten genannten trägt jedes verrechnete «Kunde verrechnet».
+  verrechnungsart: Kunde verrechnet
+
+kunden:
+  - schluessel: mba
+    empfaenger: kreditoren@be.ch
+    referenz_pflicht: true
+    ablage: MBA
+    bestaetigt: false
+
+  - schluessel: agg
+    empfaenger: kreditoren.agg@be.ch
+    referenz_pflicht: true
+    ablage: AGG
+    bestaetigt: false
+
+  - schluessel: aue
+    empfaenger: kreditoren@be.ch
+    referenz_pflicht: true
+    ablage: AUE
+    bestaetigt: false
+
+  - schluessel: swiss-bankers
+    empfaenger: invoices@swissbankers.ch
+    ablage: 'Swiss Bankers'
+    bestaetigt: false
+
+  - schluessel: bfh
+    empfaenger: sylvia.batt@bfh.ch
+    ablage: 'Berner Fachhochschule'
+    verrechnungsart: Fixpreis
+    bestaetigt: true
+    hinweis: >-
+      Bildungsleistungen sind von der Mehrwertsteuer befreit. Der Satz steht
+      trotzdem am einzelnen Vertrag und nicht hier: eine BFH-Leistung ausserhalb
+      der Lehre wäre wieder steuerpflichtig. Die Verrechnungsart steht dagegen
+      hier: ein CAS wird zum vereinbarten Honorar gehalten, nicht nach Aufwand,
+      und das gilt für die Lehre wie für die Redesign-Aufträge.
+
+  - schluessel: gemeinde-koeniz
+    empfaenger: kommunikation@koeniz.ch
+    ablage: 'Gemeinde Köniz'
+    bestaetigt: true
+
+  - schluessel: stadt-bern
+    empfaenger: peter.renfer@bern.ch
+    ablage: 'Stadt Bern'
+    bestaetigt: true
+
+  - schluessel: t-r
+    empfaenger: martin.roethlisberger@t-r.ch
+    ablage: 'T+R'
+    bestaetigt: false
+
+  - schluessel: gsw
+    empfaenger: monika.affolter@gsw.ch
+    ablage: 'GSW Treuhand AG'
+    bestaetigt: true
+
+  - schluessel: wyss-academy
+    bestaetigt: false
+    hinweis: >-
+      Trägt keinen Empfänger, weil aktuell kein Vertrag hierher fakturiert. Der
+      Eintrag besteht für den Rücklauf: deinklima lief bis Ende 2025 über die
+      Wyss Academy, und dort galt keine Referenzpflicht. Ohne diese Angabe
+      meldete die Prüfung für 2025 eine fehlende Referenz als Fehler.
+
+  - schluessel: overpar
+    empfaenger: dietmar.treichel@spiralsquare.com
+    ablage: 'Overpar Solutions AG'
+    bestaetigt: true
+    hinweis: >-
+      Die Coachings laufen unter «Spiral Square», fakturiert wird an die Overpar
+      Solutions AG (bestätigt 21.09.2026). Der Empfänger bleibt die Adresse bei
+      Spiral Square, wie in der alten Konfiguration.
+
+  - schluessel: matrics
+    empfaenger: martin.smith@matrics.co.uk
+    ablage: 'MATRICS Consult Ltd'
+    bestaetigt: true
+    hinweis: >-
+      Stand nie in der alten Konfiguration -- die Rechnung lief immer von Hand.
+      Die Adresse ist auch in Bexio nicht hinterlegt (Kontakt 60 trägt nur die
+      Postanschrift in Dorset), sie kam am 21.09.2026 mündlich dazu.
+
+  - schluessel: treuhand-suisse-bern
+    bestaetigt: true
+    hinweis: >-
+      Ohne Empfänger, weil das einzige Projekt abgeschlossen ist. Die alte
+      Konfiguration trug hier TODO_EMAIL_EINTRAGEN — eine Adresse gab es also
+      nie. Fällt wieder eine Rechnung an, wird sie dann erfragt.
+
+  - schluessel: spie
+    ablage: 'SPIE ICS'
+    bestaetigt: false
+    hinweis: >-
+      Stand nur in der Alias-Liste für Ordnernamen, hatte nie ein Projekt mit
+      Empfänger. Ohne Empfänger ist kein Versand möglich; der Eintrag hält den
+      Ordnernamen fest, bis wieder eine Rechnung anfällt.
+
+vertraege:
+  # ── Mittelschul- und Berufsbildungsamt ──────────────────────────────
+
+  - schluessel: cheetah
+    bezeichnung: Cheetah
+    kunde: mba
+    erkennung: [Cheetah]
+    fix_stunden: 14.5
+    uebertragbar: true
+    bestaetigt: true
+
+  - schluessel: sympholio
+    bezeichnung: Sympholio
+    kunde: mba
+    erkennung: [Sympholio]
+    fix_stunden: 14.0
+    uebertragbar: true
+    ruhend: true
+    bestaetigt: true
+    hinweis: >-
+      Das Abonnement endete per 31.08.2026; die Hostingkosten für das Cockpit
+      laufen weiter und werden separat verrechnet. Der Eintrag bleibt mit seinen
+      Fixstunden im Bestand, weil die Prüfung abgeschlossener Monate sie braucht
+      — ``ruhend`` nimmt ihn nur aus der Erwartung, dass noch eine Rechnung
+      entsteht. Auftrag AU-00026 am 21.09.2026 in Bexio abgeschlossen; die
+      Prüfung meldete ihn bis dahin als «Vertrag beendet, Auftrag läuft weiter».
+
+  - schluessel: unterstuetzung-fbi
+    bezeichnung: Unterstützung FBI
+    kunde: mba
+    erkennung: [Unterstützung FBI, FBI]
+    fix_stunden: 5.0
+    uebertragbar: false
+    bestaetigt: true
+
+  - schluessel: akv-bot
+    bezeichnung: AKV-Bot
+    kunde: mba
+    rhythmus: nach_aufwand
+    bestaetigt: true
+    hinweis: >-
+      Reine Aufwandabrechnung, keine Pauschale — die Rechnung führt nur
+      Stundenpositionen. Bewusst ohne ``fix_stunden``. Das Projekt läuft
+      sporadisch, weil die Kundschaft wenig Zeit hat; Rechnung nur, wenn
+      Leistung erbracht wurde (bestätigt 21.09.2026). Ein Monat ohne Rechnung
+      ist hier der Normalfall.
+
+  - schluessel: coflow
+    bezeichnung: COflow
+    kunde: mba
+    bestaetigt: true
+    hinweis: Reine Aufwandabrechnung, keine Pauschale.
+
+  - schluessel: integrix
+    bezeichnung: Integrix
+    kunde: mba
+    erkennung: [Integrix]
+    ruhend: true
+    bestaetigt: true
+    hinweis: >-
+      Sechs Rechnungen von Oktober 2025 bis April 2026, seither nichts. Auftrag
+      AU-00028 ist abgeschlossen, das Projekt beendet (bestätigt 21.09.2026).
+
+  - schluessel: administrative-unterstuetzung
+    bezeichnung: Administrative Unterstützung
+    kunde: mba
+    verrechnungsart: Fixpreis
+    anrede: wir
+    erkennung: [Administrative Unterstützung]
+    ruhend: true
+    bestaetigt: true
+    hinweis: >-
+      Das einzige Projekt, dessen Begleittext in der Wir-Form steht.
+      Beendet (bestätigt 21.09.2026): vier Rechnungen von November 2025 bis
+      Februar 2026, seither sieben Monate ohne Rechnung und ohne eine einzige
+      Toggl-Stunde. Auftrag AU-00030 ist abgeschlossen.
+
+  - schluessel: subventix
+    bezeichnung: Subventix
+    kunde: mba
+    bestaetigt: true
+
+  - schluessel: restart-bi-cockpit
+    bezeichnung: Restart BI-Cockpit
+    kunde: mba
+    bestaetigt: true
+
+  # ── Amt für Grundstücke und Gebäude ─────────────────────────────────
+
+  - schluessel: digiagg2426
+    bezeichnung: DigiAGG2426
+    kunde: agg
+    bestaetigt: false
+
+  # ── Swiss Bankers ───────────────────────────────────────────────────
+
+  - schluessel: ai-lernpfad
+    bezeichnung: AI-Lernpfad
+    kunde: swiss-bankers
+    ruhend: true
+    bestaetigt: true
+    hinweis: >-
+      Beendet (bestätigt 21.09.2026): zwei Rechnungen im Januar und Februar
+      2026, seither weder Rechnung noch Stunde. Auftrag AU-00032 ist
+      abgeschlossen.
+
+  - schluessel: datavia
+    bezeichnung: dataVia
+    kunde: swiss-bankers
+    bestaetigt: false
+
+  - schluessel: schulung-kreditorenbot
+    bezeichnung: Schulung KreditorenBot
+    kunde: swiss-bankers
+    stunden_pruefen: false
+    leistungsrapport: false
+    erkennung: [Schulung KreditorenBot]
+    bestaetigt: false
+
+  - schluessel: sbkreditorenbot
+    bezeichnung: sbKreditorenBot
+    kunde: swiss-bankers
+    bestaetigt: false
+
+  - schluessel: onboardingqs
+    bezeichnung: OnboardingQS
+    kunde: swiss-bankers
+    bestaetigt: false
+
+  - schluessel: ki-basisschulung
+    bezeichnung: KI-Basisschulung
+    kunde: swiss-bankers
+    stunden_pruefen: false
+    leistungsrapport: false
+    bestaetigt: false
+
+  # ── Übrige laufende Projekte ────────────────────────────────────────
+
+  - schluessel: impulskoeniz
+    bezeichnung: ImpulsKöniz
+    kunde: gemeinde-koeniz
+    fix_stunden: 7.0
+    uebertragbar: false
+    rhythmus: monatlich
+    bestaetigt: true
+    # Der Vertrag mit den meisten Wechseln -- und der Anlass für die Zeitachse.
+    # Jede Stufe ist an den Rechnungen belegt (RE-00570 bis RE-00695), die
+    # Lesart am 21.09.2026 bestätigt: die Menge 3 auf den Quartalsrechnungen
+    # sind drei Monate, nicht drei Stunden.
+    konditionen:
+      - bis: 2025-09-30          # RE-00570: 7h fix, 1400.--
+        fix_stunden: 7.0
+      - bis: 2025-11-30          # RE-00579, RE-00589: 3h fix, 600.--
+        fix_stunden: 3.0
+      - bis: 2025-12-31          # RE-00598: 1h fix, 200.--
+        fix_stunden: 1.0
+      - bis: 2026-07-31          # reduziertes Pensum, quartalsweise verrechnet
+        fix_stunden: 1.0         # RE-00634 (Jan-Mrz), RE-00672 (Apr-Jun)
+        rhythmus: quartalsweise
+    hinweis: >-
+      Seit August 2026 wieder 7h monatlich (RE-00695). Von Januar bis Juli 2026
+      galt das reduzierte Pensum von einer Stunde je Monat, abgerechnet je
+      Quartal auf einer Rechnung.
+
+  - schluessel: decidim-bernportal
+    bezeichnung: Decidim BernPortal
+    kunde: stadt-bern
+    erkennung: [BernPortal]
+    bestaetigt: false
+    hinweis: >-
+      Das Projekt heisst in Toggl «Decidim BernPortal», die Rechnung vom
+      30.04.2026 dagegen «Unterstützung BernPortal». Gemeinsam ist nur
+      «BernPortal» -- darum steht das als Erkennung.
+
+  - schluessel: digitale-evolution-mit-ki
+    bezeichnung: Digitale Evolution mit KI
+    kunde: t-r
+    erkennung: [Digitale Evolution, Evolution mit KI]
+    fix_stunden: 14.0
+    uebertragbar: true
+    rhythmus: nach_aufwand
+    bestaetigt: true
+    hinweis: >-
+      Läuft mit Unterbrüchen: Wiederbeginn im Mai 2026 (erste Rechnung per
+      31.05.2026), danach Sommerpause im Juli. Beide Monate ohne Rechnung sind
+      vereinbart und kein Mangel. Die Prüfung trägt den Übertrag über eine
+      solche Pause hinweg, sofern für den übersprungenen Monat auch in Toggl
+      keine Stunden stehen.
+      Der Takt steht auf `nach_aufwand`, obwohl eine Pauschale vereinbart ist:
+      der Takt beantwortet nicht, **wieviel** verrechnet wird, sondern **wann**
+      eine fehlende Rechnung ein Befund ist. Die Pausen decken sich exakt mit
+      den Monaten ohne Toggl-Stunden (Februar bis April und Juli 2026, je
+      0.00h), und in allen Monaten mit Stunden steht eine Rechnung.
+
+  - schluessel: ki-pilotprojekte
+    bezeichnung: KI-Pilotprojekte
+    kunde: gsw
+    bestaetigt: true
+
+  - schluessel: ki-strategieunterstuetzung
+    bezeichnung: KI-Strategieunterstützung
+    kunde: gsw
+    bestaetigt: true
+    hinweis: >-
+      Neu ab September 2026, eigenständig neben «KI-Pilotprojekte». Abrechnung
+      nach Aufwand, ohne Kostendach — deshalb bewusst ohne ``fix_stunden``.
+
+  - schluessel: deinklima
+    bezeichnung: deinklima
+    kunde: aue
+    kundenwechsel:
+      - {kunde: wyss-academy, bis: 2025-12-31}
+    fix_stunden: 7.0
+    uebertragbar: true
+    bestaetigt: true
+    hinweis: >-
+      Seit 2026 über das Amt für Umwelt und Energie, bis Ende 2025 über die Wyss
+      Academy for Nature. Der Wechsel steht hier und nicht als zweiter Eintrag,
+      weil es dasselbe Projekt ist — nur die Gegenpartei ist eine andere. Er
+      trägt für die Prüfung abgeschlossener Monate: AUE ist referenzpflichtig,
+      die Wyss Academy war es nicht.
+
+  # ── Berner Fachhochschule (Bildungsleistungen, steuerfrei) ──────────
+
+  # Ein Vertrag je Lehrgang und Semester -- nicht je Rolle. Grund ist die
+  # Rechnungsseite: Bexio legt Co-Leitung und Lektionen teils auf **eine**
+  # Rechnung («CAS TCM FS26 Co-Leitung & Lektionen»), und eine Rechnung kann
+  # nur einem Vertrag gehören. Die Rollentrennung bleibt trotzdem sichtbar, denn
+  # sie lebt in Toggl: beide Projektnamen stehen unter `erkennung`, und die
+  # Prüfung weist die Stunden je Toggl-Projekt getrennt aus.
+  #
+  # Das Semester ist die Klammer, nicht der Kalender. Ein Herbstsemester läuft
+  # von Q4 bis Q2 des Folgejahrs, ein Frühlingssemester von Q2 bis Q3. Die
+  # IBD-Rechnungen von Januar bis März 2026 gehören deshalb zu HS25.
+  #
+  # ## Warum `erkennung` hier zwingend ist
+  #
+  # Rechnungstitel und Toggl-Projekt heissen **verschieden**, und keiner ist
+  # Teilzeichenkette des anderen:
+  #
+  #     Bexio  «CAS TCM FS26 Lektionen»        Toggl  «CAS TCM Dozent FS26»
+  #     Bexio  «Co-Leitung CAS IBD HS25 …»     Toggl  «CAS IBD Co-Leitung HS25»
+  #
+  # Eine frühere Fassung dieser Datei führte nur die Toggl-Schreibweise als
+  # Bezeichnung. Damit erkannte sie sechs der 2026er BFH-Rechnungen nicht --
+  # ohne Fehlermeldung, sie liefen als «ohne Vertrag» mit. Jeder neue Lehrgang
+  # braucht deshalb beide Schreibweisen.
+  #
+  # Die beiden folgenden tragen die alte Benennung ganz ohne Semesterkürzel. Sie
+  # bleiben für die Prüfung abgeschlossener Monate im Bestand, laufen aber nicht
+  # mehr.
+  - schluessel: cas-ibd-co-leitung
+    bezeichnung: CAS IBD Co-Leitung
+    kunde: bfh
+    mwst: 0.0
+    stunden_pruefen: false
+    leistungsrapport: false
+    ruhend: true
+    bestaetigt: true
+
+  - schluessel: cas-ibd-dozent
+    bezeichnung: CAS IBD Dozent
+    kunde: bfh
+    mwst: 0.0
+    stunden_pruefen: false
+    leistungsrapport: false
+    ruhend: true
+    bestaetigt: true
+    hinweis: >-
+      Trug bisher das Stichwort «CAS IBD». Entfernt: es traf jeden Titel des
+      Lehrgangs, also auch die Co-Leitung und beide Semesterfassungen. Dass
+      nichts schieflief, lag allein daran, dass der längere Treffer gewinnt --
+      ein Sicherheitsnetz, auf das eine Zuordnung sich nicht stützen soll.
+
+  - schluessel: cas-ibd-hs25
+    bezeichnung: CAS IBD HS25
+    kunde: bfh
+    mwst: 0.0
+    stunden_pruefen: false
+    leistungsrapport: false
+    bestaetigt: true
+    erkennung:
+      - CAS IBD HS25            # Rechnungstitel, beide Fassungen
+      - CAS IBD Dozent HS25     # Toggl
+      - CAS IBD Co-Leitung HS25 # Toggl
+    hinweis: >-
+      Herbstsemester 2025, läuft bis ins zweite Quartal 2026. Abgerechnet wurde
+      die Co-Leitung einmal (RE-00587 vom 30.11.2025, zusammen mit Lektionen),
+      die Lektionen danach nach Anfall (Januar bis März 2026).
+
+  - schluessel: cas-tcm-fs26
+    bezeichnung: CAS TCM FS26
+    kunde: bfh
+    mwst: 0.0
+    stunden_pruefen: false
+    leistungsrapport: false
+    bestaetigt: true
+    erkennung:
+      - CAS TCM FS26
+      - CAS TCM Dozent FS26
+      - CAS TCM Co-Leitung FS26
+
+  - schluessel: cas-ibd-hs26
+    bezeichnung: CAS IBD HS26
+    kunde: bfh
+    mwst: 0.0
+    stunden_pruefen: false
+    leistungsrapport: false
+    bestaetigt: true
+    erkennung:
+      - CAS IBD HS26
+      - CAS IBD Dozent HS26
+      - CAS IBD Co-Leitung HS26
+    hinweis: >-
+      Beginnt im vierten Quartal 2026. Die Rechnungsschreibweise ist noch nicht
+      belegt; angenommen ist dieselbe wie bei HS25 («CAS IBD HS26 Lektionen»).
+      Weicht die erste Rechnung ab, gehört ihr Titel hier ergänzt.
+
+  - schluessel: redesign-cas-icm-1
+    bezeichnung: 'Redesign CAS ICM zu Innovation & Entrepreneurship, Teil 1'
+    kunde: bfh
+    mwst: 0.0
+    stunden_pruefen: false
+    leistungsrapport: false
+    erkennung: [Redesign CAS ICM, 'Innovation & Entrepreneurship']
+    bestaetigt: false
+
+  - schluessel: redesign-cas-icm-2
+    bezeichnung: 'Redesign CAS ICM zu Transformation & Changemanagement, Teil 2'
+    kunde: bfh
+    mwst: 0.0
+    stunden_pruefen: false
+    leistungsrapport: false
+    erkennung: ['Transformation & Changemanagement']
+    bestaetigt: false
+
+  # ── Abgeschlossen ───────────────────────────────────────────────────
+  # Ruhend heisst: erzeugt keine neuen Rechnungen und fehlt deshalb nirgends.
+  # Festgehalten, damit die Prüfung abgeschlossener Monate weiterhin einen
+  # Vertrag findet.
+
+  - schluessel: wa-projekt-aue
+    bezeichnung: 'WA Projekt AUE-3 (2/3) und AUE-1 (1/3)'
+    kunde: wyss-academy
+    ruhend: true
+    stunden_pruefen: false
+    erkennung: [WA Projekt AUE, AUE-3, AUE-1]
+    bestaetigt: true
+    hinweis: >-
+      «WA» steht für Wyss Academy, «WA-AUE» für die Kombination mit dem Amt für
+      Umwelt und Energie. Die Rechnung lief über die Wyss Academy, seit 2026 ist
+      das Amt allein der Kunde — siehe den Vertrag deinklima.
+
+  - schluessel: experten-coaching
+    bezeichnung: Experten Coaching
+    kunde: overpar
+    erkennung:
+      - Experten Coaching
+      - Coaching Michael Egli
+      - Coaching Michaela Ziegler
+      - Coaching Piroschka Küttel
+    stunden_pruefen: false
+    leistungsrapport: false
+    bestaetigt: true
+    hinweis: >-
+      Ein Vertrag statt drei (bestätigt 21.09.2026). Die alte Konfiguration
+      führte je Person einen Eintrag (Michaela Ziegler, Michael Egli, Piroschka
+      Küttel) — das waren nie Projekte, sondern die gecoachten Personen, im
+      Rechnungstext genannt, damit Overpar sieht, wofür fakturiert wird. Drei
+      von sechs standen dort ohnehin nicht.
+
+      Abgerechnet wird zum Festpreis je Coaching, als Einzelrechnung von Hand;
+      fallen zwei Coachings ins gleiche Zeitfenster, stehen sie auf einer
+      Rechnung. Der Vertrag steht deshalb nicht für einen Monatslauf, sondern
+      damit solche Rechnungen einer Kundschaft und einem Empfänger zugeordnet
+      sind statt als «ohne Vertrag» aufzulaufen. Stunden und Leistungsrapport
+      entfallen. Die Bezeichnung trifft als Teilzeichenkette auch die älteren
+      Titel mit Namen.
+
+      Toggl führt dagegen je Person ein Projekt («Coaching Michael Egli» und so
+      fort). Diese Namen stehen unter `erkennung`, sonst meldete die Prüfung die
+      Stunden als «ohne Rechnung», obwohl die Rechnung unter «Experten Coaching»
+      existiert. Kommt ein Coachee dazu, gehört sein Toggl-Projekt hierher.
+
+  - schluessel: synergien-mccs
+    bezeichnung: Co-Projektleitung Synergien MCCS
+    kunde: mba
+    ruhend: true
+    stunden_pruefen: false
+    erkennung: [Synergien MCCS, Co-Projektleitung]
+    bestaetigt: false
+
+  - schluessel: unterstuetzung-bi-cockpit
+    bezeichnung: Unterstützung BI-Cockpit
+    kunde: mba
+    ruhend: true
+    stunden_pruefen: false
+    erkennung: [Unterstützung BI-Cockpit, BI-Cockpit]
+    bestaetigt: false
+
+  - schluessel: ki-automatisierungs-praxis
+    bezeichnung: 'KI- & Automatisierungs-Praxis'
+    kunde: treuhand-suisse-bern
+    verrechnungsart: Fixpreis
+    ruhend: true
+    stunden_pruefen: false
+    leistungsrapport: false
+    bestaetigt: true
+    hinweis: >-
+      Festpreis, abgeschlossen (bestätigt 21.09.2026). Stunden fielen nur von
+      Januar bis März 2026 an (46.75 h), fakturiert mit RE-00600 vom 31.03.2026
+      über 4864.50 CHF, bezahlt. Der Eintrag besteht, damit diese Rechnung im
+      Rücklauf einer Kundschaft zugeordnet ist und nicht als «ohne Vertrag»
+      auffällt.
+
+  - schluessel: marktvalidierung-re-useit
+    bezeichnung: 'Marktvalidierung re-useIT im Abo'
+    kunde: spie
+    ruhend: true
+    stunden_pruefen: false
+    erkennung: [re-useIT]
+    bestaetigt: false
+    hinweis: >-
+      22 Rechnungen von Januar 2023 bis März 2025, danach nichts mehr. Der
+      Eintrag besteht für den Rücklauf: ohne ihn läuft die grösste
+      Rechnungsserie des Bestands als «ohne Vertrag» mit.
+
+  - schluessel: domainkosten-matrics
+    bezeichnung: Domainkosten
+    kunde: matrics
+    stunden_pruefen: false
+    leistungsrapport: false
+    bestaetigt: true
+    hinweis: >-
+      Weiterverrechnete Domainkosten, jährlich (bestätigt 21.09.2026). Nicht zu
+      verwechseln mit «Recurring domain and software costs»: das ist dieselbe
+      Art Posten, aber für das MBA und seit Jahren ruhend. Zwei Kundschaften,
+      zwei Verträge.
+
+  - schluessel: recurring-domains
+    bezeichnung: Recurring domain and software costs
+    kunde: mba
+    ruhend: true
+    stunden_pruefen: false
+    erkennung: [Recurring domain, software costs]
+    bestaetigt: false
+
+# Die eigenen Projekte ohne Kundschaft. Sie tragen «keine Verrechnung», und sie
+# stehen hier **namentlich** statt als Regel «kein Vertrag heisst intern».
+#
+# Der Unterschied entscheidet einen stillen Fehler: ein neu angelegtes
+# Kundenprojekt, von dem diese Datei noch nichts weiss, hätte unter der Regel
+# stillschweigend «keine Verrechnung» erhalten — verrechenbare Stunden, als
+# unverrechenbar abgestempelt, und niemand hätte es gemerkt. Namentlich
+# deklariert fällt es stattdessen als «Projekt ohne Zuordnung» auf und wird
+# nicht getaggt.
+interne_projekte:
+  - Sales & Networking
+  - R&D & Showcases
+  - AI Brand & Website
+  - Finance & Admin
+  - Strategy & Planning
+  - Tool Maintenance
+
+# Was sich nicht eindeutig übertragen liess. Wird nicht geraten — hier steht die
+# Frage, bis ein Mensch sie beantwortet. Bis dahin fehlen die zugehörigen
+# Verträge, und die Prüfung meldet das Projekt als «ohne Vertrag».
+#
+# Stand 21.09.2026: keine offene Frage. Die drei aus der Übertragung
+# verbliebenen (KI- & Automatisierungs-Praxis, Spiral Square, Wiederbeginn
+# Digitale Evolution) sind beantwortet und stehen als Verträge.
+offen: []
+

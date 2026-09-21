@@ -83,6 +83,17 @@ pypandoc_binary>=1.17
 # ── PDF-Extraktion (OneDrive-Downloads) ──
 pymupdf>=1.27
 
+# ── Leistungsrapport und Rechnungsbeilage (Debitorenlauf) ──
+# fpdf2 erzeugt den Leistungsrapport (app/services/leistungsrapport.py) —
+# dieselbe Bibliothek wie in der Vorlage, damit das Layout Zeile für Zeile
+# übereinstimmt. Die Schriften (Inter) und das Logo liegen versioniert unter
+# app/assets/leistungsrapport/ und müssen ins Image, sonst bricht der Rapport.
+fpdf2>=2.8
+# pypdf hängt Rechnung und Rapport zu einem Dokument zusammen. Die Vorlage
+# nutzte PyPDF2 3.0.1 — dasselbe Projekt unter dem alten Namen, seit 2023
+# eingestellt.
+pypdf>=5.0
+
 # ── XLSX-Extraktion (Dokumenten-Kontext-Brücke) ──
 openpyxl>=3.1
 

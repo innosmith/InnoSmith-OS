@@ -221,7 +221,12 @@ class BexioClient:
 
     # ── Aufträge (kb_order) ──────────────────────────────────
 
-    async def list_orders(self, contact_id: int | None = None, limit: int = 50) -> list[dict]:
+    async def list_orders(
+        self,
+        contact_id: int | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[dict]:
         """Auftraege laden; bei ``contact_id`` ueber die Suche.
 
         Derselbe Grund wie bei ``list_invoices``: der GET-Parameter ``contact_id``
@@ -234,12 +239,35 @@ class BexioClient:
                 [{"field": "contact_id", "value": str(contact_id), "criteria": "="}],
             )
             return data if isinstance(data, list) else []
-        data = await self._get_v2("/kb_order", {"limit": str(limit)})
+        data = await self._get_v2(
+            "/kb_order", {"limit": str(limit), "offset": str(offset)}
+        )
         return data if isinstance(data, list) else []
 
     async def get_order(self, order_id: int) -> dict:
         data = await self._get_v2(f"/kb_order/{order_id}")
         return data if isinstance(data, dict) else {}
+
+    async def alle_auftraege(self, seite: int = 500) -> list[dict]:
+        """Alle Auftraege ueber alle Seiten laden.
+
+        ``list_orders`` liefert bewusst nur eine Seite. Dass es heute 36 Auftraege
+        sind und eine Seite genuegt, ist ein Zustand des Bestands und keine
+        Eigenschaft der Schnittstelle -- ohne Schleife faellt das Abschneiden
+        spaeter niemandem auf.
+
+        Der Offset ist hier wirksam (am 21.09.2026 gemessen: ``offset=0`` ergibt
+        die Kennungen 2 und 3, ``offset=2`` die Kennungen 4 und 5). Bei den
+        Kreditoren ist er es nicht -- deshalb gemessen statt uebernommen.
+        """
+        alle: list[dict] = []
+        offset = 0
+        while True:
+            batch = await self.list_orders(limit=seite, offset=offset)
+            alle.extend(batch)
+            if len(batch) < seite:
+                return alle
+            offset += seite
 
     # ── Rechnungen (kb_invoice) ──────────────────────────────
 
@@ -317,6 +345,229 @@ class BexioClient:
     async def get_invoice(self, invoice_id: int) -> dict:
         data = await self._get_v2(f"/kb_invoice/{invoice_id}")
         return data if isinstance(data, dict) else {}
+
+    async def get_invoice_positions(self, invoice_id: int) -> list[dict]:
+        """Die Positionen einer Rechnung -- Produktzeilen und Textzeilen.
+
+        Bexio liefert die Positionen **nicht** mit der Rechnung, sondern je Art
+        unter einem eigenen Pfad. Gelesen werden dieselben beiden wie in
+        ``admin_core.get_invoice_with_positions``:
+
+        ``kb_position_custom``
+            Die Produktzeilen. Hier stehen ``amount`` (Menge), ``unit_price``,
+            ``unit_id``, ``tax_id`` und ``text`` -- also alles, was eine
+            Stundenzahl traegt.
+        ``kb_position_text``
+            Reine Textzeilen ohne Betrag. Hier steht der Uebertragssatz
+            («Per ... sind ...h verrechnet aber noch nicht geleistet»).
+
+        Bexio kennt weitere Arten (``kb_position_article``,
+        ``kb_position_subtotal``, ``kb_position_discount``,
+        ``kb_position_pagebreak``). Sie werden hier **nicht** gelesen, weil der
+        Altbestand sie nicht verwendet. Das ist eine bewusste Einschraenkung und
+        keine Vollstaendigkeitsaussage: taucht eine solche Zeile auf, fehlt sie
+        stillschweigend. Wer die Positionen zu Summen verrechnet, muss das wissen.
+
+        Jede Zeile bekommt ``positionsart`` ('custom' oder 'text'), weil die
+        Rohantworten sonst nicht auseinanderzuhalten sind -- beide tragen ``id``
+        und ``text``, und eine Textzeile ohne Menge saehe aus wie eine
+        Produktzeile mit Menge null.
+
+        Anders als die Vorlage wird ein Fehler **nicht** verschluckt. Dort stand
+        ``except requests.exceptions.RequestException: return None``, und ein
+        abgelaufener Token ergab damit eine Rechnung ohne Positionen -- also eine
+        Rechnung ohne Stunden, die jede Pruefung als leer durchwinkt.
+        """
+        positionen: list[dict] = []
+        for art in ("custom", "text"):
+            data = await self._get_v2(f"/kb_invoice/{invoice_id}/kb_position_{art}")
+            for zeile in data if isinstance(data, list) else []:
+                positionen.append({**zeile, "positionsart": art})
+
+        # Nach der Reihenfolge auf der Rechnung sortieren. Ohne das stuenden erst
+        # alle Produktzeilen und dann alle Textzeilen -- der Uebertragssatz
+        # verloere den Bezug zu der Position, auf die er sich bezieht.
+        def _rang(zeile: dict) -> tuple[int, int]:
+            wert = zeile.get("pos")
+            try:
+                return (0, int(wert))  # type: ignore[arg-type]
+            except (TypeError, ValueError):
+                return (1, 0)
+
+        positionen.sort(key=_rang)
+        return positionen
+
+    async def update_invoice_position(
+        self, invoice_id: int, position_id: int, positionsart: str, daten: dict
+    ) -> dict:
+        """Eine Position einer Rechnung aendern (PUT).
+
+        ``positionsart`` ist 'custom' oder 'text' und bestimmt den Pfad -- es
+        sind zwei verschiedene Ressourcen, und eine Textzeile unter dem
+        custom-Pfad ergibt eine 404 auf eine Position, die es gibt.
+
+        **Bexio verlangt beim PUT die Pflichtfelder mit.** Wer nur ``amount``
+        schickt, bekommt eine Position ohne Preis zurueck. Welche Felder das
+        sind, entscheidet der Aufrufer -- hier wird nichts ergaenzt und nichts
+        mit Vorgabewerten aufgefuellt, denn ein erfundener ``unit_price`` steht
+        danach auf einer Rechnung beim Kunden.
+
+        Der Aufruf ist auf **Entwuerfe** gemuenzt. Bexio laesst das Aendern einer
+        ausgestellten Rechnung teils zu; ob eine Rechnung noch Entwurf ist,
+        gehoert vor den Aufruf und nicht hier hinein.
+        """
+        if positionsart not in ("custom", "text"):
+            raise ValueError(f"Unbekannte Positionsart: {positionsart!r}")
+        data = await self._request(
+            "PUT",
+            f"{BASE_URL_V2}/kb_invoice/{invoice_id}/kb_position_{positionsart}/{position_id}",
+            json_body=daten,
+        )
+        return data if isinstance(data, dict) else {}
+
+    async def delete_invoice_position(
+        self, invoice_id: int, position_id: int, positionsart: str
+    ) -> bool:
+        """Eine Position einer Rechnung entfernen (DELETE).
+
+        Anders als in der Vorlage (``admin_core.delete_invoice_position``) wird
+        ein Fehler nicht zu ``False`` verschluckt: dort sah ein abgelaufener
+        Token aus wie eine Position, die sich nicht loeschen laesst, und der
+        Lauf machte weiter.
+        """
+        if positionsart not in ("custom", "text"):
+            raise ValueError(f"Unbekannte Positionsart: {positionsart!r}")
+        await self._request(
+            "DELETE",
+            f"{BASE_URL_V2}/kb_invoice/{invoice_id}/kb_position_{positionsart}/{position_id}",
+        )
+        return True
+
+    async def create_invoice_from_order(self, order_id: int) -> dict:
+        """Aus einem Auftrag eine Rechnung erzeugen (POST /kb_order/{id}/invoice).
+
+        Uebernommen werden **alle** Positionen des Auftrags -- derselbe Weg wie
+        «Auftraege -> Rechnungen generieren» in der Oberflaeche. Die neue
+        Rechnung ist ein Entwurf und geht nicht an die Kundschaft.
+
+        **Der Aufruf geht ohne Rumpf.** Ein leeres ``{}`` als JSON quittiert
+        Bexio mit ``415 Unsupported Media Type`` -- eine Fehlermeldung, die auf
+        den Inhaltstyp zeigt, obwohl der stimmt. Am 21.09.2026 gemessen: kein
+        Rumpf ergibt 200, ``{}`` ergibt 415. Ein Test gegen einen nachgebildeten
+        Server faellt darauf nicht herein, weil der jeden Rumpf annimmt.
+
+        Eine Teilmenge von Positionen zu verrechnen laesst die Schnittstelle zu
+        (``{"positions": [...]}``), hier aber bewusst nicht: der Rechnungslauf
+        verrechnet immer den ganzen Auftrag, und ein ungeprueftes Stueck
+        Schreibcode auf der Buchhaltung ist schlechter als keines.
+
+        **Das Datum setzt Bexio selbst, und zwar auf heute.** Fuer die
+        Umsatzabgrenzung muss es der letzte Tag des Leistungsmonats sein -- der
+        Lauf findet aber am ersten oder zweiten des Folgemonats statt. Das
+        Verschieben gehoert deshalb zwingend dazu; ``update_invoice`` macht es.
+        Wer nur diese Methode aufruft, erzeugt Rechnungen mit dem falschen Monat.
+        """
+        data = await self._request(
+            "POST", f"{BASE_URL_V2}/kb_order/{order_id}/invoice"
+        )
+        return data if isinstance(data, dict) else {}
+
+    async def update_invoice(self, invoice_id: int, **felder) -> dict:
+        """Kopfdaten einer Rechnung aendern (POST /kb_invoice/{id}).
+
+        Es ist ein POST und kein PATCH -- so nennt Bexio das Bearbeiten. Gesendet
+        wird **nur**, was uebergeben wurde: ein mitgeschicktes Feld mit
+        Vorgabewert ueberschriebe stillschweigend, was auf der Rechnung steht.
+
+        Gebraucht wird es fuer ``is_valid_from`` und ``is_valid_to``. Beide
+        gehoeren zusammen verschoben, siehe ``rechnungsdatum_setzen``.
+        """
+        if not felder:
+            raise ValueError("update_invoice ohne Felder aufgerufen")
+        data = await self._post_v2(f"/kb_invoice/{invoice_id}", felder)
+        return data if isinstance(data, dict) else {}
+
+    async def issue_invoice(self, invoice_id: int) -> bool:
+        """Eine Entwurfsrechnung ausstellen (POST /kb_invoice/{id}/issue).
+
+        Danach steht die Rechnung auf **offen** (``kb_item_status_id`` 8) und
+        zaehlt als Forderung. Der Schritt gehoert ans Ende des Laufs, nach der
+        Bestaetigung, dass die Mail raus ist -- vorher waere eine Forderung
+        gebucht, die die Kundschaft nie gesehen hat.
+
+        **Bexio kennt drei Uebergaenge, und zwei davon sind hier falsch:**
+
+        ``issue``
+            Entwurf -> offen, **ohne** Kommunikation. Das ist dieser hier.
+        ``mark_as_sent``
+            Vermerkt in Bexio eine Zustellung. Bewusst nicht umgesetzt: der
+            Versand geschieht in Outlook, und ein zweiter Vermerk an anderer
+            Stelle waere eine zweite Wahrheit ueber denselben Vorgang.
+        ``send``
+            Stellt aus **und verschickt selbst eine E-Mail an die Kundschaft**.
+            Diese Methode darf es hier nie geben. Externe Kommunikation ist im
+            Pflichtenheft L1, und ein Tippfehler im Pfad waere der Unterschied
+            zwischen einem Statuswechsel und zwanzig ungeprueften Mails.
+
+        Zurueck geht es ueber ``revert_issue`` -- in der Bexio-Oberflaeche und
+        per Schnittstelle. Hier ist das bewusst nicht eingebaut: eine
+        Ruecknahme ist ein Einzelfall und gehoert dorthin, wo man sieht, was
+        man tut.
+
+        **Eine bereits ausgestellte Rechnung ist kein Fehler, sondern nichts zu
+        tun.** Bexio verlangt fuer ``issue`` den Entwurfsstatus und quittiert
+        sonst mit einem Fehler. Im Sammellauf hiesse das: ein Wiederholen nach
+        einem Abbruch scheitert an den Rechnungen, die schon durch sind. Darum
+        wird der Status vorher gelesen; der Rueckgabewert sagt, ob dieser
+        Aufruf etwas geaendert hat.
+        """
+        rechnung = await self.get_invoice(invoice_id)
+        status = rechnung.get("kb_item_status_id")
+        if status != 7:
+            logger.info(
+                "Rechnung %s steht auf Status %s und nicht auf Entwurf -- "
+                "nichts auszustellen", invoice_id, status,
+            )
+            return False
+
+        await self._request("POST", f"{BASE_URL_V2}/kb_invoice/{invoice_id}/issue")
+        return True
+
+    async def get_invoice_pdf(self, invoice_id: int) -> bytes:
+        """Das Rechnungs-PDF als Bytes (GET /kb_invoice/{id}/pdf).
+
+        **Die Antwort ist JSON, nicht das PDF.** Bexio liefert ein Objekt mit
+        ``name``, ``size``, ``mime`` und ``content`` -- und ``content`` ist das
+        Base64-kodierte PDF. Wer die Antwort als Rumpf speichert, legt eine
+        Datei ab, die wie ein PDF heisst und keines ist; der Fehler faellt erst
+        auf, wenn jemand sie oeffnet -- moeglicherweise die Kundschaft.
+
+        Geprueft wird deshalb die **Signatur**: jedes PDF beginnt mit ``%PDF``.
+        Ein leeres oder falsch kodiertes Feld waere sonst eine Datei von null
+        Bytes, und null Bytes sehen auf jedem Verzeichnislisting aus wie ein
+        Ergebnis.
+
+        Das PDF traegt den Stand der Rechnung im Augenblick des Abrufs. Wer
+        Positionen aendert, muss neu abrufen -- das alte PDF bleibt sonst
+        gueltig aussehend und falsch.
+        """
+        data = await self._get_v2(f"/kb_invoice/{invoice_id}/pdf")
+        if not isinstance(data, dict) or not data.get("content"):
+            raise ValueError(
+                f"Bexio lieferte kein PDF zu Rechnung {invoice_id}: {str(data)[:200]}"
+            )
+        try:
+            roh = base64.b64decode(data["content"], validate=True)
+        except (binascii.Error, ValueError) as exc:
+            raise ValueError(
+                f"PDF zu Rechnung {invoice_id} ist nicht Base64: {exc}"
+            ) from exc
+        if not roh.startswith(b"%PDF"):
+            raise ValueError(
+                f"PDF zu Rechnung {invoice_id} traegt keine PDF-Signatur "
+                f"({len(roh)} Bytes)"
+            )
+        return roh
 
     # ── Lieferantenrechnungen (purchase/bills, v4) ───────────
 

@@ -6,6 +6,8 @@ import {
 } from 'recharts';
 import { api } from '../api/client';
 import { BackgroundPicker } from '../components/BackgroundPicker';
+import { useSearchParams } from 'react-router-dom';
+import { DebtorsPruefung } from './debtors/DebtorsPruefung';
 
 interface TogglProjectRow {
   project_id: number;
@@ -134,7 +136,31 @@ const TREND_COLORS = ['#6366f1', '#22c55e', '#f59e0b', '#ef4444', '#8b5cf6'];
 
 const CURSOR_STYLE = { fill: 'rgba(107,114,128,0.08)' };
 
+type DebtorsTab = 'uebersicht' | 'pruefung';
+
+/** Der Vormonat als YYYY-MM — die Periode des Rechnungslaufs.
+ *
+ *  Der Lauf findet am Anfang des Folgemonats statt. Die Prüfung startet
+ *  deshalb nicht im laufenden Monat, sondern in dem, der abgerechnet wird.
+ */
+function previousMonthStr(): string {
+  const d = new Date();
+  d.setDate(1);
+  d.setMonth(d.getMonth() - 1);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+}
+
 export default function DebtorsPage() {
+  const [searchParams, setSearchParams] = useSearchParams();
+  const activeTab = (searchParams.get('tab') as DebtorsTab) || 'uebersicht';
+  const setTab = useCallback((tab: DebtorsTab) => {
+    setSearchParams(prev => {
+      const next = new URLSearchParams(prev);
+      next.set('tab', tab);
+      return next;
+    });
+  }, [setSearchParams]);
+
   const [data, setData] = useState<DebtorsResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -145,6 +171,10 @@ export default function DebtorsPage() {
 
   const currentMonth = useMemo(() => currentMonthStr(), []);
   const [selectedMonth, setSelectedMonth] = useState<string>(currentMonth);
+  // Eigener Monat je Reiter: die Übersicht zeigt den laufenden Monat, die
+  // Prüfung den abzurechnenden. Ein gemeinsamer Wert hätte einen der beiden
+  // auf der falschen Vorgabe geöffnet.
+  const [pruefMonth, setPruefMonth] = useState<string>(previousMonthStr);
   const [monthData, setMonthData] = useState<TogglMonthSummary | null>(null);
   const [monthLoading, setMonthLoading] = useState(false);
   const isCurrentMonth = selectedMonth === currentMonth;
@@ -269,6 +299,12 @@ export default function DebtorsPage() {
     });
   }, [data?.revenue_trend]);
 
+  // Die Monatsnavigation im Kopf bedient beide Reiter -- welchen Wert sie
+  // verstellt, entscheidet der aktive Reiter.
+  const navMonth = activeTab === 'pruefung' ? pruefMonth : selectedMonth;
+  const setNavMonth = activeTab === 'pruefung' ? setPruefMonth : setSelectedMonth;
+  const navLoading = activeTab === 'pruefung' ? false : monthLoading;
+
   const monthProgress = toggl
     ? Math.round((toggl.working_days_elapsed / Math.max(toggl.working_days_total, 1)) * 100) : 0;
 
@@ -288,19 +324,19 @@ export default function DebtorsPage() {
           <div className="flex items-center gap-2">
             <div className={`flex items-center gap-0.5 rounded-lg p-0.5 ${hasBg ? 'bg-white/10 backdrop-blur-sm' : 'border border-gray-200 bg-white dark:border-gray-700 dark:bg-gray-800'}`}>
               <button
-                onClick={() => setSelectedMonth(m => shiftMonth(m, -1))}
-                disabled={monthLoading}
+                onClick={() => setNavMonth(m => shiftMonth(m, -1))}
+                disabled={navLoading}
                 title="Vorheriger Monat"
                 className={`flex min-h-10 min-w-10 items-center justify-center rounded-md p-1.5 transition-colors disabled:opacity-40 lg:min-h-0 lg:min-w-0 ${hasBg ? 'text-white/70 hover:bg-white/10 hover:text-white' : 'text-gray-500 hover:bg-gray-100 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-700'}`}
               >
                 <ChevronLeftIcon className="h-4 w-4" />
               </button>
               <span className={`min-w-[7.5rem] text-center text-sm font-medium tabular-nums ${hasBg ? 'text-white' : 'text-gray-700 dark:text-gray-200'}`}>
-                {formatMonthLong(selectedMonth)}
+                {formatMonthLong(navMonth)}
               </span>
               <button
-                onClick={() => setSelectedMonth(m => shiftMonth(m, 1))}
-                disabled={isCurrentMonth || monthLoading}
+                onClick={() => setNavMonth(m => shiftMonth(m, 1))}
+                disabled={navMonth === currentMonth || navLoading}
                 title="Nächster Monat"
                 className={`flex min-h-10 min-w-10 items-center justify-center rounded-md p-1.5 transition-colors disabled:opacity-40 lg:min-h-0 lg:min-w-0 ${hasBg ? 'text-white/70 hover:bg-white/10 hover:text-white' : 'text-gray-500 hover:bg-gray-100 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-700'}`}
               >
@@ -317,6 +353,45 @@ export default function DebtorsPage() {
           </div>
         </div>
 
+        {/* Reiter */}
+        <div className="-mx-4 mb-6 overflow-x-auto px-4 sm:-mx-6 sm:px-6">
+          <div className={`flex gap-0.5 border-b ${hasBg ? 'border-white/10' : 'border-gray-200 dark:border-gray-700'}`}>
+            {([
+              { id: 'uebersicht' as const, label: 'Übersicht' },
+              { id: 'pruefung' as const, label: 'Prüfung' },
+            ]).map(tab => {
+              const isActive = activeTab === tab.id;
+              return (
+                <button
+                  key={tab.id}
+                  onClick={() => setTab(tab.id)}
+                  className={`relative min-h-11 whitespace-nowrap px-4 py-2.5 text-sm font-medium transition-colors lg:min-h-0 ${
+                    isActive
+                      ? hasBg ? 'text-white' : 'text-indigo-600 dark:text-indigo-400'
+                      : hasBg ? 'text-white/60 hover:text-white/90' : 'text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200'
+                  }`}
+                >
+                  {tab.label}
+                  {isActive && (
+                    <span className={`absolute inset-x-0 -bottom-px h-0.5 ${hasBg ? 'bg-white' : 'bg-indigo-600 dark:bg-indigo-400'}`} />
+                  )}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        {activeTab === 'pruefung' ? (
+          <DebtorsPruefung
+            month={pruefMonth}
+            sectionClass={sectionClass}
+            textPrimary={textPrimary}
+            textSecondary={textSecondary}
+            textMuted={textMuted}
+            hasBg={hasBg}
+          />
+        ) : (
+        <>
         {error && (
           <div className="mb-4 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700 dark:border-red-800 dark:bg-red-900/20 dark:text-red-400">{error}</div>
         )}
@@ -493,6 +568,8 @@ export default function DebtorsPage() {
             <h3 className={`mt-4 text-lg font-semibold ${textPrimary}`}>Noch keine Daten</h3>
             <p className={`mt-2 text-sm ${textSecondary}`}>Sobald Rechnungen in Bexio und Stunden in Toggl erfasst sind, erscheint hier die Übersicht.</p>
           </div>
+        )}
+        </>
         )}
       </div>
 

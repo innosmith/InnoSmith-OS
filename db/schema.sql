@@ -611,6 +611,52 @@ CREATE TRIGGER capacity_allocations_updated_at BEFORE UPDATE ON capacity_allocat
     FOR EACH ROW EXECUTE FUNCTION update_updated_at();
 
 -- ─────────────────────────────────────────────────────────
+-- Debitoren-Monatslauf
+--
+-- Der Lauf hält Entscheidungen und vollzogene Schritte, nie Zahlen und nie
+-- einen Prüfzustand. Ob eine Rechnung stimmt, wird bei jedem Aufruf neu aus
+-- Bexio und Toggl gelesen -- stünde es hier, gäbe es zwei Wahrheiten, und die
+-- ältere gewönne genau dann, wenn jemand in Bexio nachgebessert hat.
+-- ─────────────────────────────────────────────────────────
+
+CREATE TABLE debitorenlaeufe (
+    id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    jahr                INTEGER NOT NULL,
+    monat               INTEGER NOT NULL CHECK (monat BETWEEN 1 AND 12),
+    stichtag            DATE NOT NULL,          -- der Monatsletzte
+    abgeschlossen_am    TIMESTAMPTZ,
+    notiz               TEXT,
+    user_id             UUID REFERENCES users(id) ON DELETE SET NULL,
+    created_at          TIMESTAMPTZ DEFAULT now(),
+    updated_at          TIMESTAMPTZ DEFAULT now(),
+    CONSTRAINT uq_debitorenlauf_periode UNIQUE (jahr, monat)
+);
+
+CREATE TABLE debitorenlauf_rechnungen (
+    id                      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    lauf_id                 UUID NOT NULL REFERENCES debitorenlaeufe(id) ON DELETE CASCADE,
+    rechnung_id             INTEGER NOT NULL,   -- Bexio-Kennung, die Identität
+    nummer                  TEXT,               -- RE-00707, für Menschen
+    zurueckgestellt         BOOLEAN NOT NULL DEFAULT false,
+    grund                   TEXT,
+    dokumente_erzeugt_am    TIMESTAMPTZ,
+    mailentwurf_id          TEXT,               -- Graph-Handle, gegen den zweiten Entwurf
+    versendet_am            TIMESTAMPTZ,        -- vom Menschen bestätigt, nicht gemessen
+    abgelegt_am             TIMESTAMPTZ,
+    created_at              TIMESTAMPTZ DEFAULT now(),
+    updated_at              TIMESTAMPTZ DEFAULT now(),
+    CONSTRAINT uq_debitorenlauf_rechnung UNIQUE (lauf_id, rechnung_id)
+);
+
+CREATE INDEX idx_debitorenlauf_rechnungen_lauf ON debitorenlauf_rechnungen(lauf_id);
+
+CREATE TRIGGER debitorenlaeufe_updated_at BEFORE UPDATE ON debitorenlaeufe
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+
+CREATE TRIGGER debitorenlauf_rechnungen_updated_at BEFORE UPDATE ON debitorenlauf_rechnungen
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+
+-- ─────────────────────────────────────────────────────────
 -- Agent-Lern-Schicht (Memory & Self-Learning, Migration 005)
 -- ─────────────────────────────────────────────────────────
 
