@@ -129,9 +129,10 @@ Zwei Werkzeuge zu haben genügt nicht — der Agent muss sie auch treffen. Der
 Katalog liefert deshalb fertig zitierte Pfade (`'/daten/x.parquet'`), die
 Bedeutung der Geldspalten und eine lauffähige Vorlage: ohne das erfand das lokale
 Modell Spaltennamen und liess die Anführungszeichen um den Pfad weg. Und der
-Werkzeug-Aufschub (`tools.tool_search`) steht auf 15 % statt 10 %, weil
-`tool_call` Code als JSON-Zeichenkette in einem JSON-Aufruf verlangt und daran
-vier von vier Versuchen scheiterten.
+Werkzeug-Aufschub (`tools.tool_search`) ist abgeschaltet, weil `tool_call` Code
+als JSON-Zeichenkette in einem JSON-Aufruf verlangt und daran vier von vier
+Versuchen scheiterten. Eine Schwelle hält ihn seit Hermes 0.21 nicht mehr zu
+(`auto` ist dort `on`); Details in `hermes-agent.mdc`.
 
 Bei den **Ausgaben** kommt eine Falle hinzu, die keine Spalte betrifft, sondern
 eine Mengenbeziehung — und sie kostete beinahe eine falsche Demo-Zahl. Der

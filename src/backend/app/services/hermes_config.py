@@ -2,7 +2,7 @@
 
 Hermes liest MCP-Server, Modell und Kontextfenster aus ``~/.hermes/config.yaml``.
 ``${VAR}``-Platzhalter in den ``env``-Blöcken werden von Hermes zur Discovery-Zeit
-aus ``os.environ`` aufgelöst (siehe ``tools.mcp_tool._load_mcp_config``). Hermes'
+aus ``os.environ`` aufgelöst (siehe ``tools.mcp_tool_config._load_mcp_config``). Hermes'
 ``_build_safe_env`` reicht ausschliesslich die explizit in ``env`` aufgeführten
 Werte an die MCP-Subprozesse weiter — Secrets müssen daher dort referenziert sein.
 
@@ -30,6 +30,13 @@ logger = logging.getLogger("taskpilot.hermes_config")
 # Effektives Fenster der stabilen Qwen-3.6-Produktion (Ollama 0.24: KvSize 65536).
 # Nicht 256k: Ollama 0.32 setzt das auf der GB10 als VRAM-Default und sprengt Unified Memory.
 LOCAL_CONTEXT_LENGTH = 65536
+
+# Obergrenze fuer die Werkzeugdefinitionen eines Laufs. Gemessen am 02.09.2026:
+# 129 Werkzeuge wiegen ~14'170 Token. Oberhalb von 20'000 wird die Werkzeugwahl
+# des lokalen Modells spuerbar schlechter, und knapp ein Drittel des Fensters ist
+# belegt, bevor die Mail beginnt. Wer diese Grenze reisst, verkleinert die
+# Allowlist -- die Bruecke ist dafuer keine Loesung (siehe ``tool_search``).
+TOOL_SCHEMA_WARN_TOKENS = 20_000
 
 
 def get_hermes_home() -> Path:
@@ -291,7 +298,7 @@ def build_config_dict() -> dict:
         #   die Lese-Tools nicht doppelt im Chat-Kontext liegen.
         # Der Key ``graph`` bleibt bewusst der eingeschraenkte: so behalten die
         # eingespielten Triage-Prompts, -Skills und die Callback-Hooks in
-        # hermes_worker.py ihre Tool-Namen (``mcp_graph_*``).
+        # hermes_worker.py ihren Server-Schlüssel (``mcp_tool("graph", …)``).
         #
         # ``GRAPH_TRIAGE_DRAFT`` verschiebt ``create_draft`` im Zwei-Pass-Betrieb
         # von ``graph`` nach ``graphAdmin``: dann kann nur noch der Schreib-Pass
@@ -490,32 +497,28 @@ def build_config_dict() -> dict:
             "title_generation": _local_aux(),
             "curator": _local_aux(),
         },
-        # Werkzeug-Aufschub: ab welcher Schemagroesse die Werkzeuge durch die Bruecke
-        # tool_search/tool_describe/tool_call ersetzt werden.
+        # Werkzeug-Aufschub (Bruecke tool_search/tool_describe/tool_call): aus.
         #
-        # Gemessen am 02.09.2026: unsere 129 Werkzeuge wiegen ~14'170 Token, die
-        # 10-Prozent-Vorgabe zog bei ~13'107. Wir reissen die Schwelle also um acht
-        # Prozent -- und bezahlen dafuer teuer. Der Aufschub kostet pro Zug mindestens
-        # eine zusaetzliche Runde (tool_search), und ``tool_call`` verlangt die
-        # Argumente als JSON-Zeichenkette *innerhalb* eines JSON-Aufrufs. Mehrzeiligen
-        # Python-Code da hineinzuschreiben, misslang dem lokalen Modell in einem
-        # Auswertungslauf vier von vier Malen ("Unterminated string"); derselbe Code
+        # Die Bruecke kostet pro Zug mindestens eine zusaetzliche Runde, und
+        # ``tool_call`` verlangt die Argumente als JSON-Zeichenkette *innerhalb* eines
+        # JSON-Aufrufs. Mehrzeiligen Python-Code da hineinzuschreiben, misslang dem
+        # lokalen Modell vier von vier Malen ("Unterminated string"); derselbe Code
         # lief als Direktaufruf durch.
         #
-        # Der Prozentsatz muss gegen ``LOCAL_CONTEXT_LENGTH`` gerechnet werden, und das
-        # sind 65'536 Token, nicht 131'072. Ein erster Anlauf setzte 15 Prozent in dem
-        # Glauben, das Fenster sei doppelt so gross -- die Schwelle lag damit bei 9'830
-        # Token, also *unter* der Werkzeugmenge, und die Bruecke blieb an. Die Absicht
-        # war richtig, die Rechnung falsch.
+        # Bis Hermes 0.20 hielt ``threshold_pct`` die Bruecke unterhalb einer
+        # Schemagroesse zu. Seit 0.21 ist ``auto`` gleichbedeutend mit ``on``: die
+        # Bruecke steht, sobald ein einziges MCP-Werkzeug existiert, und der
+        # Prozentsatz bemisst nur noch das Verzeichnis darin. Die Einstellung
+        # ``auto`` mit 25 Prozent sah deshalb nach «erst am Qualitaetsknick» aus und
+        # bedeutete «immer». Zusammen mit der Umbenennung auf ``mcp__<server>__<tool>``
+        # liefen ab dem 03.09.2026 die abgeschriebenen Namen aus Prompt und Skills
+        # in ``tool_call`` ins Leere, bis ``same_tool_failure_halt`` den Lauf stoppte.
         #
-        # 25 Prozent ergeben 16'384 Token: oberhalb der 14'170, die unsere Werkzeuge
-        # wiegen, und unterhalb des Qualitaetsknicks von 20'000, den Hermes selbst
-        # nennt. Der Aufschub bleibt damit bestehen -- er greift erst, wenn die
-        # Werkzeugliste wirklich gross wird. ``test_werkzeug_aufschub_greift_erst_am_
-        # qualitaetsknick`` haelt beide Grenzen fest und rechnet gegen die Konstante,
-        # damit die naechste Fensteraenderung nicht wieder still danebengreift.
+        # Die Grenze, die ``threshold_pct`` frueher zog, prueft jetzt
+        # ``ensure_runtime_ready`` gegen ``TOOL_SCHEMA_WARN_TOKENS`` und meldet sie
+        # laut, statt die Werkzeuge still hinter die Bruecke zu schieben.
         "tools": {
-            "tool_search": {"enabled": "auto", "threshold_pct": 25.0},
+            "tool_search": {"enabled": "off"},
         },
         # Tool-Loop-Guardrails: schuetzen vor Endlosschleifen/Token-Verbrennung.
         #

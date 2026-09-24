@@ -14,6 +14,7 @@ Self-Grading. Die Formulierungsqualitaet selbst gehoert ins Eval, nicht hierher.
 """
 
 from app.services.hermes_worker import _compute_self_grade
+from app.services.tool_names import mcp_tool
 from app.services.text_style import (
     factual_tokens,
     placeholder_markers,
@@ -104,10 +105,10 @@ class TestSelfGradeCountsGrounding:
     """Tool-Nutzung allein darf nicht mehr 1.0 ergeben."""
 
     _TOOLS = [
-        "mcp_graph_get_thread",
-        "mcp_graph_search_sender_history",
-        "mcp_taskpilot_get_sender_profile",
-        "mcp_graph_search_my_replies",
+        mcp_tool("graph", "get_thread"),
+        mcp_tool("graph", "search_sender_history"),
+        mcp_tool("taskpilot", "get_sender_profile"),
+        mcp_tool("graph", "search_my_replies"),
     ]
     _META = {"conversation_id": "conv-1"}
 

@@ -78,11 +78,11 @@ rm -rf "$VENDOR_DIR/ai9/.git" \
 
 echo "$AI9_REF ($AI9_TAGGED)" > "$VENDOR_DIR/ai9/VENDORED_REF"
 
-# Hermes Agent-Runtime (Nous, Tag v2026.8.31 = 0.21.0). Kein PyPI-Wheel mehr:
+# Hermes Agent-Runtime (Nous, Tag v2026.9.24 = 0.21.5). Kein PyPI-Wheel mehr:
 # Nous sperrt bdist_wheel. Vendorn analog AI9, Install im Image via
 # ``pip install -e /opt/vendor/hermes-agent[mcp]``.
 HERMES_SRC="${HERMES_PATH:-$HOME/dev/github/hermes-agent}"
-HERMES_REF="${HERMES_REF:-v2026.8.31}"
+HERMES_REF="${HERMES_REF:-v2026.9.24}"
 
 if [ ! -d "$HERMES_SRC" ]; then
     echo "FEHLER: hermes-agent nicht gefunden unter $HERMES_SRC" >&2

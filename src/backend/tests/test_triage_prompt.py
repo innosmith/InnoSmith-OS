@@ -15,6 +15,8 @@ from unittest.mock import patch, AsyncMock
 
 import pytest
 
+from app.services.tool_names import mcp_tool
+
 
 def _make_fake_job(
     message_id="AAMk123",
@@ -607,10 +609,10 @@ class TestSelfGradeStyleAnchor:
         from app.services.hermes_worker import _compute_self_grade
         meta = {"conversation_id": "conv-1"}
         tools = [
-            "mcp_graph_get_thread",
-            "mcp_graph_search_sender_history",
-            "mcp_taskpilot_get_sender_profile",
-            "mcp_graph_search_my_replies",
+            mcp_tool("graph", "get_thread"),
+            mcp_tool("graph", "search_sender_history"),
+            mcp_tool("taskpilot", "get_sender_profile"),
+            mcp_tool("graph", "search_my_replies"),
         ]
         grade = _compute_self_grade(meta, {"draft_id": "d1"}, tools)
         assert grade["missing"] == []
@@ -620,9 +622,9 @@ class TestSelfGradeStyleAnchor:
         from app.services.hermes_worker import _compute_self_grade
         meta = {"conversation_id": "conv-1"}
         tools = [
-            "mcp_graph_get_thread",
-            "mcp_graph_search_sender_history",
-            "mcp_taskpilot_get_sender_profile",
+            mcp_tool("graph", "get_thread"),
+            mcp_tool("graph", "search_sender_history"),
+            mcp_tool("taskpilot", "get_sender_profile"),
         ]
         grade = _compute_self_grade(meta, {"draft_id": "d1"}, tools)
         assert "style_anchor_used" in grade["missing"]
@@ -1420,13 +1422,20 @@ class TestPromptWidersprichtDemSkillNicht:
         existieren nicht; der Agent musste sie über ``tool_search`` erraten und hielt
         die Übersetzung als Lektion im Gedächtnis -- eine Notiz, die eine falsche
         Anleitung ausgleicht, statt sie zu beheben.
+
+        Geprüft wird gegen Hermes' eigene Namensbildung, nicht gegen eine Abschrift:
+        die Abschrift ``mcp_graph_get_email`` stand hier bis zum 24.09.2026 und hielt
+        den Test grün, während Hermes 0.21 längst ``mcp__graph__get_email`` erwartete.
         """
+        from tools.mcp_tool_schema import mcp_prefixed_tool_name
+
         prompt = await self._build_prompt(fake_job)
-        for tool in (
-            "mcp_graph_get_email(",
-            "mcp_graph_get_email_categories(",
-            "mcp_graph_get_thread(",
-            "mcp_graph_search_sender_history(",
-            "mcp_taskpilot_get_sender_profile(",
+        for server, tool in (
+            ("graph", "get_email"),
+            ("graph", "get_email_categories"),
+            ("graph", "get_thread"),
+            ("graph", "search_sender_history"),
+            ("taskpilot", "get_sender_profile"),
         ):
-            assert tool in prompt, f"{tool} fehlt -- Prompt nennt vermutlich die Kurzform"
+            name = mcp_prefixed_tool_name(server, tool) + "("
+            assert name in prompt, f"{name} fehlt -- Prompt nennt eine andere Form"

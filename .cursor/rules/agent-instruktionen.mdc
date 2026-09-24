@@ -67,6 +67,20 @@ macht den nächsten Fehler unsichtbar. Metriken dafür: `swiss_violations()` und
 gewesen — ein fehlender Skill im Kontext oder ein Sampling-Parameter
 (`presence_penalty` 1.5 strich Umlaute weg, Fix in `8dfafc4`).
 
+## Regel 7 — Hermes-Konventionen ableiten, nie abschreiben
+
+Was Hermes festlegt — Werkzeugnamen, die Bedeutung eines Konfigurationsschlüssels,
+der Ort einer Interna —, steht im Code nicht als Abschrift, sondern als Aufruf der
+Hermes-Funktion (`mcp_tool()` statt `"mcp_graph_get_email"`). Ein Test, der dieselbe
+Abschrift prüft wie der Code, prüft nur die Übereinstimmung zweier Irrtümer: nach
+dem Upgrade auf 0.21 blieben Prompt-Test und Brücken-Test grün, während rund jede
+fünfte Triage am Schleifenwächter abbrach. Tests fragen darum Hermes selbst
+(`mcp_prefixed_tool_name`, `should_activate`), und `scripts/eval/check_hermes_api.py`
+läuft vor jedem Upgrade.
+
+Skills sind Text und können nicht ableiten. Für sie gilt: nach jedem Upgrade
+`test_tool_names.py` gegen die ausgerollten Skills laufen lassen.
+
 ## Vor jeder Änderung an Prompt oder Skill
 
 1. Widerspricht der neue Text einer anderen Quelle (Prompt / Skill / Toolset)?

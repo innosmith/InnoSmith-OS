@@ -58,6 +58,7 @@ from app.models import (
     User,
 )
 from app.services.hermes_config import (
+    TOOL_SCHEMA_WARN_TOKENS,
     get_hermes_home,
     populate_hermes_env,
     write_hermes_config,
@@ -69,6 +70,7 @@ from app.services.draft_prompt import (
 )
 from app.services.email_identity import resolve_message_id, sync_message_id
 from app.services.learning import has_content_between_greeting_and_closing, record_episode
+from app.services.tool_names import mcp_tool
 from app.services.notification import (
     notify_agent_awaiting_approval,
     notify_agent_completed,
@@ -177,6 +179,32 @@ _job_created_draft_id: str | None = None
 # Kategorie/ungelesen auf der FINALEN ID landen und nicht auf einer veralteten.
 _job_moved_message_id: str | None = None
 
+# Abbrueche des Hermes-Schleifenwaechters im aktuellen Job, ueber alle Paesse
+# (Klassifikation, Nachfass, Recherche, Schreib-Pass). Landet als
+# ``guardrail_halts`` im Job-Metadata, damit ein Abbruch im Cockpit sichtbar ist
+# und nicht nur als fehlender Entwurf oder leeres Dossier.
+_job_guardrail_halts: list[dict] = []
+
+
+class GuardrailHalt(RuntimeError):
+    """Hermes hat einen Lauf am Schleifenwaechter (``tool_loop_guardrails``) gestoppt.
+
+    Ein Halt ist keine Antwort. Hermes gibt dann als ``final_response`` den Text
+    des Waechters zurueck, und genau diesen Text behandelten Nachfass-Lauf und
+    Structured-Reask ab dem 03.09.2026 als Analyse: das Modell klassifizierte die
+    Fehlermeldung und legte Aufgaben wie «Die Automation nach
+    'same_tool_failure_halt' ist stehen geblieben» an. Als Ausnahme kann kein
+    Aufrufer den Abbruch mehr versehentlich weiterverarbeiten.
+    """
+
+    def __init__(self, guardrail: dict):
+        self.guardrail = guardrail
+        super().__init__(
+            "Hermes-Schleifenwächter hat den Lauf gestoppt: "
+            f"{guardrail.get('code') or guardrail.get('action')} bei "
+            f"{guardrail.get('tool_name') or '?'} ({guardrail.get('count', '?')}×)"
+        )
+
 # Vollstaendige Menge der im aktuellen Job aufgerufenen Tool-Namen. Bewusst
 # UNABHAENGIG vom 200-Event-Trace-Limit gefuehrt: spaete Tools (create_draft,
 # search_my_replies, set_categories, update_sender_profile) laufen erst nach
@@ -189,8 +217,8 @@ _job_tool_names: set[str] = set()
 # (siehe ``_DRAFT_TOOLS`` in mcp-graph/server.py). Die Erfassung der Draft-ID
 # akzeptiert deshalb beide Namen -- unabhaengig davon, welche Config gerade laeuft.
 _CREATE_DRAFT_TOOLS: frozenset[str] = frozenset({
-    "mcp_graph_create_draft",
-    "mcp_graphAdmin_create_draft",
+    mcp_tool("graph", "create_draft"),
+    mcp_tool("graphAdmin", "create_draft"),
 })
 
 # Recherche-Tools, deren Treffer als Quellen-Nachweis erfasst werden. Grundlage der
@@ -199,10 +227,12 @@ _CREATE_DRAFT_TOOLS: frozenset[str] = frozenset({
 # Kundeneingrenzung passiert bewusst nicht als harter Suchfilter (das kostet Recall),
 # sondern durch Sichtbarkeit im HITL-Review.
 _CONTEXT_SEARCH_TOOLS: frozenset[str] = frozenset({
-    "mcp_taskpilot_semantic_search_documents",
-    "mcp_graph_search_files",
-    "mcp_graph_search_emails",
+    mcp_tool("taskpilot", "semantic_search_documents"),
+    mcp_tool("graph", "search_files"),
+    mcp_tool("graph", "search_emails"),
 })
+
+_MOVE_EMAIL_TOOL = mcp_tool("graph", "move_email_to_folder")
 
 # Im aktuellen Job recherchierte Quellen (Titel/Typ/Absender/Datum), dedupliziert.
 _job_context_sources: list[dict] = []
@@ -233,8 +263,8 @@ def _draft_tool_name() -> str:
     Namen anspricht, unter dem es tatsaechlich registriert ist.
     """
     if get_settings().two_pass_draft:
-        return "mcp_graphAdmin_create_draft"
-    return "mcp_graph_create_draft"
+        return mcp_tool("graphAdmin", "create_draft")
+    return mcp_tool("graph", "create_draft")
 
 
 def _get_runtime_lock() -> asyncio.Lock:
@@ -251,14 +281,17 @@ def _install_trajectory_path_shim() -> None:
     (``trajectory_samples.jsonl`` / ``failed_trajectories.jsonl``) und bietet keinen
     Pfad-/Env-Hook. Damit die gesammelten Trajektorien (Grundlage fuer Inspektion +
     spaeteres Fine-Tuning) an einem definierten Ort liegen, ersetzen wir
-    ``run_agent._save_trajectory_to_file`` durch einen Wrapper mit absolutem Pfad.
+    ``agent.session_persistence._save_trajectory_to_file`` durch einen Wrapper mit
+    absolutem Pfad. Bis Hermes 0.21.0 lag der Name in ``run_agent``; dort gesetzt,
+    greift der Shim seit 0.21.5 ins Leere, ohne dass etwas fehlschlaegt
+    (``scripts/eval/check_hermes_api.py`` prueft den Ort).
     Idempotent, best-effort -- darf den Worker-Start nie verhindern.
     """
     global _trajectory_shim_installed
     if _trajectory_shim_installed:
         return
     try:
-        import run_agent
+        from agent import session_persistence
         from agent.trajectory import save_trajectory as _orig_save_trajectory
 
         traj_dir = HERMES_HOME / "trajectories"
@@ -270,7 +303,9 @@ def _install_trajectory_path_shim() -> None:
                 filename = str(traj_dir / base)
             return _orig_save_trajectory(trajectory, model, completed, filename=filename)
 
-        run_agent._save_trajectory_to_file = _save_to_hermes_home
+        if not hasattr(session_persistence, "_save_trajectory_to_file"):
+            raise AttributeError("agent.session_persistence._save_trajectory_to_file fehlt")
+        session_persistence._save_trajectory_to_file = _save_to_hermes_home
         _trajectory_shim_installed = True
         logger.info("Trajektorien-Pfad-Shim aktiv -> %s", traj_dir)
     except Exception:  # noqa: BLE001 - best-effort
@@ -585,7 +620,7 @@ def _on_tool_complete(tc_id, name, args, result) -> None:
     # Neue Message-ID nach einem Move deterministisch erfassen -- ein Move aendert
     # die Graph-ID, sodass die spaetere Finalisierung (Kategorie/ungelesen) sonst
     # auf einer veralteten ID landen wuerde. last-wins.
-    if str(name) == "mcp_graph_move_email_to_folder":
+    if str(name) == _MOVE_EMAIL_TOOL:
         new_mid = _extract_new_id_from_move_result(result)
         if new_mid:
             _job_moved_message_id = new_mid
@@ -1279,12 +1314,21 @@ async def _build_triage_prompt(job: AgentJob) -> str:
             + "\n---\n\n"
         )
 
+    get_email = mcp_tool("graph", "get_email")
+    get_attachments = mcp_tool("graph", "get_email_attachments")
+    get_categories = mcp_tool("graph", "get_email_categories")
+    get_thread = mcp_tool("graph", "get_thread")
+    sender_history = mcp_tool("graph", "search_sender_history")
+    my_replies = mcp_tool("graph", "search_my_replies")
+    get_profile = mcp_tool("taskpilot", "get_sender_profile")
+    update_profile = mcp_tool("taskpilot", "update_sender_profile")
+
     thread_hint = ""
     if conversation_id:
         thread_hint = f"""
 **Konversations-ID:** {conversation_id}
-→ Lade den Thread mit mcp_graph_get_thread("{conversation_id}") für vollständigen Kontext.
-→ Lade die Absender-History mit mcp_graph_search_sender_history("{from_addr}") um Kommunikationsmuster zu erkennen.
+→ Lade den Thread mit {get_thread}("{conversation_id}") für vollständigen Kontext.
+→ Lade die Absender-History mit {sender_history}("{from_addr}") um Kommunikationsmuster zu erkennen.
 """
 
     # Fakt aus dem Umschlag (RFC 3834), keine Textdeutung: der Absender-Server
@@ -1361,7 +1405,7 @@ async def _build_triage_prompt(job: AgentJob) -> str:
     else:
         draft_step = (
             "5. Erstelle Draft falls auto_reply. WICHTIG: Rufe VORHER "
-            f'mcp_graph_search_my_replies("{from_addr}") auf und nutze die letzten von Anthony '
+            f'{my_replies}("{from_addr}") auf und nutze die letzten von Anthony '
             "gesendeten Antworten an diesen Kontakt als Ton-/Register-Kalibrierung "
             "(orientiere dich an Ton, Länge, Anrede und Schlussformel, schreibe aber "
             "natürlich neu, kopiere nicht wörtlich). PFLICHT: Übergib bei create_draft "
@@ -1398,9 +1442,9 @@ Du hast einen email_triage Job erhalten. Führe den kompletten Triage-Ablauf gem
 ## PFLICHT-AUFRUFE VOR JEDER KLASSIFIKATION UND DRAFT-ERSTELLUNG
 
 Du MUSST die folgenden drei Kontext-Quellen laden, BEVOR du klassifizierst oder einen Draft erstellst:
-1. **mcp_graph_get_thread("{conversation_id or ''}")** -- Thread-Kontext laden (PFLICHT falls conversation_id vorhanden)
-2. **mcp_graph_search_sender_history(sender_email="{from_addr}")** -- Absender-History laden (IMMER PFLICHT)
-3. **mcp_taskpilot_get_sender_profile(email="{from_addr}")** -- Absender-Profil laden (IMMER PFLICHT)
+1. **{get_thread}("{conversation_id or ''}")** -- Thread-Kontext laden (PFLICHT falls conversation_id vorhanden)
+2. **{sender_history}(sender_email="{from_addr}")** -- Absender-History laden (IMMER PFLICHT)
+3. **{get_profile}(email="{from_addr}")** -- Absender-Profil laden (IMMER PFLICHT)
 
 Erstelle NIEMALS einen Draft ohne diese drei Kontext-Quellen geladen zu haben!
 
@@ -1414,13 +1458,13 @@ WICHTIG: Befolge die Prioritätsreihenfolge STRIKT. Sobald eine Stufe greift: ST
 - Stufe 4 (Standardregeln) -- nur wenn keine der drei Stufen greift.
 
 Führe jetzt den Triage-Ablauf durch:
-1. Lies die E-Mail mit mcp_graph_get_email("{email_id}"). Falls hasAttachments=true und Bildinhalt für die Einordnung relevant sein könnte (Screenshot, gescanntes Dokument, Bild-Newsletter), rufe mcp_graph_get_email_attachments("{email_id}") auf und werte jeden Bild-Anhang mit vision_analyze(image_url=<path>, user_prompt="Beschreibe den Inhalt für die E-Mail-Triage") aus.
-2. Lies die Kategorien mit mcp_graph_get_email_categories("{email_id}")
+1. Lies die E-Mail mit {get_email}("{email_id}"). Falls hasAttachments=true und Bildinhalt für die Einordnung relevant sein könnte (Screenshot, gescanntes Dokument, Bild-Newsletter), rufe {get_attachments}("{email_id}") auf und werte jeden Bild-Anhang mit vision_analyze(image_url=<path>, user_prompt="Beschreibe den Inhalt für die E-Mail-Triage") aus.
+2. Lies die Kategorien mit {get_categories}("{email_id}")
 3. Lade Thread-Kontext, Absender-History und Absender-Profil (PFLICHT!)
 4. Klassifiziere gemäss der Prioritätsreihenfolge
 {draft_step}
 6. Gib den PFLICHT-JSON-Block aus (Schema im Skill bzw. references/triage-rules.md)
-7. Aktualisiere das Absender-Profil mit mcp_taskpilot_update_sender_profile (siehe Skill)
+7. Aktualisiere das Absender-Profil mit {update_profile} (siehe Skill)
 
 Kategorie und Move gehören NICHT zu deinen Schritten: beides setzt das Backend
 deterministisch aus dem validierten JSON-Block, und im Triage-Lauf hast du die
@@ -3309,7 +3353,9 @@ async def _structured_triage_reask(meta: dict, content: str) -> dict | None:
     return None
 
 
-async def _fallback_unparsed_triage(job_id, meta: dict, moved_id: str | None = None) -> str:
+async def _fallback_unparsed_triage(
+    job_id, meta: dict, moved_id: str | None = None, guardrail: dict | None = None
+) -> str:
     """Sicherheitsnetz, wenn der LLM keinen verwertbaren Triage-Block lieferte.
 
     Fail-closed (Best Practice): Bei Unsicherheit wird NICHT gehandelt. Die E-Mail
@@ -3318,11 +3364,39 @@ async def _fallback_unparsed_triage(job_id, meta: dict, moved_id: str | None = N
     Auto-Task mehr erstellt: ein faelschlich angelegter Task (z. B. aus einer
     blossen Terminzusage) ist teurer und nerviger als eine sichtbare Mail, die
     der Mensch in der Inbox ohnehin sieht und bei Bedarf manuell einordnet.
+
+    ``guardrail`` ist gesetzt, wenn der Klassifikations-Lauf am Schleifenwaechter
+    abbrach. Die Begruendung nennt dann das blockierte Werkzeug, damit die
+    Sichtung nicht bei der Mail sucht, sondern beim Werkzeug.
     """
     logger.warning(
-        "Job %s: Kein verwertbarer JSON-Block -- fail-closed auf fyi/needs_review (kein Auto-Task)",
+        "Job %s: %s -- fail-closed auf fyi/needs_review (kein Auto-Task)",
         job_id,
+        f"Schleifenwächter-Abbruch ({guardrail.get('code')}, {guardrail.get('tool_name')})"
+        if guardrail else "Kein verwertbarer JSON-Block",
     )
+    if guardrail:
+        rationale = (
+            "Der Agent-Lauf wurde vom Schleifenwächter gestoppt "
+            f"({guardrail.get('code')}: Werkzeug {guardrail.get('tool_name') or '?'}, "
+            f"{guardrail.get('count', '?')} Fehlschläge). Die E-Mail wurde nicht "
+            "eingeordnet und bleibt zur manuellen Sichtung ungelesen in der Inbox -- "
+            "kein Auto-Task."
+        )
+    else:
+        rationale = (
+            "Agent lieferte keinen strukturierten Triage-Block. Die E-Mail "
+            "bleibt zur manuellen Sichtung ungelesen in der Inbox -- kein Auto-Task."
+        )
+    suggested_action = {
+        "label": "Unklar",
+        "triage_class": "fyi",
+        "needs_review": True,
+        "rationale": rationale,
+        "fallback": True,
+    }
+    if guardrail:
+        suggested_action["guardrail_halt"] = guardrail
     async with async_session() as db:
         await db.execute(
             update(EmailTriage)
@@ -3331,16 +3405,7 @@ async def _fallback_unparsed_triage(job_id, meta: dict, moved_id: str | None = N
                 triage_class="fyi",
                 reply_expected=False,
                 confidence=None,
-                suggested_action={
-                    "label": "Unklar",
-                    "triage_class": "fyi",
-                    "needs_review": True,
-                    "rationale": (
-                        "Agent lieferte keinen strukturierten Triage-Block. Die E-Mail "
-                        "bleibt zur manuellen Sichtung ungelesen in der Inbox -- kein Auto-Task."
-                    ),
-                    "fallback": True,
-                },
+                suggested_action=suggested_action,
                 status="acted",
             )
         )
@@ -3953,6 +4018,42 @@ def count_tools(enabled_toolsets: list[str] | None) -> int:
         return 0
 
 
+def tool_schema_tokens(enabled_toolsets: list[str] | None) -> int:
+    """Geschaetzte Token der Werkzeugdefinitionen, die das Modell zu sehen bekommt.
+
+    Rechnet mit Hermes' eigener Schaetzung, damit die Zahl dieselbe ist, mit der
+    Hermes ueber den Werkzeug-Aufschub entscheidet.
+    """
+    from model_tools import get_tool_definitions
+    from tools.tool_search import estimate_tokens_from_schemas
+
+    return estimate_tokens_from_schemas(
+        get_tool_definitions(enabled_toolsets=enabled_toolsets, quiet_mode=True)
+    )
+
+
+def _report_tool_schema_size() -> None:
+    """Meldet laut, wenn eine Allowlist ``TOOL_SCHEMA_WARN_TOKENS`` reisst.
+
+    Ersetzt die Grenze, die bis Hermes 0.20 ``tool_search.threshold_pct`` zog:
+    damals verschwanden die Werkzeuge still hinter der Bruecke, jetzt steht es im
+    Log, und die Abhilfe ist eine kleinere Allowlist.
+    """
+    for label, toolsets in (
+        ("Chat", build_local_allowlist(include_delegation=True)),
+        ("Triage", build_triage_allowlist()),
+        ("Recherche", build_gather_allowlist()),
+    ):
+        tokens = tool_schema_tokens(toolsets)
+        if tokens > TOOL_SCHEMA_WARN_TOKENS:
+            logger.warning(
+                "Werkzeugdefinitionen %s: ~%d Token, Grenze %d -- Allowlist verkleinern",
+                label, tokens, TOOL_SCHEMA_WARN_TOKENS,
+            )
+        else:
+            logger.info("Werkzeugdefinitionen %s: ~%d Token", label, tokens)
+
+
 def _build_worker_agent(
     enabled_toolsets: list[str] | None = None,
     session_id: str = "taskpilot-worker",
@@ -4033,13 +4134,18 @@ async def ensure_runtime_ready() -> bool:
         _install_trajectory_path_shim()
 
         try:
-            from tools.mcp_tool import discover_mcp_tools
+            from tools.mcp_tool_discovery import discover_mcp_tools
 
             tool_names = await asyncio.to_thread(discover_mcp_tools)
             logger.info("Hermes MCP-Discovery: %d Tools registriert", len(tool_names or []))
         except Exception:
             logger.exception("Hermes MCP-Discovery fehlgeschlagen")
             return False
+
+        try:
+            _report_tool_schema_size()
+        except Exception:
+            logger.exception("Grösse der Werkzeugdefinitionen konnte nicht ermittelt werden")
 
         _runtime_ready = True
         return True
@@ -4301,8 +4407,11 @@ def _run_agent_sync(
     vLLM. Ollama ignoriert ihn (siehe ``_draft_sampling_overrides``), das dortige
     Gegenmittel ``reasoning_effort`` ist hier bewusst nicht gesetzt, weil die
     Locality des Agenten an dieser Stelle nicht bekannt ist und der Wert "none" von
-    Cloud-Providern abgelehnt wuerde. Aufrufer, die Thinking verlaesslich abschalten
+    Cloud-Providern abgelehnt wuerde.     Aufrufer, die Thinking verlaesslich abschalten
     muessen, geben ``overrides`` aus ``_draft_sampling_overrides`` mit.
+
+    Stoppt Hermes den Lauf am Schleifenwaechter, wirft die Funktion
+    ``GuardrailHalt`` statt den Waechtertext als Antwort zurueckzugeben.
     """
     prev_overrides = getattr(agent, "request_overrides", None)
     prev_iterations = getattr(agent, "max_iterations", None)
@@ -4324,6 +4433,11 @@ def _run_agent_sync(
             agent.max_iterations = prev_iterations
 
     if isinstance(result, dict):
+        guardrail = result.get("guardrail")
+        if isinstance(guardrail, dict):
+            halt = dict(guardrail)
+            _job_guardrail_halts.append(halt)
+            raise GuardrailHalt(halt)
         return str(result.get("final_response") or "")
     return str(result or "")
 
@@ -4865,6 +4979,7 @@ async def _process_job(
     _job_tool_names.clear()
     _job_context_sources.clear()
     _job_evidence.clear()
+    _job_guardrail_halts.clear()
     disable_thinking = _thinking_disabled(job_type, meta.get("skill"))
 
     # Briefings sind reine Prosa-Synthese (alle Daten stehen im Prompt): sie laufen
@@ -4901,9 +5016,19 @@ async def _process_job(
     tokens_before = int(getattr(agent, "session_total_tokens", 0) or 0)
 
     try:
-        content = await asyncio.to_thread(
-            _run_agent_sync, agent, prompt, disable_thinking, overrides
-        )
+        # Ein Abbruch am Schleifenwaechter scheitert bei allen Jobtypen ausser der
+        # Triage ueber den Fehlerpfad unten (``failed``). Die Triage hat mit
+        # ``_fallback_unparsed_triage`` einen eigenen, sichtbaren Rueckfall.
+        classify_halt: dict | None = None
+        try:
+            content = await asyncio.to_thread(
+                _run_agent_sync, agent, prompt, disable_thinking, overrides
+            )
+        except GuardrailHalt as halt:
+            if job_type != "email_triage":
+                raise
+            classify_halt = halt.guardrail
+            content = str(halt)
         if anon_session:
             content = await _entmaskiere_cloud_antwort(job_id, content, anon_session)
         # Echte Draft-ID aus dem Tool-Ergebnis (ground truth) an das Post-Processing
@@ -4912,14 +5037,29 @@ async def _process_job(
         captured_moved_id = _job_moved_message_id
         logger.info("Job %s abgeschlossen: %s", job_id, content[:200])
 
-        if job_type == "email_triage":
+        if job_type == "email_triage" and classify_halt is not None:
+            # Weder Nachfass-Lauf noch Structured-Reask: beide bekaemen nur den
+            # Waechtertext zu sehen und wuerden ihn einordnen.
+            _tag_trace_pass("classify")
+            status = await _fallback_unparsed_triage(
+                job_id, meta, captured_moved_id, guardrail=classify_halt
+            )
+            trace = list(_job_trace)
+            tools_used = sorted(_job_tool_names)
+        elif job_type == "email_triage":
             # Zuverlaessigkeit: Liefert der erste Lauf keinen verwertbaren JSON-Block,
             # genau EIN strikter Nachfass-Prompt, bevor das Fallback-Netz greift.
+            # Bricht der Nachfass am Waechter ab, bleibt es beim ersten Ergebnis --
+            # das ist echte Modellausgabe und darf in den Structured-Reask.
             if _extract_json_block(content) is None:
                 logger.info("Job %s: kein JSON-Block -- strikter Nachfass-Lauf", job_id)
-                retry = await asyncio.to_thread(
-                    _run_agent_sync, agent, _json_retry_prompt(content), disable_thinking
-                )
+                try:
+                    retry = await asyncio.to_thread(
+                        _run_agent_sync, agent, _json_retry_prompt(content), disable_thinking
+                    )
+                except GuardrailHalt as halt:
+                    logger.warning("Job %s: Nachfass-Lauf abgebrochen: %s", job_id, halt)
+                    retry = ""
                 if retry and _extract_json_block(retry) is not None:
                     content = f"{content}\n\n{retry}"
             # Events des Klassifikations-Laufs markieren, bevor der Schreib-Pass
@@ -5016,6 +5156,8 @@ async def _process_job(
             # externe Mail vor dem Versand gelesen wird (HITL L1).
             if _job_context_sources:
                 new_meta["context_sources"] = list(_job_context_sources)
+            if _job_guardrail_halts:
+                new_meta["guardrail_halts"] = list(_job_guardrail_halts)
             if job_type == "email_triage":
                 grade = _compute_self_grade(meta, new_meta, tools_used)
                 new_meta["self_grade"] = grade
@@ -5504,7 +5646,7 @@ async def stop_hermes_worker() -> None:
     _agent = None
     _triage_agent = None
     try:
-        from tools.mcp_tool import shutdown_mcp_servers
+        from tools.mcp_tool_lifecycle import shutdown_mcp_servers
 
         await asyncio.to_thread(shutdown_mcp_servers)
     except Exception:

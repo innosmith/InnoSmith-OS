@@ -80,19 +80,38 @@ Anonymisierung (`contentConverter`) ist als spaetere Phase vorgesehen.
 
 ## MCP-Server (in `config.yaml → mcp_servers`)
 
-| Name | Quellcode | Zweck | Tool-Prefix |
-|------|-----------|-------|-------------|
-| `taskpilot` | `src/mcp-taskpilot/server.py` | DB (Tasks, Projekte, Boards) | `mcp_taskpilot_*` |
-| `graph` | `src/mcp-graph/server.py` | Microsoft Graph, Modus `safe` (Lese-Tools) | `mcp_graph_*` |
-| `graphAdmin` | `src/mcp-graph/server.py` | Derselbe Server, Modus `admin` (schreibende Tools) | `mcp_graphAdmin_*` |
-| `pipedrive` | `src/mcp-pipedrive/server.py` | Pipedrive CRM | `mcp_pipedrive_*` |
-| `bexio` | `src/mcp-bexio/server.py` | Buchhaltung | `mcp_bexio_*` |
-| `toggl` | `src/mcp-toggl/server.py` | Zeiterfassung | `mcp_toggl_*` |
-| `signa` | `src/mcp-signa/server.py` | SIGNA Strategic Intelligence | `mcp_signa_*` |
-| `invoiceinsight` | `src/mcp-invoiceinsight/server.py` | Kreditoren-Analyse | `mcp_invoiceinsight_*` |
-| `scripts` | `src/mcp-scripts/server.py` | Script-Orchestrierung (Docker) | `mcp_scripts_*` |
-| `sandbox` | `src/mcp-sandbox/server.py` | Code-Sandbox (isoliert) | `mcp_sandbox_*` |
-| `contentConverter` | `cconv serve` | md → docx/pptx (nur im Docker-Image) | `mcp_contentConverter_*` |
+| Server-Schlüssel | Quellcode | Zweck |
+|------|-----------|-------|
+| `taskpilot` | `src/mcp-taskpilot/server.py` | DB (Tasks, Projekte, Boards) |
+| `graph` | `src/mcp-graph/server.py` | Microsoft Graph, Modus `safe` (Lese-Tools) |
+| `graphAdmin` | `src/mcp-graph/server.py` | Derselbe Server, Modus `admin` (schreibende Tools) |
+| `pipedrive` | `src/mcp-pipedrive/server.py` | Pipedrive CRM |
+| `bexio` | `src/mcp-bexio/server.py` | Buchhaltung |
+| `toggl` | `src/mcp-toggl/server.py` | Zeiterfassung |
+| `signa` | `src/mcp-signa/server.py` | SIGNA Strategic Intelligence |
+| `invoiceinsight` | `src/mcp-invoiceinsight/server.py` | Kreditoren-Analyse |
+| `scripts` | `src/mcp-scripts/server.py` | Script-Orchestrierung (Docker) |
+| `sandbox` | `src/mcp-sandbox/server.py` | Code-Sandbox (isoliert) |
+| `contentConverter` | `cconv serve` | md → docx/pptx (nur im Docker-Image) |
+
+**Werkzeugnamen werden abgeleitet, nie abgeschrieben.** Den Namen, unter dem das Modell ein
+MCP-Werkzeug aufruft, bildet Hermes aus Server-Schlüssel und Werkzeug; im Code steht er
+ausschliesslich als `mcp_tool("graph", "get_email")` (`app/services/tool_names.py`, delegiert an
+`tools.mcp_tool_schema.mcp_prefixed_tool_name`). Hermes 0.21 stellte die Form um, und die
+Abschriften in Prompt, Skills und Tests liefen ab dem 03.09.2026 drei Wochen ins Leere, ohne dass
+ein Test fiel. `test_tool_names.py` prüft Code und ausgerollte Skills gegen die alte Form und jeden
+genannten Namen gegen die Werkzeuge, die der Server tatsächlich anbietet. Skills sind Text und
+können nicht ableiten; nach einem Hermes-Upgrade zeigt dieser Test, ob sie nachgeführt werden müssen.
+
+**Werkzeug-Brücke aus.** `tools.tool_search.enabled` steht auf `off`: seit 0.21 ist `auto`
+gleich `on`, und `threshold_pct` bemisst nur noch das Verzeichnis. Die Grösse der
+Werkzeugdefinitionen meldet `ensure_runtime_ready` gegen `TOOL_SCHEMA_WARN_TOKENS`; wer die
+Grenze reisst, verkleinert die Allowlist.
+
+**Ein Abbruch am Schleifenwächter ist keine Antwort.** `_run_agent_sync` wirft `GuardrailHalt`,
+sobald Hermes `result["guardrail"]` setzt. Die Triage fällt dann ohne Nachfass und ohne Reask auf
+`_fallback_unparsed_triage` (fyi, `needs_review`, kein Auto-Task), alle anderen Jobs enden
+`failed`. Jeder Abbruch steht als `guardrail_halts` im Job-Metadata.
 
 Alle Server werden als Subprocess (stdio) gestartet. **Env-Propagation:** Hermes filtert die
 Subprocess-Umgebung (`_build_safe_env`); deshalb referenziert jeder `env`-Block in `config.yaml`

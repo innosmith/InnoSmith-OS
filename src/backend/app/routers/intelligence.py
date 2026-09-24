@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth.deps import get_current_user, require_role
 from app.database import get_db
 from app.models import AgentEpisode, AgentFeedback, AgentJob, EmailTriage, LearnedRule, User
+from app.services.tool_names import mcp_server_of
 
 logger = logging.getLogger("taskpilot.intelligence")
 
@@ -708,7 +709,7 @@ async def get_skill_usage(
        ``email-triage``/``email-style`` explizit anweist).
     2. **Tool-Heuristik** -- im Chat injiziert das Backend den Skill-Inhalt
        direkt in den System-Prompt; der Agent ruft dann die MCP-Tools (z. B.
-       ``mcp_pipedrive_*``) direkt auf, ohne ``skill_view``. Damit solche
+       ``mcp__pipedrive__*``) direkt auf, ohne ``skill_view``. Damit solche
        Einsaetze nicht unsichtbar bleiben, ordnen wir genutzte MCP-Toolsets
        ueber ``requires_toolsets`` ihrem Skill zu -- aber nur fuer **eindeutige**
        Toolsets (genau ein Skill setzt sie voraus). Generische Toolsets wie
@@ -772,10 +773,13 @@ async def get_skill_usage(
                 _bump(sk, iso)
                 explicit_in_job.add(sk)
             elif isinstance(name, str) and name.startswith("mcp_"):
-                # Tool-Schema: mcp_<toolset>_<tool> -> Toolset = 2. Segment.
-                parts = name.split("_", 2)
-                if len(parts) >= 2 and parts[1]:
-                    used_toolsets.add(parts[1])
+                server = mcp_server_of(name)
+                if server is None:
+                    # Traces vor Hermes 0.21 tragen mcp_<toolset>_<tool>.
+                    parts = name.split("_", 2)
+                    server = parts[1] if len(parts) >= 2 and parts[1] else None
+                if server:
+                    used_toolsets.add(server)
 
         # Tool-Heuristik: pro eindeutigem genutzten Toolset den zugehoerigen
         # Skill einmal je Job gutschreiben -- sofern er nicht ohnehin explizit

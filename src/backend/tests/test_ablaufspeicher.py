@@ -13,6 +13,7 @@ werden; Werkzeuge tragen die Beweislast.
 """
 
 from app.routers.chat import Ablaufspeicher, denkmodus_hinweis, zeitlimit_grund
+from app.services.tool_names import mcp_tool
 
 
 def _denken(n: int) -> list[dict]:
@@ -24,8 +25,8 @@ class TestGetrennteBudgets:
         speicher = Ablaufspeicher(max_denken=5, max_werkzeug=10)
         for ereignis in _denken(500):
             speicher.anhaengen(ereignis)
-        speicher.anhaengen({"type": "tool_start", "name": "mcp_sandbox_execute_code"})
-        speicher.anhaengen({"type": "tool_complete", "name": "mcp_sandbox_execute_code"})
+        speicher.anhaengen({"type": "tool_start", "name": mcp_tool("sandbox", "execute_code")})
+        speicher.anhaengen({"type": "tool_complete", "name": mcp_tool("sandbox", "execute_code")})
 
         werkzeuge = [e for e in speicher.ereignisse if e["type"] != "thinking"]
         assert len(werkzeuge) == 2, "Der entscheidende Aufruf darf nicht verdrängt werden"
@@ -59,14 +60,14 @@ class TestGetrennteBudgets:
         speicher = Ablaufspeicher()
         for ereignis in _denken(140):
             speicher.anhaengen(ereignis)
-        speicher.anhaengen({"type": "tool_start", "name": "mcp_datenraum_datenraum_katalog"})
+        speicher.anhaengen({"type": "tool_start", "name": mcp_tool("datenraum", "datenraum_katalog")})
         speicher.anhaengen({"type": "tool_start", "name": "skill_view"})
         for ereignis in _denken(60):
             speicher.anhaengen(ereignis)
-        speicher.anhaengen({"type": "tool_start", "name": "mcp_sandbox_execute_code"})
+        speicher.anhaengen({"type": "tool_start", "name": mcp_tool("sandbox", "execute_code")})
 
         namen = [e["name"] for e in speicher.ereignisse if e["type"] == "tool_start"]
-        assert "mcp_sandbox_execute_code" in namen
+        assert mcp_tool("sandbox", "execute_code") in namen
 
 
 class TestDenkmodusHinweis:

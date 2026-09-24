@@ -21,17 +21,17 @@ from app.auth.deps import get_current_user, require_role
 from app.database import get_db, async_session
 from app.models import AgentJob, BoardColumn, Project, Task, User
 from app.models.models import LlmConversation, LlmMessage
+from app.services.tool_names import mcp_tool
 
 litellm.drop_params = True
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/chat", tags=["chat"])
 
-# Name des Hermes-nativen Sandbox-Tools (MCP-Praefix mcp_<server>_<tool>). Der
-# Agent nutzt es fuer Code-Ausfuehrung; wir binden dessen Workspace an die
-# Konversation und rendern die erzeugten Artefakte inline (Feature-Paritaet
-# mit dem alten Code-Modus).
-_SANDBOX_EXEC_TOOL = "mcp_sandbox_execute_code"
+# Name des Sandbox-Tools, wie Hermes es registriert. Der Agent nutzt es fuer
+# Code-Ausfuehrung; wir binden dessen Workspace an die Konversation und rendern
+# die erzeugten Artefakte inline (Feature-Paritaet mit dem alten Code-Modus).
+_SANDBOX_EXEC_TOOL = mcp_tool("sandbox", "execute_code")
 
 # Maschinenlesbarer Marker aus dem Sandbox-Tool-Ergebnis (siehe
 # src/mcp-sandbox/server.py): <!--tp-exec:SCOPE:name1|name2-->. Daraus baut das
@@ -1993,7 +1993,7 @@ async def _run_agent_background_impl(
                         _artifact_names.append(n)
         # Audit-Parität: Hermes-native web_search-Aufrufe historisieren.
         # Exakter Abgleich -- ein Substring-Match hatte frueher auch
-        # mcp_taskpilot_web_search erfasst und Duplikate erzeugt.
+        # das web_search-Werkzeug des taskpilot-Servers erfasst und Duplikate erzeugt.
         if str(name) == "web_search":
             query = _suchanfrage(args)
             if query:

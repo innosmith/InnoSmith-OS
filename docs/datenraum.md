@@ -636,9 +636,14 @@ Zahlen, die falsch angenommen waren:
 (`tools.tool_search`) war mit 15 % konfiguriert in der Annahme des doppelten
 Fensters — die Schwelle lag damit bei 9'830 Token und also *unter* den 14'170,
 die unsere Werkzeuge wiegen. Die Brücke blieb an, obwohl sie abgeschaltet sein
-sollte. Jetzt 25 % (16'384 Token), und der Test rechnet gegen
-`LOCAL_CONTEXT_LENGTH` statt gegen eine notierte Zahl, damit die nächste
-Fensteränderung nicht wieder still danebengreift.
+sollte. Danach 25 % (16'384 Token), und der Test rechnete gegen
+`LOCAL_CONTEXT_LENGTH` statt gegen eine notierte Zahl.
+
+Auch das war nicht die ganze Wahrheit: seit Hermes 0.21 ist `auto` gleich `on`,
+die Brücke steht bei jedem MCP-Werkzeug, und der Prozentsatz bemisst nur noch
+das Verzeichnis. Der Test war grün, weil er unsere Vorstellung der Semantik
+prüfte statt Hermes. Seit dem 24.09.2026 steht der Aufschub auf `off`, und der
+Test fragt Hermes' eigene Entscheidung (`should_activate`).
 
 **Die Sandbox schnitt ihre Ausgabe schweigend ab.** Bei über 20'000 Zeichen
 lieferte der Executor kommentarlos die letzten 20'000. Wer nur den Schwanz einer

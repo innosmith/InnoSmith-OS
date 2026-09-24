@@ -34,13 +34,13 @@ litellm>=1.99,<1.100
 openai>=2.24
 anthropic>=0.97
 tiktoken>=0.12
-# hermes-agent 0.21.0 (Tag v2026.8.31, «Pantheon»): kein PyPI-Wheel mehr.
+# hermes-agent 0.21.5 (Tag v2026.9.24): kein PyPI-Wheel mehr.
 # Nous sperrt bdist_wheel. Die einbettende App vendort den Tag
-# (docker/build.sh, HERMES_REF=v2026.8.31) und installiert
+# (docker/build.sh, HERMES_REF=v2026.9.24) und installiert
 #   pip install -e /pfad/zu/hermes-agent[mcp]
 # Extra [mcp] ist Pflicht -- ohne ihn ist der MCP-Client still tot und pinnt
-# mcp==2.0.0. Library-API (AIAgent-Init, run_conversation->final_response,
-# session_total_tokens, request_overrides, skill_view) gegen 0.21.0 verifiziert.
+# mcp==2.0.0. Jede Hermes-Interna, die das Backend anfasst, prueft
+# scripts/eval/check_hermes_api.py -- vor jedem Upgrade laufen lassen.
 # Hartpins von 0.21 nicht ueberstimmen: pydantic==2.13.4, openai==2.24.0,
 # websockets==15.0.1, croniter==6.0.0.
 

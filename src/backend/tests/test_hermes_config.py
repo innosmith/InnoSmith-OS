@@ -60,7 +60,7 @@ def test_web_backends_explicitly_pinned():
 
 
 def test_taskpilot_mcp_env_without_tavily_key():
-    """Das MCP-Tool mcp_taskpilot_web_search wurde entfernt (Redundanz zur
+    """Das MCP-Tool web_search des taskpilot-Servers wurde entfernt (Redundanz zur
     Hermes-nativen Websuche + Doppel-Logging) -- der taskpilot-Server braucht
     den Tavily-Key nicht mehr."""
     cfg = build_config_dict()
@@ -149,25 +149,36 @@ def test_gateway_curator_defensively_disabled():
     assert cfg["curator"]["consolidate"] is False
 
 
-def test_werkzeug_aufschub_greift_erst_am_qualitaetsknick():
-    """Die Bruecke tool_search/tool_call darf bei unserer Werkzeugmenge nicht anspringen.
+def test_werkzeug_bruecke_springt_nie_an():
+    """Die Bruecke tool_search/tool_call darf nicht anspringen -- laut Hermes selbst.
 
     Sie kostet pro Zug eine Runde und verlangt Code als JSON-Zeichenkette in einem
     JSON-Aufruf -- daran scheiterte das lokale Modell im Auswertungslauf vom
-    02.09.2026 vier von vier Malen. Bei ~14'170 Token Schema muss die Schwelle
-    darueber liegen, ohne den Schutz ganz abzuschalten.
+    02.09.2026 vier von vier Malen.
 
-    Gerechnet wird gegen ``LOCAL_CONTEXT_LENGTH``, nicht gegen eine hier notierte
-    Zahl: Die erste Fassung dieses Tests trug 131'072 fest im Code, waehrend das
-    Fenster tatsaechlich 65'536 misst. Der Test war damit gruen und seine Aussage
-    trotzdem falsch -- die Schwelle lag unter der Werkzeugmenge statt darueber.
+    Die Vorgaengerfassung dieses Tests rechnete ``threshold_pct`` gegen das
+    Kontextfenster und war gruen, waehrend die Bruecke seit Hermes 0.21 bei jedem
+    Lauf stand: dort ist ``auto`` gleich ``on``, und der Prozentsatz bemisst nur
+    noch das Verzeichnis. Der Test pruefte unsere Vorstellung von der Semantik,
+    nicht die Semantik. Darum fragt er jetzt Hermes' eigene Entscheidung, und
+    zwar fuer den Fall, der die Bruecke sicher ausloest: ein aufschiebbares
+    Werkzeug, mehr als das ganze Fenster schwer.
     """
-    ts = build_config_dict()["tools"]["tool_search"]
-    assert ts["enabled"] == "auto"
-    schwelle = LOCAL_CONTEXT_LENGTH * ts["threshold_pct"] / 100
-    assert 14_170 < schwelle <= 20_000, (
-        f"Schwelle {schwelle:.0f} Token passt nicht zwischen Werkzeugmenge und Qualitaetsknick"
-    )
+    from tools.tool_search import ToolSearchConfig, should_activate
+
+    konfig = ToolSearchConfig.from_raw(build_config_dict()["tools"]["tool_search"])
+    assert not should_activate(konfig, LOCAL_CONTEXT_LENGTH * 2, LOCAL_CONTEXT_LENGTH)
+
+
+def test_werkzeuggrenze_liegt_ueber_dem_gemessenen_bestand():
+    """``TOOL_SCHEMA_WARN_TOKENS`` darf beim heutigen Bestand nicht anschlagen.
+
+    Gemessen am 02.09.2026: ~14'170 Token fuer 129 Werkzeuge. Eine Grenze darunter
+    meldete bei jedem Start, und eine Warnung, die immer kommt, liest niemand.
+    """
+    from app.services.hermes_config import TOOL_SCHEMA_WARN_TOKENS
+
+    assert 14_170 < TOOL_SCHEMA_WARN_TOKENS < LOCAL_CONTEXT_LENGTH / 2
 
 
 def test_config_yaml_roundtrip_without_aliases():
