@@ -43,8 +43,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 logger = logging.getLogger(__name__)
 
 QUELLEN: frozenset[str] = frozenset(
-    {"autodownload", "ablage_hand", "postfach", "upload"}
+    {"autodownload", "ablage_hand", "postfach", "upload", "erzeugt"}
 )
+"""``erzeugt``: von TaskPilot selbst hergestellt -- der Monatssammelbeleg."""
 BELEGARTEN: frozenset[str] = frozenset({"rechnung", "spese", "sammelbeleg"})
 
 
@@ -60,10 +61,44 @@ class Aufnahme:
     beleg: Kreditorenbeleg
     neu: bool
     vermerk: str
+    abgewiesen: bool = False
+    """Eine andere Datei derselben Rechnung. ``beleg`` ist dann das Original,
+    und am Original darf der Aufrufer nichts fortschreiben."""
 
     @property
     def doppelt(self) -> bool:
         return not self.neu
+
+
+def _nummer(wert: str | None) -> str | None:
+    """Die Rechnungsnummer ohne Rand. Leer ist keine Nummer."""
+    rein = (wert or "").strip()
+    return rein or None
+
+
+async def _original(
+    db: AsyncSession, lieferant: str | None, nummer: str | None, ausser: UUID | None = None
+) -> Kreditorenbeleg | None:
+    """Der Beleg, der diese Rechnung schon trägt -- sofern Lieferant und Nummer
+    beide bekannt sind. Fehlt eines, ist die Frage nicht beantwortbar."""
+    if not lieferant or not nummer:
+        return None
+    abfrage = select(Kreditorenbeleg).where(
+        Kreditorenbeleg.lieferant_schluessel == lieferant,
+        Kreditorenbeleg.rechnungsnummer == nummer,
+    )
+    if ausser is not None:
+        abfrage = abfrage.where(Kreditorenbeleg.id != ausser)
+    return (await db.execute(abfrage)).scalar_one_or_none()
+
+
+def _doppel_vermerk(dateiname: str, nummer: str, original: Kreditorenbeleg) -> str:
+    # Welche Datei zuerst gesehen wurde, ist Zufall -- im Eingang war es die mit
+    # «(2)» im Namen. Deshalb keine Empfehlung, welche gelöscht werden soll.
+    return (
+        f"«{dateiname}» ist Rechnung {nummer} — dieselbe wie «{original.dateiname}», "
+        f"als andere Datei. Nur eine wird gebucht; eine der beiden kann weg."
+    )
 
 
 async def aufnehmen(
@@ -76,6 +111,7 @@ async def aufnehmen(
     graph_pfad: str | None = None,
     belegart: str = "rechnung",
     lieferant_schluessel: str | None = None,
+    rechnungsnummer: str | None = None,
 ) -> Aufnahme:
     """Nimmt einen Beleg auf -- oder erkennt ihn wieder.
 
@@ -88,6 +124,15 @@ async def aufnehmen(
     auf, ist das **nicht** eine Bewegung, sondern ein zweiter Download. Dann
     bleibt der Archivort stehen und der Fund wird gemeldet -- sonst zeigte das
     Register auf den Eingang, wo die Datei bald nicht mehr liegt.
+
+    Der Hash erkennt dieselbe **Datei**, nicht dieselbe **Rechnung**. Cursor
+    liefert für dieselbe Nummer bei jedem Abruf andere Bytes; am 02.09.2026
+    lagen neun Dateien für vier Rechnungen im Archiv. Deshalb prüft
+    ``rechnungsnummer`` mit dem Lieferanten als zweiter Wächter: eine andere
+    Datei derselben Rechnung wird gemeldet und nicht aufgenommen
+    (``abgewiesen``). Stand die Kopie schon vor dem Wächter im Register, wird
+    sie mit Begründung zurückgestellt statt gelöscht -- zurückholen darf der
+    Mensch.
     """
     if quelle not in QUELLEN:
         raise ValueError(f"Unbekannte Quelle {quelle!r}; erlaubt: {sorted(QUELLEN)}")
@@ -100,7 +145,25 @@ async def aufnehmen(
         )
     ).scalar_one_or_none()
 
+    nummer = _nummer(rechnungsnummer)
+
     if bekannt is not None:
+        # Ergänzt wird nur, was fehlt -- und erst nach der Prüfung, sonst
+        # scheiterte der Schreibvorgang an der Eindeutigkeit in der Datenbank.
+        wer = bekannt.lieferant_schluessel or lieferant_schluessel
+        nr = bekannt.rechnungsnummer or nummer
+        if (wer, nr) != (bekannt.lieferant_schluessel, bekannt.rechnungsnummer):
+            original = await _original(db, wer, nr, ausser=bekannt.id)
+            if original is not None:
+                vermerk = _doppel_vermerk(dateiname, nr or "", original)
+                if bekannt.freigegeben_am is None and not bekannt.zurueckgestellt:
+                    bekannt.zurueckgestellt = True
+                    bekannt.grund = vermerk
+                logger.info("Kreditorenregister: %s", vermerk)
+                return Aufnahme(bekannt, neu=False, vermerk=vermerk, abgewiesen=True)
+            bekannt.lieferant_schluessel = wer
+            bekannt.rechnungsnummer = nr
+
         if bekannt.abgelegt_am is not None:
             vermerk = (
                 f"«{dateiname}» liegt seit {bekannt.abgelegt_am:%d.%m.%Y} im Archiv "
@@ -120,6 +183,12 @@ async def aufnehmen(
         logger.info("Kreditorenregister: %s", vermerk)
         return Aufnahme(bekannt, neu=False, vermerk=vermerk)
 
+    original = await _original(db, lieferant_schluessel, nummer)
+    if original is not None:
+        vermerk = _doppel_vermerk(dateiname, nummer or "", original)
+        logger.info("Kreditorenregister: %s", vermerk)
+        return Aufnahme(original, neu=False, vermerk=vermerk, abgewiesen=True)
+
     beleg = Kreditorenbeleg(
         datei_hash=datei_hash,
         dateiname=dateiname,
@@ -128,10 +197,17 @@ async def aufnehmen(
         graph_item_id=graph_item_id,
         graph_pfad=graph_pfad,
         lieferant_schluessel=lieferant_schluessel,
+        rechnungsnummer=nummer,
     )
     db.add(beleg)
     await db.flush()
     return Aufnahme(beleg, neu=True, vermerk=f"«{dateiname}» neu aufgenommen")
+
+
+async def nach_hash(db: AsyncSession, datei_hash: str) -> Kreditorenbeleg | None:
+    return (
+        await db.execute(select(Kreditorenbeleg).where(Kreditorenbeleg.datei_hash == datei_hash))
+    ).scalar_one_or_none()
 
 
 async def offene(db: AsyncSession, *, mit_zurueckgestellten: bool = False) -> list[Kreditorenbeleg]:
@@ -139,13 +215,30 @@ async def offene(db: AsyncSession, *, mit_zurueckgestellten: bool = False) -> li
 
     Keine Periode, kein Monatslauf. Rechnungen kommen laufend herein, und ein
     Lauf, der auf den Monatswechsel wartet, liesse einen Beleg vom 3. bis zum
-    30. liegen, ohne dass das irgendeinen Zweck haette.
+    30. liegen, ohne dass das irgendeinen Zweck hätte.
     """
     abfrage = select(Kreditorenbeleg).where(Kreditorenbeleg.freigegeben_am.is_(None))
     if not mit_zurueckgestellten:
         abfrage = abfrage.where(Kreditorenbeleg.zurueckgestellt.is_(False))
     return list(
         (await db.execute(abfrage.order_by(Kreditorenbeleg.eingang_am))).scalars().all()
+    )
+
+
+async def zu_buchen(db: AsyncSession) -> list[Kreditorenbeleg]:
+    """Freigegeben, aber noch nicht gebucht -- oder gebucht und noch nicht abgelegt.
+
+    Beides gehört in dieselbe Liste: eine Buchung ohne Ablage ist nicht
+    fertig, und wer sie nicht sieht, findet die Rechnung Wochen später im
+    Eingang und hält sie für neu.
+    """
+    abfrage = select(Kreditorenbeleg).where(
+        Kreditorenbeleg.freigegeben_am.is_not(None),
+        Kreditorenbeleg.zurueckgestellt.is_(False),
+        (Kreditorenbeleg.gebucht_am.is_(None)) | (Kreditorenbeleg.abgelegt_am.is_(None)),
+    )
+    return list(
+        (await db.execute(abfrage.order_by(Kreditorenbeleg.freigegeben_am))).scalars().all()
     )
 
 
@@ -187,6 +280,14 @@ async def freigeben(
             f"«{beleg.dateiname}» ist zurückgestellt ({beleg.grund}) — "
             f"erst zurückholen, dann freigeben"
         )
+    if not beleg.sollkonto:
+        # Dieselbe Bedingung steht als Prüfregel in der Datenbank. Doppelt, weil
+        # die Datenbank nur «Constraint verletzt» sagen kann -- und die Freigabe
+        # ist die Stelle, an der ein Mensch eine lesbare Auskunft braucht.
+        raise ValueError(
+            f"«{beleg.dateiname}» hat kein Sollkonto — freigeben heisst buchen, "
+            f"und ohne Konto hätte die Buchung kein Ziel"
+        )
     beleg.freigegeben_am = datetime.now(UTC)
     beleg.freigegeben_von = durch
     return beleg
@@ -195,11 +296,11 @@ async def freigeben(
 async def ablage_vermerken(
     db: AsyncSession, beleg: Kreditorenbeleg, *, archiv_pfad: str, graph_item_id: str | None
 ) -> Kreditorenbeleg:
-    """Schreibt den Archivort fest und fuehrt das Handle nach.
+    """Schreibt den Archivort fest und führt das Handle nach.
 
-    Nach dem Verschieben ist das alte ``graph_item_id`` ungueltig. Wer es
-    stehen liesse, haette ein Handle, das auf nichts zeigt -- und eine spaetere
-    Aenderung liefe ins Leere, ohne zu scheitern.
+    Nach dem Verschieben ist das alte ``graph_item_id`` ungültig. Wer es
+    stehen liesse, hätte ein Handle, das auf nichts zeigt -- und eine spätere
+    Änderung liefe ins Leere, ohne zu scheitern.
     """
     if beleg.freigegeben_am is None:
         raise ValueError(

@@ -89,6 +89,30 @@ lieferanten:
         assert bestand.lieferanten["x"].zahlweg == ("karte",)
         assert any("bargeld" in m for m in bestand.maengel)
 
+    def test_einzeln_bei_zyklus_wird_gelesen_und_geprueft(self, tmp_path):
+        pfad = _schreiben(tmp_path, """
+lieferanten:
+  - schluessel: x
+    ordner: X
+    buchung: sammelbeleg
+    einzeln_bei_zyklus: [YEARLY, monthly, JAEHRLICH]
+  - schluessel: y
+    ordner: Y
+    einzeln_bei_zyklus: [YEARLY]
+""")
+        bestand = kl.laden(pfad)
+        x = bestand.lieferanten["x"]
+        assert x.einzeln_bei_zyklus == ("YEARLY", "MONTHLY")
+        assert x.sammelt("USAGE_BASED") and x.sammelt("ONE_TIME") and x.sammelt(None)
+        assert not x.sammelt("YEARLY") and not x.sammelt("MONTHLY")
+        assert any("JAEHRLICH" in m for m in bestand.maengel)
+        assert any(m.startswith("y: einzeln_bei_zyklus wirkt nur") for m in bestand.maengel)
+
+    def test_cursor_sammelt_ausser_den_abos(self):
+        cursor = kl.laden().lieferanten["cursor"]
+        assert cursor.buchung == "sammelbeleg"
+        assert set(cursor.einzeln_bei_zyklus) == {"YEARLY", "MONTHLY"}
+
     def test_konto_und_kandidaten_zugleich_ist_ein_widerspruch(self, tmp_path):
         pfad = _schreiben(tmp_path, """
 lieferanten:
@@ -245,3 +269,151 @@ class TestEchteDatei:
             f"{len(luecken)} von {len(aktive)} aktiven Lieferanten ohne "
             f"Kontoerwartung: {[l.schluessel for l in luecken]}"
         )
+
+
+class TestBestaetigen:
+    """Das Zurueckschreiben. Der tragende Test ist der erste: bliebe die
+    Herleitung nicht stehen, muesste die naechste Pruefung die Messung
+    wiederholen -- und die Datei verlore ihren einzigen Zweck."""
+
+    QUELLE = """version: 1
+stand: 2026-09-21
+
+lieferanten:
+
+  - schluessel: cursor
+    ordner: Cursor
+    sollkonto: "6570"   # einstimmig, 48 Buchungen
+    zahlweg: karte
+    steuer:
+      - ab: 2024-10-20
+        behandlung: bezugssteuer   # keine von 50 Rechnungen weist MWST aus
+    rhythmus: monatlich   # 19 belegte Monate
+    aktiv: true
+    bestaetigt: false
+
+  - schluessel: hosttech
+    ordner: Hosttech
+    sollkonto_kandidaten: ["6512", "4200"]
+    regel: eigener Aufwand oder weiterverrechnet
+    aktiv: true
+    bestaetigt: false
+
+offen: []
+"""
+
+    def _datei(self, tmp_path):
+        pfad = tmp_path / "kreditorenlieferanten.yaml"
+        pfad.write_text(self.QUELLE, encoding="utf-8")
+        return pfad
+
+    def test_die_belegkommentare_bleiben_stehen(self, tmp_path):
+        pfad = self._datei(tmp_path)
+        kl.bestaetigen("cursor", pfad=pfad, durch="anthony@innosmith.ch")
+
+        text = pfad.read_text(encoding="utf-8")
+        assert "# einstimmig, 48 Buchungen" in text
+        assert "# keine von 50 Rechnungen weist MWST aus" in text
+        assert "rhythmus: monatlich   # 19 belegte Monate" in text
+
+    def test_der_diff_bleibt_bei_einer_zeile(self, tmp_path):
+        """Eine Bestaetigung, die die halbe Datei umformt, ist nicht pruefbar."""
+        pfad = self._datei(tmp_path)
+        vorher = pfad.read_text(encoding="utf-8").splitlines()
+        kl.bestaetigen("cursor", pfad=pfad)
+        nachher = pfad.read_text(encoding="utf-8").splitlines()
+
+        anders = [
+            (a, b) for a, b in zip(vorher, nachher, strict=False) if a != b
+        ]
+        assert len(anders) == 1, f"mehr als eine Zeile geändert: {anders}"
+        assert anders[0] == ("    bestaetigt: false", "    bestaetigt: true")
+
+    def test_ein_entschiedenes_konto_loest_die_kandidaten_auf(self, tmp_path):
+        """Stehen Konto und Kandidaten zugleich, widerspricht die Datei sich
+        selbst -- ``laden()`` meldet das zu Recht als Mangel."""
+        pfad = self._datei(tmp_path)
+        eintrag = kl.bestaetigen("hosttech", sollkonto="4200", pfad=pfad, durch="a@b.ch")
+
+        assert eintrag.sollkonto == "4200"
+        assert eintrag.bestaetigt
+        assert eintrag.sollkonto_kandidaten == ()
+        bestand = kl.laden(pfad)
+        assert bestand.maengel == ()
+        # Die gemessene Lage bleibt lesbar, nur eben als Kommentar.
+        text = pfad.read_text(encoding="utf-8")
+        assert '# sollkonto_kandidaten: ["6512", "4200"]' in text
+        assert "entschieden" in text and "a@b.ch" in text
+
+    def test_der_nachbareintrag_bleibt_unberuehrt(self, tmp_path):
+        pfad = self._datei(tmp_path)
+        kl.bestaetigen("cursor", sollkonto="6571", pfad=pfad)
+
+        bestand = kl.laden(pfad)
+        assert bestand.lieferanten["hosttech"].bestaetigt is False
+        assert bestand.lieferanten["hosttech"].sollkonto_kandidaten == ("6512", "4200")
+
+    def test_ein_unbekannter_schluessel_wird_abgewiesen(self, tmp_path):
+        pfad = self._datei(tmp_path)
+        with pytest.raises(ValueError, match="nicht in der Deklaration"):
+            kl.bestaetigen("gibtsnicht", pfad=pfad)
+        # Und die Datei ist unverändert.
+        assert pfad.read_text(encoding="utf-8") == self.QUELLE
+
+
+class TestErgaenzen:
+    """Die Maschine darf hinzufügen, nie ändern."""
+
+    QUELLE = TestBestaetigen.QUELLE
+
+    def _datei(self, tmp_path):
+        pfad = tmp_path / "kreditorenlieferanten.yaml"
+        pfad.write_text(self.QUELLE, encoding="utf-8")
+        return pfad
+
+    def test_die_leistung_wird_eingetragen_und_gelesen(self, tmp_path):
+        pfad = self._datei(tmp_path)
+        eingetragen, _ = kl.ergaenzen(
+            {"cursor": "Usage"}, feld="leistung",
+            kommentare={"cursor": "247 von 251 Archivnamen"}, pfad=pfad,
+        )
+        assert eingetragen == ["cursor"]
+        cursor = kl.laden(pfad).lieferanten["cursor"]
+        assert cursor.leistung == "Usage"
+        assert '    leistung: "Usage"   # 247 von 251 Archivnamen' in pfad.read_text()
+
+    def test_ein_bestehender_wert_bleibt_auch_wenn_der_neue_anders_lautet(self, tmp_path):
+        pfad = self._datei(tmp_path)
+        kl.ergaenzen({"cursor": "Usage"}, feld="leistung", pfad=pfad)
+        eingetragen, uebergangen = kl.ergaenzen(
+            {"cursor": "Monatsabo"}, feld="leistung", pfad=pfad
+        )
+        assert (eingetragen, uebergangen) == ([], ["cursor"])
+        assert kl.laden(pfad).lieferanten["cursor"].leistung == "Usage"
+
+    def test_nur_eine_zeile_kommt_dazu(self, tmp_path):
+        pfad = self._datei(tmp_path)
+        kl.ergaenzen({"hosttech": "Domain"}, feld="leistung", pfad=pfad)
+        vorher = self.QUELLE.splitlines()
+        nachher = pfad.read_text(encoding="utf-8").splitlines()
+        assert len(nachher) == len(vorher) + 1
+        assert [z for z in nachher if z not in vorher] == ['    leistung: "Domain"']
+
+    def test_ein_unbekannter_lieferant_laesst_die_datei_stehen(self, tmp_path):
+        pfad = self._datei(tmp_path)
+        with pytest.raises(ValueError):
+            kl.ergaenzen({"cursor": "Usage", "gibtsnicht": "x"}, feld="leistung", pfad=pfad)
+        assert pfad.read_text(encoding="utf-8") == self.QUELLE
+
+    def test_nur_erlaubte_felder(self, tmp_path):
+        with pytest.raises(ValueError, match="nicht ergänzbar"):
+            kl.ergaenzen({"cursor": "6510"}, feld="sollkonto", pfad=self._datei(tmp_path))
+
+    def test_ohne_name_gilt_der_ordner(self, tmp_path):
+        pfad = self._datei(tmp_path)
+        assert kl.laden(pfad).lieferanten["cursor"].anzeigename == "Cursor"
+        kl.ergaenzen({"cursor": "Cursor AI"}, feld="name", pfad=pfad)
+        assert kl.laden(pfad).lieferanten["cursor"].anzeigename == "Cursor AI"
+
+    def test_in_der_echten_datei_hat_rapidapi_die_entschiedene_leistung(self):
+        assert kl.laden().lieferanten["rapidapi"].leistung == "Monatsabo"

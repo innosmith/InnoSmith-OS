@@ -1511,6 +1511,25 @@ class GraphClient:
                     return antwort.json() if antwort.content else {}
         return {}
 
+    async def move_drive_item(
+        self, item_id: str, ziel_ordner_id: str, neuer_name: str
+    ) -> dict:
+        """Ein OneDrive-Element verschieben und umbenennen, in einem Aufruf.
+
+        Serverseitig: die Datei wird nicht heruntergeladen und neu geschrieben,
+        Kennung, Versionen und Verlauf bleiben am Element. ``fail`` als
+        Konfliktverhalten aus demselben Grund wie beim Hochladen — eine
+        gleichnamige Rechnung am Ziel ist ein Befund, keine Stelle zum
+        Überschreiben. Graph antwortet dann mit 409.
+        """
+        resp = await self._request(
+            "PATCH",
+            f"{self._user_path}/drive/items/{item_id}",
+            json_body={"name": neuer_name, "parentReference": {"id": ziel_ordner_id}},
+            params={"@microsoft.graph.conflictBehavior": "fail"},
+        )
+        return resp.json() if resp.content else {}
+
     async def get_drive_item_thumbnail(self, item_id: str) -> str | None:
         """Kleine Vorschau-URL (Thumbnail) eines OneDrive-Items, falls vorhanden."""
         try:

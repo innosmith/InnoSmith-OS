@@ -127,7 +127,14 @@ ZUORDNUNG: dict[str, list[str]] = {
     "Galaxus": ["Galaxus"],
     "GoMo Salt": ["GoMo"],
     "Gasser Bertschy Elektro": ["Installation"],
-    "Google": ["Google"],
+    # «Google» allein ist ein Absender, kein Lieferant -- der Eintrag verteilt
+    # nur (``aufteilen``). Die Dienste beginnen im Journal verschieden, und der
+    # längste Anfang gewinnt: «Google, Workspace» vor «Google».
+    "Google": [],
+    "Google Cloud": ["Google Cloud", "Google, Cloud"],
+    "Google Gemini": ["Google, Gemini"],
+    "Google One": ["Google One", "Google AI"],
+    "Google Workspace": ["Google Workspace", "Google, Workspace"],
     "Handelsregisteramt Kt. Bern": ["Handelsregister"],
     "Hostinger": ["Hostinger"],
     "Hostpoint": ["Hostpoint"],
@@ -167,7 +174,7 @@ ZUORDNUNG: dict[str, list[str]] = {
     "VeloGfeller": ["veloGfeller"],
     "Wispr Flow": ["Wispr"],
     "Wordfence": ["Wordfence", "Worlfence"],
-    "YouTube": ["YouTube"],
+    "YouTube": ["YouTube", "Google YouTube", "Google, YouTube"],
     "Zapier": ["Zapier"],
     "Zoom": ["Zoom"],
     "getAbstract": ["getabstract", "get Abstract", "getAbstract"],
@@ -452,10 +459,10 @@ def _laenge(eintraege: list[tuple[date, bool | None, bool, str]], zustand: bool)
 
 
 def bestand_lesen() -> tuple[dict[str, str], dict[str, str]]:
-    """Was in der bestehenden Datei von Hand entschieden wurde.
+    """Was in der bestehenden Datei steht -- **jeder** Eintrag, wörtlich.
 
-    Liefert die **wörtlichen Textblöcke** der bestätigten Einträge und die
-    Schlüssel der beendeten Lieferanten.
+    Liefert die Textblöcke aller Einträge und die Schlüssel der beendeten
+    Lieferanten.
 
     Ohne das war der Erzeuger ein Radiergummi: er schreibt die Datei ganz neu,
     und der zweite Lauf haette jedes ``bestaetigt: true`` und jede Korrektur
@@ -463,12 +470,13 @@ def bestand_lesen() -> tuple[dict[str, str], dict[str, str]]:
     vorher. Es gilt dieselbe Grenze wie beim Kundenschluessel: **eine Maschine
     darf hinzufuegen, nie aendern oder entfernen.**
 
-    Bestaetigte Eintraege werden deshalb nicht neu erzeugt, sondern
-    unveraendert durchgereicht -- auch die Kommentare darin, denn die tragen
-    die Begruendung.
+    Bis zum 25.09.2026 galt das nur für bestätigte Einträge. Das reichte nicht:
+    die Aufteilung von Google in fünf Dienste, die Leistungen und die
+    Schreibweisen stehen an unbestätigten Einträgen und wären mit dem nächsten
+    Lauf verschwunden. Seither wird nur erzeugt, was es noch nicht gibt.
     """
     if not ZIEL.exists():
-        return {}, set()
+        return {}, {}
 
     text = ZIEL.read_text(encoding="utf-8")
     bloecke: dict[str, str] = {}
@@ -484,9 +492,7 @@ def bestand_lesen() -> tuple[dict[str, str], dict[str, str]]:
             if zeile and not zeile.startswith(" "):
                 break
             zeilen.append(zeile)
-        block = "\n".join(zeilen).rstrip()
-        if "bestaetigt: true" in block:
-            bloecke[schluessel] = block
+        bloecke[schluessel] = "\n".join(zeilen).rstrip()
         for zeile in zeilen:
             if zeile.strip().startswith("beendet:"):
                 # Wörtlich merken, nicht nur die Tatsache: die Zeile trägt das
@@ -503,20 +509,33 @@ def yaml_schreiben(
     bestaetigt: dict[str, str] | None = None,
     beendet: dict[str, str] | None = None,
 ) -> str:
-    bestaetigt = bestaetigt or {}
+    bestand = bestaetigt or {}
     beendet = beendet or {}
-    aus = [KOPF]
-    aus.append(f"version: 1\nstand: {date.today().isoformat()}\n")
-    aus.append("lieferanten:")
+    kopf = [KOPF, f"version: 1\nstand: {date.today().isoformat()}\n", "lieferanten:"]
     gefragt: set[str] = set()
+    # Je Eintrag eine eigene Zeilenliste, sortiert nach Ordner: so stehen
+    # bewahrte und neue Einträge in einer Reihenfolge, statt dass die
+    # bewahrten am Ende kleben.
+    eintraege: list[tuple[str, list[str]]] = []
+    erzeugt: set[str] = set()
 
     for name in sorted(ordner, key=str.lower):
         angaben = ordner[name]
         if angaben.get("sonderordner"):
             continue
         schluessel = schluessel_aus(name)
-        if schluessel in bestaetigt:
-            aus.append(f"\n  - schluessel: {bestaetigt[schluessel]}")
+        erzeugt.add(schluessel)
+        aus: list[str] = []
+        eintraege.append((name.lower(), aus))
+        if schluessel in bestand:
+            aus.append(f"\n  - schluessel: {bestand[schluessel]}")
+            # Bestätigt heisst beantwortet -- dazu wird nicht mehr gefragt.
+            if (
+                "bestaetigt: true" not in bestand[schluessel]
+                and schluessel not in beendet
+                and any(j in ("2025", "2026") for j in angaben["jahre"])
+            ):
+                gefragt.add(schluessel)
             continue
         e = befund.get(name)
         jahre = [j for j in angaben["jahre"] if j.isdigit()]
@@ -584,6 +603,23 @@ def yaml_schreiben(
                    f"   # {len(e['monate'])} belegte Monate, {e['von']}..{e['bis']}")
         aus.append(f"    aktiv: {'true' if aktiv else 'false'}")
         aus.append("    bestaetigt: false")
+
+    # Was es in der Datei gibt, aber nicht als Ordner im Verzeichnisstand:
+    # ein neuer Ordner wie «Google Gemini», bevor das Verzeichnis neu gelesen
+    # wurde, oder ein Lieferant, dessen Ordner verschwand. Entfernen darf der
+    # Erzeuger nicht -- also bleibt der Eintrag, wörtlich.
+    for schluessel, block in bestand.items():
+        if schluessel in erzeugt:
+            continue
+        treffer = re.search(r"^\s*ordner:\s*\"?([^\"\n#]+?)\"?\s*(#.*)?$", block, re.M)
+        sortiert = (treffer.group(1) if treffer else schluessel).lower()
+        eintraege.append((sortiert, [f"\n  - schluessel: {block}"]))
+        if re.search(r"^\s*aktiv:\s*true", block, re.M) and "bestaetigt: true" not in block:
+            gefragt.add(schluessel)
+
+    aus = kopf
+    for _, zeilen in sorted(eintraege, key=lambda p: p[0]):
+        aus.extend(zeilen)
 
     aus.append("\n# Was niemand entscheiden konnte. Steht im Wortlaut, nicht als Etikett —")
     aus.append("# eine Frage, die niemand hört, ist so gut wie keine.")
@@ -678,7 +714,7 @@ def main() -> None:
     )
     print(f"Geschrieben: {ZIEL}")
     print(f"  Steuerbehandlung aus Rechnungen belegt: {len(steuer)} Lieferanten")
-    print(f"  bestätigte Einträge unverändert übernommen: {len(bewahrt)}")
+    print(f"  bestehende Einträge unverändert übernommen: {len(bewahrt)}")
     print(f"  als beendet gemeldet, keine Fragen mehr: {len(beendet)}")
     print(f"  Lieferanten gesamt: {sum(1 for v in ordner.values() if not v['sonderordner'])}")
     print(f"  davon mit Journalbeleg: {len(befund)}")

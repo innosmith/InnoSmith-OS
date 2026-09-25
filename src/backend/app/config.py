@@ -301,6 +301,19 @@ class Settings(BaseSettings):
     invoiceinsight_api_key: str = ""
     invoiceinsight_url: str = "http://127.0.0.1:8055/mcp"
 
+    # Zwei Wege zu demselben Bestand, und beide haben ihren Grund: der
+    # MCP-Server oben ist der agentische Suchweg (search_invoices,
+    # get_vendor_details und die übrigen Werkzeuge des Kreditoren-Cockpits),
+    # die HTTP-Schnittstelle hier ist die Datenbeschaffung für den Datenraum.
+    # Sie liefert nachweislich dasselbe -- beide gehen durch export_page() --,
+    # liest den Bestand aber bei jedem Aufruf frisch aus der Datenbank,
+    # während das MCP-Werkzeug sich aus einem zwischengespeicherten
+    # Datenrahmen bedient. Für einen Abgleich-Worker ist frisch das Richtige.
+    # Die Schnittstelle führt ihr eigenes API_TOKEN und teilt es nicht mit
+    # anderen Zugängen -- ohne diesen Eintrag scheitert der Abgleich.
+    invoiceinsight_rest_url: str = "http://127.0.0.1:8056"
+    invoiceinsight_rest_token: str = ""
+
     # Triage
     triage_interval_seconds: int = 120
     chat_triage_interval_seconds: int = 300

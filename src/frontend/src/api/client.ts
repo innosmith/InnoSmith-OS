@@ -38,13 +38,33 @@ export async function tryRefreshToken(): Promise<boolean> {
   return _refreshing;
 }
 
-class ApiError extends Error {
+export class ApiError extends Error {
   status: number;
-  constructor(status: number, message: string) {
+  /** Das `detail` der Antwort, so wie es kam. Bei 422 ist es eine Liste mit
+   *  `loc` je Feld — nur damit kann eine Maske den Fehler neben das
+   *  betroffene Feld schreiben statt darüber. */
+  detail: unknown;
+  constructor(status: number, message: string, detail?: unknown) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
+    this.detail = detail ?? message;
   }
+}
+
+/** Aus dem Fehlerrumpf die lesbare Meldung und das rohe `detail` holen. */
+function fehlerLesen(rumpf: string, ersatz: string): { text: string; detail: unknown } {
+  if (!rumpf) return { text: ersatz, detail: ersatz };
+  try {
+    const geparst = JSON.parse(rumpf) as { detail?: unknown };
+    if (geparst && typeof geparst === 'object' && 'detail' in geparst) {
+      const detail = geparst.detail;
+      return { text: typeof detail === 'string' ? detail : rumpf, detail };
+    }
+  } catch {
+    // Kein JSON — dann ist der Text selbst die Meldung.
+  }
+  return { text: rumpf, detail: rumpf };
 }
 
 async function request<T>(
@@ -83,7 +103,8 @@ async function request<T>(
 
   if (!response.ok) {
     const body = await response.text();
-    throw new ApiError(response.status, body || response.statusText);
+    const { text, detail } = fehlerLesen(body, response.statusText);
+    throw new ApiError(response.status, text, detail);
   }
 
   if (response.status === 204) {

@@ -33,7 +33,7 @@ rm -rf "$VENDOR_DIR/contentconverter/.git"
 # vendored, damit das Docker-Image ohne Git-Credentials/Registry gebaut werden
 # kann. Dev nutzt stattdessen den Editable-Install (siehe requirements.txt).
 AI9_SRC="${AI9_PATH:-$HOME/dev/github/AI9}"
-AI9_REF="${AI9_REF:-v0.5.3}"
+AI9_REF="${AI9_REF:-v0.5.4}"
 
 if [ ! -d "$AI9_SRC" ]; then
     echo "FEHLER: AI9-Core nicht gefunden unter $AI9_SRC"

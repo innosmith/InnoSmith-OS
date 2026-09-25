@@ -34,7 +34,6 @@ services:
       - int-uploads:/app/uploads
       - int-exports:/tmp/taskpilot-exports
       - ${HOME}/.hermes:/home/taskpilot/.hermes
-      - ${HOME}/OneDrive/Finanzen/Kreditoren:${HOME}/OneDrive/Finanzen/Kreditoren:ro
       - ${HOME}/.local/share/taskpilot/datenraum:${HOME}/.local/share/taskpilot/datenraum
     # no-new-privileges deaktiviert: Kernel 6.17-nvidia blockt jede exec mit diesem Flag
     # Security durch non-root User (taskpilot) + Cloudflare Zero Trust gewährleistet

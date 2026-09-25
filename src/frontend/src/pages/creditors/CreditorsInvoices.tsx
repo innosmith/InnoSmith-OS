@@ -1,8 +1,9 @@
 import { useState, useEffect, useMemo, useCallback } from 'react';
-import { Search, X, FileText, ChevronLeft, ChevronRight, ExternalLink } from 'lucide-react';
+import { Search, FileText, ChevronLeft, ChevronRight } from 'lucide-react';
 import type { CreditorsFilter, StyleCtx, InvoiceRow } from './creditors-types';
 import { formatCHF, buildFilterParams, Skeleton } from './creditors-helpers';
 import { api } from '../../api/client';
+import BelegMaske from './BelegMaske';
 
 interface Props {
   filter: CreditorsFilter;
@@ -21,6 +22,7 @@ function normalize(raw: Record<string, unknown>): InvoiceRow {
     ...raw,
     index: (raw.index ?? raw.invoice_id) as number | undefined,
     invoice_id: (raw.invoice_id ?? raw.index) as number | undefined,
+    beleg_id: (raw['Beleg-ID'] ?? raw.beleg_id) as number | undefined,
     vendor: (raw.vendor ?? raw.Kreditor ?? '–') as string,
     date: (raw.date ?? raw.Rechnungsdatum ?? '') as string,
     amount_chf: (raw.amount_chf ?? raw.Betrag_CHF ?? raw.Betrag ?? 0) as number,
@@ -47,6 +49,8 @@ export function CreditorsInvoices({ filter, styleCtx, categories, years }: Props
   const [selectedYear, setSelectedYear] = useState<number | ''>('');
   const [loading, setLoading] = useState(false);
   const [selectedInvoice, setSelectedInvoice] = useState<Record<string, unknown> | null>(null);
+  const [belegId, setBelegId] = useState<number | null>(null);
+  const [belegFehler, setBelegFehler] = useState<string | null>(null);
   const [invoiceDetailLoading, setInvoiceDetailLoading] = useState(false);
   const [sortKey, setSortKey] = useState<SortKey>('date');
   const [sortDir, setSortDir] = useState<SortDir>('desc');
@@ -83,14 +87,30 @@ export function CreditorsInvoices({ filter, styleCtx, categories, years }: Props
   };
 
   const openDetail = async (inv: InvoiceRow) => {
-    const id = inv.invoice_id ?? inv.index;
-    if (id == null) return;
+    // Die Datenbankkennung, nicht die Zeilennummer: über `/beleg/{id}` kommen
+    // die Felder so zurück, wie eine Korrektur sie auch wieder entgegennimmt.
+    const id = inv.beleg_id;
+    if (id == null) {
+      setBelegFehler('Dieser Zeile fehlt die Belegkennung — bitte die Liste neu laden.');
+      return;
+    }
+    setBelegId(id);
     setInvoiceDetailLoading(true);
+    setBelegFehler(null);
     try {
-      const detail = await api.get<Record<string, unknown>>(`/api/creditors/invoice/${id}`);
+      const detail = await api.get<Record<string, unknown>>(`/api/creditors/beleg/${id}`);
       setSelectedInvoice(detail);
-    } catch { setSelectedInvoice(inv as Record<string, unknown>); }
+    } catch (e) {
+      setSelectedInvoice(null);
+      setBelegFehler(e instanceof Error ? e.message : 'Beleg konnte nicht geladen werden.');
+    }
     setInvoiceDetailLoading(false);
+  };
+
+  const schliessen = () => {
+    setSelectedInvoice(null);
+    setBelegId(null);
+    setBelegFehler(null);
   };
 
   const sorted = useMemo(() => {
@@ -356,171 +376,43 @@ export function CreditorsInvoices({ filter, styleCtx, categories, years }: Props
         <span className="ml-auto">{invoices.length} Rechnungen geladen</span>
       </div>
 
-      {/* Detail Modal */}
-      {(selectedInvoice || invoiceDetailLoading) && (
+      {/* Korrekturmaske */}
+      {(selectedInvoice || invoiceDetailLoading || belegFehler) && (
         <div
           className="fixed inset-0 z-50 flex items-end justify-center bg-black/50 backdrop-blur-sm sm:items-center modal-safe"
-          onClick={() => { if (!invoiceDetailLoading) setSelectedInvoice(null); }}
+          onClick={() => { if (!invoiceDetailLoading) schliessen(); }}
         >
           <div
-            className="max-h-[min(95vh,calc(100dvh-env(safe-area-inset-top,0px)-env(safe-area-inset-bottom,0px)))] w-full overflow-auto rounded-t-2xl bg-white pb-[env(safe-area-inset-bottom,0px)] shadow-2xl sm:max-h-[85vh] sm:max-w-6xl sm:rounded-2xl sm:pb-0 dark:bg-gray-900"
+            className="flex max-h-[min(95vh,calc(100dvh-env(safe-area-inset-top,0px)-env(safe-area-inset-bottom,0px)))] w-full flex-col overflow-hidden rounded-t-2xl bg-white shadow-2xl sm:max-h-[85vh] sm:max-w-6xl sm:rounded-2xl dark:bg-gray-900"
             onClick={e => e.stopPropagation()}
           >
             {invoiceDetailLoading ? (
               <div className="flex flex-col items-center gap-3 py-20">
                 <div className="h-6 w-6 border-2 border-indigo-400 border-t-transparent rounded-full animate-spin" />
-                <p className={textMuted}>Lade Details…</p>
+                <p className={textMuted}>Lade Beleg…</p>
               </div>
-            ) : selectedInvoice && (
-              <ModalContent inv={selectedInvoice} onClose={() => setSelectedInvoice(null)} styleCtx={styleCtx} />
+            ) : belegFehler ? (
+              <div className="flex flex-col items-center gap-3 px-6 py-16 text-center">
+                <p className="text-sm text-red-600 dark:text-red-400">{belegFehler}</p>
+                <button
+                  onClick={schliessen}
+                  className="rounded-lg bg-gray-100 px-4 py-2 text-xs font-medium dark:bg-gray-800"
+                >
+                  Schliessen
+                </button>
+              </div>
+            ) : selectedInvoice && belegId != null && (
+              <BelegMaske
+                belegId={belegId}
+                beleg={selectedInvoice}
+                styleCtx={styleCtx}
+                onClose={schliessen}
+                onGespeichert={frisch => { setSelectedInvoice(frisch); loadFiltered(); }}
+              />
             )}
           </div>
         </div>
       )}
-    </div>
-  );
-}
-
-/* ---------- Structured Modal Content ---------- */
-
-function ModalContent({
-  inv, onClose, styleCtx,
-}: { inv: Record<string, unknown>; onClose: () => void; styleCtx: StyleCtx }) {
-  const { textPrimary, textSecondary, textMuted } = styleCtx;
-  const vendor = (inv.vendor ?? inv.Kreditor ?? '–') as string;
-  const category = (inv.category ?? inv.Kategorie ?? '') as string;
-  const docType = (inv.Dokumenttyp ?? inv.doc_type ?? 'RECHNUNG') as string;
-  const pdfPath = (inv.pdf_path ?? inv.Dateipfad ?? '') as string;
-  const date = (inv.date ?? inv.Rechnungsdatum ?? '') as string;
-  const amount = (inv.amount_chf ?? inv.Betrag_CHF ?? inv.Betrag) as number | undefined;
-  const currency = (inv.currency ?? inv.Währung ?? 'CHF') as string;
-  const product = (inv.product ?? inv['Produkt/Dienstleistung'] ?? inv.Produkt ?? '') as string;
-  const country = (inv.Land ?? inv.country ?? '') as string;
-  const mwst = (inv.MwSt ?? inv.mwst ?? '') as string;
-  const payMethod = (inv.Zahlungsart ?? '') as string;
-  const confScore = inv.Confidence_Score;
-
-  const headerFields: [string, string][] = [
-    ['Datum', date || '–'],
-    ['Betrag', amount != null ? formatCHF(amount) : '–'],
-    ['Währung', currency],
-    ['Land', country || '–'],
-    ['MwSt', mwst || '–'],
-    ['Zahlungsart', payMethod || '–'],
-  ];
-
-  const SKIP = new Set([
-    'vendor', 'Kreditor', 'category', 'Kategorie', 'pdf_path', 'Dateipfad',
-    'index', 'invoice_id', 'date', 'Rechnungsdatum', 'amount_chf', 'Betrag_CHF',
-    'Betrag', 'amount', 'currency', 'Währung', 'product', 'Produkt/Dienstleistung',
-    'Produkt', 'Land', 'country', 'MwSt', 'mwst', 'Zahlungsart', 'Dokumenttyp',
-    'doc_type', 'Confidence_Score', 'filename', 'Dateiname',
-  ]);
-  const extraFields = Object.entries(inv).filter(([k, v]) => !SKIP.has(k) && v != null && v !== '');
-
-  return (
-    <div className="p-5 sm:p-6">
-      {/* Header */}
-      <div className="flex items-start justify-between mb-5">
-        <div>
-          <h2 className={`text-xl font-bold ${textPrimary}`}>{vendor}</h2>
-          <div className="mt-1.5 flex flex-wrap gap-2">
-            <span className="rounded-full bg-indigo-100 dark:bg-indigo-900/40 px-2.5 py-0.5 text-xs font-medium text-indigo-700 dark:text-indigo-300">
-              {docType}
-            </span>
-            {category && (
-              <span className="rounded-full bg-purple-100 dark:bg-purple-900/40 px-2.5 py-0.5 text-xs font-medium text-purple-700 dark:text-purple-300">
-                {category}
-              </span>
-            )}
-            {confScore != null && (
-              <span className="flex items-center gap-1 rounded-full bg-gray-100 dark:bg-gray-800 px-2.5 py-0.5 text-xs font-medium text-gray-600 dark:text-gray-300">
-                <span className={`h-1.5 w-1.5 rounded-full ${confidenceDisplay(confScore).color}`} />
-                Confidence {String(confScore)}%
-              </span>
-            )}
-          </div>
-        </div>
-        <button onClick={onClose} className={`rounded-lg p-1.5 hover:bg-gray-100 dark:hover:bg-gray-800 ${textMuted}`}>
-          <X className="h-5 w-5" />
-        </button>
-      </div>
-
-      <div className="grid grid-cols-1 gap-6 lg:grid-cols-5">
-        {/* Left: structured data (3 cols) */}
-        <div className="lg:col-span-3 space-y-5">
-          {/* Rechnungskopf */}
-          <div className="grid grid-cols-2 sm:grid-cols-3 gap-x-4 gap-y-3">
-            {headerFields.map(([label, val]) => (
-              <div key={label}>
-                <p className={`text-[11px] uppercase tracking-wide ${textMuted}`}>{label}</p>
-                <p className={`text-sm font-medium ${textPrimary}`}>{val}</p>
-              </div>
-            ))}
-          </div>
-
-          {/* Leistungen */}
-          {product && (
-            <div>
-              <p className={`text-[11px] uppercase tracking-wide mb-1 ${textMuted}`}>Produkt / Dienstleistung</p>
-              <p className={`text-sm ${textPrimary}`}>{product}</p>
-            </div>
-          )}
-
-          {/* Zahlungszusammenfassung */}
-          {amount != null && (
-            <div className="rounded-lg bg-indigo-50 dark:bg-indigo-950/30 p-4">
-              <div className="flex items-baseline justify-between">
-                <span className={`text-sm font-medium ${textSecondary}`}>Gesamtbetrag</span>
-                <span className={`text-2xl font-bold ${textPrimary}`}>{formatCHF(amount)}</span>
-              </div>
-              <p className={`text-xs mt-1 ${textMuted}`}>{currency}{mwst ? ` · ${mwst}` : ''}</p>
-            </div>
-          )}
-
-          {/* Zusätzliche Metadaten */}
-          {extraFields.length > 0 && (
-            <div>
-              <p className={`text-[11px] uppercase tracking-wide mb-2 ${textMuted}`}>Weitere Details</p>
-              <div className="grid grid-cols-2 gap-x-4 gap-y-2">
-                {extraFields.map(([key, val]) => (
-                  <div key={key}>
-                    <p className={`text-[10px] ${textMuted}`}>{key.replace(/_/g, ' ')}</p>
-                    <p className={`text-xs ${textPrimary}`}>
-                      {typeof val === 'number' ? val.toLocaleString('de-CH') : String(val)}
-                    </p>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-        </div>
-
-        {/* Right: PDF area (2 cols) */}
-        <div className="lg:col-span-2">
-          <p className={`text-[11px] uppercase tracking-wide mb-2 ${textMuted}`}>Dokument</p>
-          {pdfPath ? (
-            <div className="flex flex-col items-center justify-center rounded-xl border-2 border-dashed border-gray-300 dark:border-gray-700 p-8 gap-3">
-              <FileText className={`h-16 w-16 ${textMuted}`} />
-              <p className={`text-xs text-center break-all ${textMuted}`}>{pdfPath.split('/').pop()}</p>
-              <a
-                href="http://invoice.innosmith.ai"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="flex items-center gap-1.5 rounded-lg bg-indigo-600 px-4 py-2 text-xs font-medium text-white hover:bg-indigo-700 transition-colors"
-              >
-                <ExternalLink className="h-3.5 w-3.5" />
-                In InvoiceInsight öffnen
-              </a>
-            </div>
-          ) : (
-            <div className={`flex flex-col items-center justify-center rounded-xl border-2 border-dashed border-gray-300 dark:border-gray-700 p-8 gap-2 ${textMuted}`}>
-              <FileText className="h-12 w-12 opacity-30" />
-              <p className="text-xs">Kein PDF verfügbar</p>
-            </div>
-          )}
-        </div>
-      </div>
     </div>
   );
 }

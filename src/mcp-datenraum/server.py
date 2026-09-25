@@ -299,6 +299,7 @@ SPALTEN_BEDEUTUNG = {
     "invoiceinsight_rechnungen.lizenzmenge": "Anzahl Lizenzen laut Beleg, sofern genannt",
     "invoiceinsight_rechnungen.konfidenz": "Sicherheit der Extraktion (0-100); niedrige Werte sind Prüffälle, keine Fehler",
     "invoiceinsight_rechnungen.ist_ausland": "true bei Rechnungen aus dem Ausland -- dort fällt in der Buchhaltung Bezugsteuer an, auf dem Beleg steht keine",
+    "invoiceinsight_rechnungen.datei_vorhanden": "false, wenn die PDF in OneDrive gelöscht oder verschoben wurde -- die Zeile bleibt als Protokoll, der Beleg existiert aber nicht mehr; für «was liegt im Eingang» mit WHERE datei_vorhanden filtern",
     "invoiceinsight_rechnungen.erneuerung_am": "nächste Verlängerung eines Abos -- die Spalte für «was läuft demnächst aus»",
     "invoiceinsight_rechnungen.leistung_von": "Beginn der abgerechneten Leistungsperiode",
     "invoiceinsight_rechnungen.leistung_bis": "Ende der abgerechneten Leistungsperiode",
@@ -335,6 +336,17 @@ SPALTEN_BEDEUTUNG = {
     "toggl_zeiteintraege.stundensatz": "hinterlegter Satz des Projekts; leer bei nicht verrechenbaren Projekten",
     "toggl_zeiteintraege.kunde": "Kunde des Projekts; leer, wenn das Projekt keinem Kunden zugeordnet ist",
     "toggl_zeiteintraege.projekt": "Projektname; 'projekt_id' ist die stabile Kennung",
+    "toggl_zeiteintraege.person": (
+        "Wer die Zeit erfasst hat; 'person_id' ist die stabile Kennung. Am "
+        "22.09.2026 zwei Personen über 2614 Buchungen -- wer nach Personen "
+        "aufteilt, teilt in zwei sehr ungleiche Hälften (2526 zu 88)."
+    ),
+    "toggl_zeiteintraege.aufgabe": (
+        "UNBRAUCHBAR: über alle 2614 Buchungen der leere Text -- Aufgaben werden "
+        "in diesem Konto nicht geführt, die Tätigkeit steht in 'beschreibung'. "
+        "Der Katalog meldet sie deshalb unter 'leere_spalten'. Wer nach ihr "
+        "gruppiert, bekommt eine einzige Gruppe und hält das für ein Ergebnis."
+    ),
     "toggl_zeiteintraege.betrag": "verrechenbarer Betrag dieser Buchung (Stundensatz mal Zeit)",
     "toggl_zeiteintraege.verrechenbar": "true, wenn die Zeit fakturierbar erfasst wurde -- sagt nichts darüber, ob sie fakturiert wurde",
     "toggl_projekte.aktiv": "true bei laufenden Projekten",

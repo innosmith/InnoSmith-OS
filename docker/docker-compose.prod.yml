@@ -43,6 +43,12 @@ services:
       TP_LITELLM_BASE_URL: http://taskpilot-litellm:4000
       TP_OLLAMA_BASE_URL: http://host.docker.internal:11434
       TP_INVOICEINSIGHT_URL: http://host.docker.internal:8055/mcp
+      # Zwei Adressen, zwei Aufgaben: 8055 ist der MCP-Server, über den der
+      # Agent sucht; 8056 ist die typisierte HTTP-Schnittstelle, aus der der
+      # Datenraum seinen Abzug zieht und die Korrekturmaske einen Einzelbeleg
+      # liest und schreibt. Ohne diesen Eintrag griffe die Vorgabe aus
+      # config.py -- 127.0.0.1 -- und das ist im Container der Container.
+      TP_INVOICEINSIGHT_REST_URL: http://host.docker.internal:8056
       TP_CLAMAV_HOST: clamav
       TP_MCP_BASE_DIR: /app
       # Code-Sandbox laeuft im Sandbox-Executor-Sidecar (taskpilot-shared-Netz).
@@ -57,7 +63,10 @@ services:
       - prod-uploads:/app/uploads
       - prod-exports:/tmp/taskpilot-exports
       - ${HOME}/.hermes:/home/taskpilot/.hermes
-      - ${HOME}/OneDrive/Finanzen/Kreditoren:${HOME}/OneDrive/Finanzen/Kreditoren:ro
+      # Keine Kreditorenablage mehr: Belege kommen über die Modul-Schnittstelle
+      # (8056) oder Graph. Der Einhängepunkt zeigte auf die Kopie des lokalen
+      # OneDrive-Clients, die Löschungen und Verschiebungen aus der Cloud nicht
+      # nachzieht -- ein Leser hätte dort Rechnungen gesehen, die es nicht gibt.
       - ${HOME}/.local/share/taskpilot/datenraum:${HOME}/.local/share/taskpilot/datenraum
       # Schreibend, und das ist der Zweck: der Abgleich ergänzt Vorschläge, offene
       # Fragen und «kommt nur in einem System vor» selbst. Läge die Datei nur im
@@ -65,6 +74,11 @@ services:
       # Pflege liefe stündlich neu und käme nie an. So landet sie im
       # Arbeitsbaum und wird über `git diff` prüfbar, wie vorgesehen.
       - ../docs/kundenschluessel.yaml:/app/docs/kundenschluessel.yaml
+      # Dieselbe Begründung, andere Datei: hier landet die Bestätigung eines
+      # Lieferanten samt entschiedenem Sollkonto. Ohne diese Einbindung wären
+      # nach dem nächsten Bauen wieder alle 149 Einträge unbestätigt -- und das
+      # fällt nicht als Fehler auf, sondern als «warum fragt es mich erneut».
+      - ../docs/kreditorenlieferanten.yaml:/app/docs/kreditorenlieferanten.yaml
     # no-new-privileges deaktiviert: Kernel 6.17-nvidia blockt jede exec mit diesem Flag
     # Security durch non-root User (taskpilot) + Cloudflare Zero Trust gewaehrleistet
     depends_on:

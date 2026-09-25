@@ -15,6 +15,11 @@ from app.auth.deps import get_current_user, require_role
 from app.config import get_settings
 from app.models import User
 from app.services.invoiceinsight_client import InvoiceInsightClient
+from app.services.invoiceinsight_rest import (
+    SchnittstellenFehler,
+    beleg_holen,
+    beleg_korrigieren,
+)
 
 logger = logging.getLogger("taskpilot.creditors")
 
@@ -142,8 +147,71 @@ async def get_invoice_detail(
     invoice_id: int,
     user: User = Depends(require_role("owner")),
 ):
+    """Ein Beleg zum Ansehen -- ``invoice_id`` ist hier die **Zeilennummer**.
+
+    Nicht die Kennung des Belegs: die Gegenseite liest mit ``df.iloc[]``. Fürs
+    Ansehen genügt das, fürs Schreiben nicht -- dort führt die Verwechslung zum
+    falschen Beleg, ohne dass ein Fehler entsteht. Der Korrekturweg benutzt
+    deshalb ``/beleg/{beleg_id}`` mit der Datenbankkennung aus ``beleg_id``.
+    """
     client = _get_client(user)
     return await client.call_tool("get_invoice_details", {"invoice_id": invoice_id})
+
+
+def _rest_zugang(user: User) -> tuple[str, str]:
+    """Adresse und Token der HTTP-Schnittstelle, Owner-Einstellung vor Umgebung."""
+    settings = user.settings or {}
+    cfg = get_settings()
+    url = settings.get("invoiceinsight_rest_url") or cfg.invoiceinsight_rest_url
+    token = settings.get("invoiceinsight_rest_token") or cfg.invoiceinsight_rest_token
+    if not url or not token:
+        raise HTTPException(
+            status_code=503,
+            detail="InvoiceInsight-Schnittstelle nicht konfiguriert",
+        )
+    return url, token
+
+
+@router.get("/beleg/{beleg_id}")
+async def get_beleg(
+    beleg_id: int,
+    user: User = Depends(require_role("owner")),
+):
+    """Ein Beleg anhand seiner Datenbankkennung, mit allen gelesenen Feldern."""
+    url, token = _rest_zugang(user)
+    try:
+        return await beleg_holen(url, token, beleg_id)
+    except SchnittstellenFehler as fehler:
+        raise HTTPException(status_code=fehler.status, detail=fehler.meldung) from fehler
+    except RuntimeError as fehler:
+        raise HTTPException(status_code=503, detail=str(fehler)) from fehler
+
+
+@router.patch("/beleg/{beleg_id}")
+async def patch_beleg(
+    beleg_id: int,
+    felder: dict[str, Any],
+    user: User = Depends(require_role("owner")),
+):
+    """Einzelne Werte eines Belegs richtigstellen.
+
+    Der Urheber kommt aus der Anmeldung, nie aus dem Rumpf -- sonst liesse sich
+    eine Korrektur einer anderen Person zuschreiben, und die Spur wäre wertlos.
+    Ein mitgeschicktes ``geprueft_von`` wird deshalb verworfen.
+    """
+    url, token = _rest_zugang(user)
+    bereinigt = {k: v for k, v in felder.items() if k != "geprueft_von"}
+    if not bereinigt:
+        raise HTTPException(status_code=422, detail="Keine Änderung übermittelt")
+    try:
+        return await beleg_korrigieren(url, token, beleg_id, bereinigt, user.email)
+    except SchnittstellenFehler as fehler:
+        # Unverändert weiterreichen: bei 422 steckt in ``detail`` je Eintrag
+        # ein ``loc``, und nur damit landet die Meldung in der Maske neben dem
+        # Feld, das sie meint.
+        raise HTTPException(status_code=fehler.status, detail=fehler.rohdetail) from fehler
+    except RuntimeError as fehler:
+        raise HTTPException(status_code=503, detail=str(fehler)) from fehler
 
 
 @router.get("/vendors")

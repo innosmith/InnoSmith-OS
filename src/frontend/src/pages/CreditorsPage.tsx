@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import {
   LayoutDashboard, FileText, CalendarClock, Building2,
-  TrendingUp, AlertTriangle, Microscope,
+  TrendingUp, AlertTriangle, Microscope, Inbox,
   RefreshCw, Image, ExternalLink, SlidersHorizontal,
 } from 'lucide-react';
 import { api } from '../api/client';
@@ -10,6 +10,7 @@ import { BackgroundPicker } from '../components/BackgroundPicker';
 import type { CreditorsTab, CreditorsFilter, StyleCtx, DashboardData } from './creditors/creditors-types';
 import { activeFilterCount } from './creditors/creditors-helpers';
 import { CreditorsFilterPanel } from './creditors/CreditorsFilterPanel';
+import { CreditorsEingang } from './creditors/CreditorsEingang';
 import { CreditorsOverview } from './creditors/CreditorsOverview';
 import { CreditorsInvoices } from './creditors/CreditorsInvoices';
 import { CreditorsRenewals } from './creditors/CreditorsRenewals';
@@ -19,6 +20,9 @@ import { CreditorsAnomalies } from './creditors/CreditorsAnomalies';
 import { CreditorsResearch } from './creditors/CreditorsResearch';
 
 const TABS: { id: CreditorsTab; label: string; shortLabel: string; icon: React.ComponentType<{ className?: string }> }[] = [
+  // Zuerst der Eingang: was auf eine Entscheidung wartet, ist dringender als
+  // jede Auswertung. Eine Auswertung wartet, eine Rechnung hat eine Frist.
+  { id: 'eingang', label: 'Eingang', shortLabel: 'Eingang', icon: Inbox },
   { id: 'uebersicht', label: 'Übersicht', shortLabel: 'Übersicht', icon: LayoutDashboard },
   { id: 'rechnungen', label: 'Rechnungen', shortLabel: 'Rechn.', icon: FileText },
   { id: 'erneuerungen', label: 'Erneuerungen', shortLabel: 'Erneu.', icon: CalendarClock },
@@ -160,8 +164,15 @@ function CreditorsPageInner() {
 
   const filterCount = activeFilterCount(filter);
 
+  // Der Zähler kommt vom Reiter, der die Zahl kennt. Ihn hier zweitens
+  // abzurufen hiesse, dieselbe Liste zweimal zu holen -- und beide Zahlen
+  // könnten auseinanderlaufen.
+  const [eingangOffen, setEingangOffen] = useState(0);
+
   const renderTab = () => {
     switch (activeTab) {
+      case 'eingang':
+        return <CreditorsEingang styleCtx={styleCtx} onAnzahl={setEingangOffen} />;
       case 'uebersicht':
         return <CreditorsOverview filter={filter} styleCtx={styleCtx} />;
       case 'rechnungen':
@@ -267,6 +278,11 @@ function CreditorsPageInner() {
                     <Icon className="h-4 w-4 shrink-0" />
                     <span className="hidden sm:inline">{t.label}</span>
                     <span className="sm:hidden">{t.shortLabel}</span>
+                    {t.id === 'eingang' && eingangOffen > 0 && (
+                      <span className="rounded-full bg-amber-500 px-1.5 py-0.5 text-[10px] font-bold leading-none text-white">
+                        {eingangOffen}
+                      </span>
+                    )}
                     {isActive && (
                       <span className={`absolute bottom-0 left-1 right-1 h-0.5 rounded-full ${hasBg ? 'bg-white' : 'bg-indigo-500 dark:bg-indigo-400'}`} />
                     )}

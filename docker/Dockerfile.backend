@@ -45,7 +45,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Puppeteer-Config: Playwright-Chromium + --no-sandbox (Container ohne User-Namespace).
 # executablePath wird zur Build-Zeit aufgeloest (fixe Version im Image) und der
 # Browser-Pfad world-lesbar gemacht (Container laeuft als uid 1000).
-RUN CHROME_BIN="$(ls -d "$PLAYWRIGHT_BROWSERS_PATH"/chromium-*/chrome-linux/chrome | sort -V | tail -1)" \
+#
+# Den Pfad nennt Playwright selbst. Vorher stand hier ein Suchmuster
+# (chromium-*/chrome-linux/chrome), und am 21.09.2026 brach der Produktionsbau
+# daran: Playwright 1.63 benennt das Verzeichnis auf arm64 in
+# chrome-linux-arm64 um. Das Muster traf ins Leere, und weil ein Bau ohne
+# Browser nicht weiterlaeuft, stand das ganze Backend-Image. Wer ein Werkzeug
+# nach seinem eigenen Ablageort raten laesst, baut diesen Fehlschlag bei jeder
+# Umbenennung neu ein -- also fragen statt raten.
+RUN CHROME_BIN="$(python -c 'from playwright.sync_api import sync_playwright; p = sync_playwright().start(); print(p.chromium.executable_path); p.stop()')" \
     && test -x "$CHROME_BIN" \
     && printf '{"executablePath":"%s","args":["--no-sandbox","--disable-gpu","--disable-dev-shm-usage"]}\n' "$CHROME_BIN" \
       > /etc/puppeteer-config.json \

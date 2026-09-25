@@ -109,6 +109,7 @@ class TestAufnahme:
             db, datei_hash=h, dateiname="Cursor.pdf", quelle="autodownload",
             graph_pfad="…/_OPEN/InnoSmith/autodownload/Cursor.pdf",
         )
+        auf.beleg.sollkonto = "6570"
         await reg.freigeben(db, auf.beleg, durch=None)
         await reg.ablage_vermerken(
             db, auf.beleg, archiv_pfad="Finanzen/Kreditoren/Cursor/2026/Cursor.pdf",
@@ -140,6 +141,126 @@ class TestAufnahme:
             )
 
 
+class TestZweiterWaechter:
+    """Gleiche Rechnung, andere Bytes -- der Fall, den der Hash nicht sieht.
+
+    Gemessen am 25.09.2026: für den 02.09. liegen neun Cursor-Dateien im
+    Archiv, aber nur vier Rechnungen; 04CDDAC1-0171 zweimal mit verschiedenem
+    Hash. Im Eingang drei Kopien von OpenAI 2DD42E43-0001 mit drei Hashes.
+    """
+
+    async def test_drei_kopien_ergeben_eine_zeile_und_zwei_meldungen(
+        self, db: AsyncSession
+    ):
+        ergebnisse = [
+            await reg.aufnehmen(
+                db, datei_hash=_hash(f"openai-kopie-{i}"), dateiname=f"OpenAI ({i}).pdf",
+                quelle="ablage_hand", lieferant_schluessel="openai",
+                rechnungsnummer="2DD42E43-0001",
+            )
+            for i in range(3)
+        ]
+        assert [e.neu for e in ergebnisse] == [True, False, False]
+        assert [e.abgewiesen for e in ergebnisse] == [False, True, True]
+        assert all(e.beleg.id == ergebnisse[0].beleg.id for e in ergebnisse)
+        assert "OpenAI (0).pdf" in ergebnisse[1].vermerk
+
+        alle = (
+            await db.execute(
+                select(Kreditorenbeleg).where(
+                    Kreditorenbeleg.rechnungsnummer == "2DD42E43-0001"
+                )
+            )
+        ).scalars().all()
+        assert len(alle) == 1
+
+    async def test_das_original_behaelt_seinen_ort(self, db: AsyncSession):
+        """Zeigte das Original auf die Kopie, wäre es nach deren Löschen verwaist."""
+        erst = await reg.aufnehmen(
+            db, datei_hash=_hash("cursor-0171-a"), dateiname="Cursor (2).pdf",
+            quelle="ablage_hand", graph_pfad="Cursor/2026/Cursor (2).pdf",
+            lieferant_schluessel="cursor", rechnungsnummer="04CDDAC1-0171",
+        )
+        await reg.aufnehmen(
+            db, datei_hash=_hash("cursor-0171-b"), dateiname="Cursor (2) (2).pdf",
+            quelle="ablage_hand", graph_pfad="Cursor/2026/Cursor (2) (2).pdf",
+            lieferant_schluessel="cursor", rechnungsnummer="04CDDAC1-0171",
+        )
+        assert erst.beleg.graph_pfad == "Cursor/2026/Cursor (2).pdf"
+
+    async def test_gleiche_nummer_bei_anderem_lieferanten_ist_kein_doppel(
+        self, db: AsyncSession
+    ):
+        a = await reg.aufnehmen(
+            db, datei_hash=_hash("lief-a"), dateiname="a.pdf", quelle="ablage_hand",
+            lieferant_schluessel="openai", rechnungsnummer="0001",
+        )
+        b = await reg.aufnehmen(
+            db, datei_hash=_hash("lief-b"), dateiname="b.pdf", quelle="ablage_hand",
+            lieferant_schluessel="anthropic", rechnungsnummer="0001",
+        )
+        assert a.neu and b.neu
+
+    async def test_ohne_lieferant_greift_nur_der_hash(self, db: AsyncSession):
+        """Ohne Lieferant ist die Frage nicht beantwortbar -- geraten wird nicht."""
+        a = await reg.aufnehmen(
+            db, datei_hash=_hash("ohne-a"), dateiname="a.pdf", quelle="ablage_hand",
+            rechnungsnummer="GIFN3LV6-0010",
+        )
+        b = await reg.aufnehmen(
+            db, datei_hash=_hash("ohne-b"), dateiname="b.pdf", quelle="ablage_hand",
+            rechnungsnummer="GIFN3LV6-0010",
+        )
+        assert a.neu and b.neu
+
+    async def test_eine_kopie_aus_der_zeit_vor_dem_waechter_wird_zurueckgestellt(
+        self, db: AsyncSession
+    ):
+        """Zwei Zeilen ohne Nummer im Register -- der Stand vor dem Wächter.
+
+        Der nächste Abgleich bringt die Nummer. Die zweite Zeile wird nicht
+        gelöscht, sondern mit Begründung aus der Warteliste genommen.
+        """
+        erst = await reg.aufnehmen(
+            db, datei_hash=_hash("alt-a"), dateiname="OpenAI.pdf", quelle="ablage_hand",
+            lieferant_schluessel="openai",
+        )
+        zweit = await reg.aufnehmen(
+            db, datei_hash=_hash("alt-b"), dateiname="OpenAI (1).pdf",
+            quelle="ablage_hand", lieferant_schluessel="openai",
+        )
+        await reg.aufnehmen(
+            db, datei_hash=_hash("alt-a"), dateiname="OpenAI.pdf", quelle="ablage_hand",
+            lieferant_schluessel="openai", rechnungsnummer="2DD42E43-0002",
+        )
+        spaeter = await reg.aufnehmen(
+            db, datei_hash=_hash("alt-b"), dateiname="OpenAI (1).pdf",
+            quelle="ablage_hand", lieferant_schluessel="openai",
+            rechnungsnummer="2DD42E43-0002",
+        )
+
+        assert erst.beleg.rechnungsnummer == "2DD42E43-0002"
+        assert spaeter.abgewiesen is True
+        assert zweit.beleg.zurueckgestellt is True
+        assert zweit.beleg.rechnungsnummer is None
+        assert "OpenAI.pdf" in zweit.beleg.grund
+        assert zweit.beleg.id not in {b.id for b in await reg.offene(db)}
+
+    async def test_die_datenbank_verhindert_die_zweite_rechnung(self, db: AsyncSession):
+        """Auch ein späterer Schreibweg, der den Dienst umgeht, scheitert."""
+        db.add(Kreditorenbeleg(
+            datei_hash=_hash("db-a"), dateiname="a.pdf", quelle="upload",
+            lieferant_schluessel="rapidapi", rechnungsnummer="GIFN3LV6-0010",
+        ))
+        await db.flush()
+        db.add(Kreditorenbeleg(
+            datei_hash=_hash("db-b"), dateiname="b.pdf", quelle="upload",
+            lieferant_schluessel="rapidapi", rechnungsnummer="GIFN3LV6-0010",
+        ))
+        with pytest.raises(IntegrityError):
+            await db.flush()
+
+
 class TestWarteliste:
     async def test_zeigt_nur_was_offen_und_nicht_zurueckgestellt_ist(self, db: AsyncSession):
         offen = await reg.aufnehmen(
@@ -149,6 +270,7 @@ class TestWarteliste:
         fertig = await reg.aufnehmen(
             db, datei_hash=_hash("fertig"), dateiname="fertig.pdf", quelle="upload")
         await reg.zuruecklegen(db, zurueck.beleg, "warte auf Gutschrift")
+        fertig.beleg.sollkonto = "6570"
         await reg.freigeben(db, fertig.beleg, durch=None)
         await db.flush()
 
@@ -172,13 +294,28 @@ class TestFreigabeUndAblage:
         """Zweimal freigegeben hiesse zweimal gebucht, und das hiesse zweimal bezahlt."""
         auf = await reg.aufnehmen(
             db, datei_hash=_hash("zweimal"), dateiname="x.pdf", quelle="upload")
+        auf.beleg.sollkonto = "6570"
         await reg.freigeben(db, auf.beleg, durch=None)
         with pytest.raises(ValueError, match="zweite Buchung"):
+            await reg.freigeben(db, auf.beleg, durch=None)
+
+    async def test_ohne_sollkonto_keine_freigabe(self, db: AsyncSession):
+        """Freigeben heisst buchen -- ohne Konto hätte die Buchung kein Ziel.
+
+        Der Fall ist nicht theoretisch: bei 15 der 149 Lieferanten trägt die
+        Deklaration bewusst kein Konto, sondern Kandidaten. Ohne diese Sperre
+        liefe so ein Beleg als freigegeben durch und stolperte erst beim Buchen
+        -- also dort, wo Geld fliesst.
+        """
+        auf = await reg.aufnehmen(
+            db, datei_hash=_hash("kontolos"), dateiname="hosttech.pdf", quelle="upload")
+        with pytest.raises(ValueError, match="kein Sollkonto"):
             await reg.freigeben(db, auf.beleg, durch=None)
 
     async def test_zurueckgestelltes_wird_nicht_freigegeben(self, db: AsyncSession):
         auf = await reg.aufnehmen(
             db, datei_hash=_hash("gesperrt"), dateiname="x.pdf", quelle="upload")
+        auf.beleg.sollkonto = "6570"
         await reg.zuruecklegen(db, auf.beleg, "Betrag unklar")
         with pytest.raises(ValueError, match="zurückgestellt"):
             await reg.freigeben(db, auf.beleg, durch=None)
@@ -195,6 +332,7 @@ class TestFreigabeUndAblage:
         auf = await reg.aufnehmen(
             db, datei_hash=_hash("handle"), dateiname="x.pdf", quelle="upload",
             graph_item_id="vorher")
+        auf.beleg.sollkonto = "6570"
         await reg.freigeben(db, auf.beleg, durch=None)
         await reg.ablage_vermerken(
             db, auf.beleg, archiv_pfad="Finanzen/Kreditoren/X/2026/x.pdf",

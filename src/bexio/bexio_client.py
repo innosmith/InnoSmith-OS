@@ -733,6 +733,56 @@ class BexioClient:
         data = await self._get_v3("/accounting/business_years")
         return data if isinstance(data, list) else []
 
+    # ── Buchen (Accounting, v3) ───────────────────────────────
+
+    async def list_taxes(self) -> list[dict]:
+        """Steuercodes -- ``code`` ist die Kennung, die in Bexio sichtbar ist (``BZB81``)."""
+        data = await self._get_v3("/taxes")
+        return data if isinstance(data, list) else []
+
+    async def list_currencies(self) -> list[dict]:
+        data = await self._get_v3("/currencies")
+        return data if isinstance(data, list) else []
+
+    async def create_manual_entry(self, payload: dict) -> dict:
+        """Eine manuelle Buchung anlegen -- **ohne** Wiederholung nach Netzfehler.
+
+        ``_request`` wiederholt nach einem Transportfehler. Beim Lesen ist das
+        richtig, hier nicht: ging die Anfrage durch und nur die Antwort verloren,
+        entstuende eine zweite Buchung. Wiederholt wird nur nach 429, denn dann
+        hat Bexio nachweislich nichts verarbeitet.
+        """
+        client = await self._ensure_client()
+        for attempt in range(MAX_RETRIES):
+            resp = await client.post(f"{BASE_URL_V3}/accounting/manual_entries", json=payload)
+            if resp.status_code == 429:
+                await asyncio.sleep(RETRY_BASE_DELAY * (2 ** attempt))
+                continue
+            resp.raise_for_status()
+            return resp.json()
+        resp.raise_for_status()
+        return {}
+
+    async def attach_manual_entry_file(
+        self, manual_entry_id: int, entry_id: int, dateiname: str, inhalt: bytes
+    ) -> list[dict]:
+        """Den Beleg an eine Buchungszeile haengen -- dort sucht ihn die Treuhaenderin."""
+        client = await self._ensure_client()
+        resp = await client.post(
+            f"{BASE_URL_V3}/accounting/manual_entries/{manual_entry_id}/entries/{entry_id}/files",
+            files={"file": (dateiname, inhalt, "application/pdf")},
+            timeout=120.0,
+        )
+        resp.raise_for_status()
+        data = resp.json() if resp.content else []
+        return data if isinstance(data, list) else [data]
+
+    async def list_manual_entry_files(self, manual_entry_id: int, entry_id: int) -> list[dict]:
+        data = await self._get_v3(
+            f"/accounting/manual_entries/{manual_entry_id}/entries/{entry_id}/files"
+        )
+        return data if isinstance(data, list) else []
+
     # ── Projekte ─────────────────────────────────────────────
 
     async def list_projects(self, limit: int = 50) -> list[dict]:

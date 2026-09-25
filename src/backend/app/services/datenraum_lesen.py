@@ -66,7 +66,7 @@ SPALTENVERTRAG: dict[str, tuple[str, ...]] = {
     "bexio_rechnungen": (
         "datum", "brutto", "offen", "ist_umsatz", "status", "kunde", "kunden_id",
     ),
-    "bexio_konten": ("konto_nr", "konto"),
+    "bexio_konten": ("konto_nr", "konto", "aktiv"),
     "bexio_bankkonten": ("konto_nr", "konto", "name"),
     "bexio_geschaeftsjahre": ("jahr", "von", "bis", "ist_abgeschlossen"),
     "toggl_zeiteintraege": (
@@ -237,6 +237,50 @@ def kontonamen() -> dict[int, str]:
         _nummer(z.get("konto_nr")): str(z.get("konto") or "")
         for z in _zeilen("bexio_konten")
     }
+
+
+def aufwandskonten() -> list[dict]:
+    """Die Konten, auf die eine Kreditorenrechnung gebucht werden kann.
+
+    Begrenzt auf die Klassen 4 bis 8 und auf ``aktiv`` -- dieselbe Grenze, die
+    ``ist_aufwand`` im Journal zieht. Ein Passivkonto in der Auswahl wäre keine
+    Hilfe, sondern eine Einladung zur Fehlbuchung.
+
+    **Nicht** gefiltert wird nach ``gesperrt``, und das ist gemessen statt
+    angenommen: 9 der 149 Deklarationen zeigen auf ``4200 Dienstleistungsaufwand``,
+    das Bexio als gesperrt führt. Hätte «gesperrt» hier «unbuchbar» bedeutet, wären
+    diese neun Vorschläge alle falsch. Das Journal sagt etwas anderes -- 87
+    Buchungen auf 4200, davon 23 im Jahr 2026, und auch ``1100 Debitoren`` (852)
+    und ``2000 Kreditoren`` (440) sind gesperrt und tragen Hunderte. Das Merkmal
+    heisst «Systemkonto», nicht «nicht bebuchbar».
+
+    ``aktiv`` taugt dagegen: alle 17 inaktiven Konten haben über den ganzen
+    Bestand **null** Buchungen.
+
+    ``buchungen`` zählt, wie oft das Konto je auf der Sollseite stand. Die Zahl
+    ist der Grund, warum die Liste brauchbar bleibt: 95 aktive Aufwandskonten
+    sind zu viele zum Durchlesen, aber nur 46 wurden je benutzt. Die Auswahl kann
+    damit das Gewöhnliche vom Möglichen trennen, ohne das Möglichere zu verbergen.
+    """
+    verwendet: dict[int, int] = {}
+    for buchung in _zeilen("bexio_journal"):
+        nummer = _nummer(buchung.get("soll_konto_nr"))
+        if nummer:
+            verwendet[nummer] = verwendet.get(nummer, 0) + 1
+
+    ergebnis: list[dict] = []
+    for z in _zeilen("bexio_konten"):
+        nummer = _nummer(z.get("konto_nr"))
+        if not nummer or not (4000 <= nummer <= 8999) or not z.get("aktiv"):
+            continue
+        ergebnis.append({
+            "konto_nr": str(z.get("konto_nr") or "").strip(),
+            "konto": str(z.get("konto") or "").strip(),
+            "buchungen": verwendet.get(nummer, 0),
+        })
+
+    ergebnis.sort(key=lambda z: z["konto_nr"])
+    return ergebnis
 
 
 def bankkonten() -> list[dict]:

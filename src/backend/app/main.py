@@ -35,6 +35,7 @@ from app.routers import (
     export,
     finance,
     intelligence,
+    kreditoreneingang,
     linkedin,
     meetings,
     memory,
@@ -368,6 +369,9 @@ app.include_router(bexio.router)
 app.include_router(finance.router)
 app.include_router(debtors.router)
 app.include_router(creditors.router)
+# Nach creditors, weil beide unter /api/creditors liegen: jener fragt
+# InvoiceInsight aus, dieser ändert Zustand in TaskPilot.
+app.include_router(kreditoreneingang.router)
 app.include_router(analysis.router)
 app.include_router(intelligence.router)
 app.include_router(signa.router)

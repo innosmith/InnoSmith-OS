@@ -253,6 +253,88 @@ class TestGeschaeftsjahr:
         assert dl.geschaeftsjahr_beginn() == f"{date.today().year}-01-01"
 
 
+class TestAufwandskonten:
+    """Die Kontenauswahl des Kreditoreneingangs.
+
+    Sie existiert, weil bei 86 der 149 Lieferanten **kein** Konto deklariert ist.
+    Ohne Auswahl war «Freigeben» dort gesperrt und es gab keinen Weg daran vorbei.
+    """
+
+    @staticmethod
+    def _bestand():
+        from datetime import date
+
+        return {
+            "bexio_konten": [
+                # gesperrt und trotzdem richtig -- siehe test_gesperrt_ist_kein_filter
+                {"konto_nr": "4200", "konto": "Dienstleistungsaufwand", "aktiv": True},
+                {"konto_nr": "6570", "konto": "Software", "aktiv": True},
+                {"konto_nr": "6100", "konto": "URE Maschinen", "aktiv": False},
+                {"konto_nr": "1020", "konto": "Bankkonto", "aktiv": True},
+                {"konto_nr": "2120", "konto": "Kontokorrent", "aktiv": True},
+                {"konto_nr": "3400", "konto": "Beratungserlöse", "aktiv": True},
+                {"konto_nr": "9200", "konto": "Jahresgewinn", "aktiv": True},
+            ],
+            "bexio_journal": [
+                {"datum": date(2026, 1, 1), "betrag_chf": 100.0,
+                 "soll_konto_nr": "6570", "haben_konto_nr": "2120"},
+                {"datum": date(2026, 2, 1), "betrag_chf": 200.0,
+                 "soll_konto_nr": "6570", "haben_konto_nr": "2120"},
+            ],
+        }
+
+    def test_nur_aufwandskonten_stehen_zur_wahl(self, dl_mit_zeilen):
+        """Ein Passivkonto in der Auswahl wäre eine Einladung zur Fehlbuchung."""
+        dl = dl_mit_zeilen(self._bestand())
+        nummern = [k["konto_nr"] for k in dl.aufwandskonten()]
+
+        assert nummern == ["4200", "6570"]
+        for ausgeschlossen in ("1020", "2120", "3400", "9200"):
+            assert ausgeschlossen not in nummern
+
+    def test_ein_inaktives_konto_steht_nicht_zur_wahl(self, dl_mit_zeilen):
+        """Gemessen: alle 17 inaktiven Konten tragen null Buchungen."""
+        dl = dl_mit_zeilen(self._bestand())
+        assert "6100" not in [k["konto_nr"] for k in dl.aufwandskonten()]
+
+    def test_gesperrt_ist_kein_filter(self, dl_mit_zeilen):
+        """Der Filter, der beinahe entstand -- und neun Vorschläge entwertet hätte.
+
+        ``4200 Dienstleistungsaufwand`` führt Bexio als gesperrt, und genau dieses
+        Konto steht in 9 der 149 Deklarationen als Kandidat. Das Journal entscheidet
+        die Frage: 87 Buchungen auf 4200, davon 23 im Jahr 2026. Auch ``1100``
+        (852 Buchungen) und ``2000`` (440) sind gesperrt. Das Merkmal heisst
+        «Systemkonto», nicht «nicht bebuchbar».
+
+        Der Test steht hier, damit die Messung nicht bloss im Kommentar überlebt:
+        wer ``gesperrt`` als Filter einbaut, bricht ihn.
+        """
+        dl = dl_mit_zeilen(self._bestand())
+        assert "4200" in [k["konto_nr"] for k in dl.aufwandskonten()]
+
+    def test_die_benutzten_konten_sind_erkennbar(self, dl_mit_zeilen):
+        """95 aktive Aufwandskonten sind zu viele zum Durchlesen, 46 wurden benutzt.
+
+        Ohne diese Zahl müsste die Auswahl entweder alle gleich behandeln oder die
+        seltenen verbergen -- und ein verborgenes Konto ist eine Sackgasse mit
+        Vorhang.
+        """
+        dl = dl_mit_zeilen(self._bestand())
+        je_nummer = {k["konto_nr"]: k["buchungen"] for k in dl.aufwandskonten()}
+
+        assert je_nummer["6570"] == 2
+        assert je_nummer["4200"] == 0
+
+    def test_ohne_datenraum_gibt_es_keine_leere_liste(self, monkeypatch, tmp_path):
+        """Eine leere Auswahl sähe aus wie «es gibt keine Konten»."""
+        from app.services import datenraum_lesen as dl
+
+        monkeypatch.setattr(dl, "datenraum_pfad", lambda: tmp_path)
+        dl._vorrat.clear()
+        with pytest.raises(dl.DatenraumUnbrauchbar, match="fehlt im Datenraum"):
+            dl.aufwandskonten()
+
+
 class TestKeinStillerNullwert:
     """Fehlt eine Tabelle, wird das gemeldet -- nicht mit 0 CHF beantwortet."""
 

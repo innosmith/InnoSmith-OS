@@ -6,6 +6,7 @@ from sqlalchemy import (
     Date,
     Float,
     ForeignKey,
+    Index,
     Integer,
     Numeric,
     String,
@@ -863,6 +864,15 @@ class Kreditorenbeleg(Base):
     __tablename__ = "kreditorenbelege"
     __table_args__ = (
         UniqueConstraint("datei_hash", name="uq_kreditorenbeleg_hash"),
+        Index(
+            "uq_kreditorenbeleg_rechnung",
+            "lieferant_schluessel",
+            "rechnungsnummer",
+            unique=True,
+            postgresql_where=text(
+                "lieferant_schluessel IS NOT NULL AND rechnungsnummer IS NOT NULL"
+            ),
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
@@ -880,7 +890,7 @@ class Kreditorenbeleg(Base):
 
     quelle: Mapped[str] = mapped_column(Text, nullable=False)
     """Durch welche Tür der Beleg kam: ``autodownload``, ``ablage_hand``,
-    ``postfach``, ``upload``. Unterscheidet «diesen Monat kam nichts» von
+    ``postfach``, ``upload`` -- oder ``erzeugt``, der Monatssammelbeleg. Unterscheidet «diesen Monat kam nichts» von
     «der Bezug ist kaputt», sobald der erwartete Rhythmus dagegensteht."""
     belegart: Mapped[str] = mapped_column(Text, nullable=False, server_default="rechnung")
     """``rechnung``, ``spese`` oder ``sammelbeleg``. Eine Spese durchläuft
@@ -895,6 +905,42 @@ class Kreditorenbeleg(Base):
     geraten."""
     modul_dokument_id: Mapped[int | None] = mapped_column(Integer)
     """Verweis auf die Zeile im InvoiceInsight-Modul, wo der Inhalt steht."""
+    rechnungsnummer: Mapped[str | None] = mapped_column(Text)
+    """Der zweite Wächter, zusammen mit ``lieferant_schluessel``.
+
+    Keine Kopie des Inhalts, sondern Identität: der Hash erkennt dieselbe
+    Datei, nicht dieselbe Rechnung. Cursor liefert für dieselbe Nummer bei
+    jedem Abruf andere Bytes -- am 02.09.2026 neun Dateien für vier Rechnungen.
+    Eindeutig nur, wo Lieferant und Nummer beide bekannt sind."""
+
+    # ── Wie gebucht werden soll ───────────────────────────────────────
+    # Diese vier stehen hier und nicht im Modul, weil sie nicht die Rechnung
+    # beschreiben, sondern was mit ihr zu tun ist -- und das hängt am
+    # Buchhaltungssystem, nicht am Papier. Das Modul kennt kein Kontofeld.
+    sollkonto: Mapped[str | None] = mapped_column(Text)
+    """Das Aufwandskonto, auf das gebucht wird. ``NULL`` heisst «noch offen»."""
+    sollkonto_herkunft: Mapped[str | None] = mapped_column(Text)
+    """``vorschlag`` aus der Deklaration oder ``entscheid`` durch den Menschen.
+
+    Ohne diese Angabe sehen ein übernommener Vorschlag und eine getroffene
+    Entscheidung gleich aus. Der Unterschied trägt aber: nur eine Entscheidung
+    darf die Deklaration fortschreiben, und nur bei einem Vorschlag ist eine
+    Abweichung eine Frage statt eines Fehlers. Bei den 15 Lieferanten mit
+    ``sollkonto_kandidaten`` -- Hosttech 6512 gegen 4200, Digitec 6571 gegen
+    6500 -- gibt es gar keinen Vorschlag, dort ist ``entscheid`` Pflicht."""
+    steuerbehandlung: Mapped[str | None] = mapped_column(Text)
+    """``bezugssteuer``, ``inland_mwst``, ``ohne_mwst`` oder ``unbekannt`` --
+    dasselbe Vokabular wie in ``docs/kreditorenlieferanten.yaml``. Bezugssteuer
+    erzeugt beim Buchen die zweite Zeile gegen 2203."""
+    zahlweg: Mapped[str | None] = mapped_column(Text)
+    """``karte`` (Direktbuchung gegen 2120), ``rechnung`` (Lieferantenrechnung
+    mit offenem Posten) oder ``bank_direkt``. Deklariert statt aus dem
+    Dokumenttyp abgeleitet: in sbKreditorenBot entstand genau daraus eine
+    Doppelzahlung, weil eine per Lastschrift eingezogene Rechnung in den
+    Zahlungslauf geriet."""
+    leistung: Mapped[str | None] = mapped_column(Text)
+    """Nur gesetzt, wenn am Beleg entschieden -- sonst gilt die Vorgabe des
+    Lieferanten. Bei Hosttech hängt sie immer hier: jede Domain einzeln."""
 
     zurueckgestellt: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
     grund: Mapped[str | None] = mapped_column(Text)

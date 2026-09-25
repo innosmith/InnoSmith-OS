@@ -545,15 +545,22 @@ async def _lade_invoiceinsight(settings: dict) -> tuple[dict[str, list[dict]], d
     über den Jahreswechsel in zwei Jahre legt, und Sammelbuchungen (Cursor 2026:
     129 Einzelrechnungen hier gegen 31 Buchungsvorgänge dort).
     """
-    from app.services.invoiceinsight_client import InvoiceInsightClient
+    from app.services.invoiceinsight_rest import rechnungen_holen
 
     cfg = get_settings()
-    schluessel = settings.get("invoiceinsight_api_key") or cfg.invoiceinsight_api_key
-    url = settings.get("invoiceinsight_url") or cfg.invoiceinsight_url
-    if not schluessel or not url:
-        raise RuntimeError("InvoiceInsight nicht konfiguriert")
+    # Eigenes Token, kein Rückfall auf einen anderen Schlüssel: die
+    # Schnittstelle wird mit API_TOKEN gestartet, und am 22.09.2026 hat sie den
+    # bisher geführten Schlüssel mit 401 abgewiesen. Ein stiller Rückfall hätte
+    # daraus einen Fehler gemacht, den man erst beim Lesen des Codes versteht.
+    token = settings.get("invoiceinsight_rest_token") or cfg.invoiceinsight_rest_token
+    url = settings.get("invoiceinsight_rest_url") or cfg.invoiceinsight_rest_url
+    if not token or not url:
+        raise RuntimeError("InvoiceInsight-Schnittstelle nicht konfiguriert")
 
-    zeilen, befund = await InvoiceInsightClient(url, schluessel).export_alle_rechnungen()
+    zeilen, befund = await rechnungen_holen(url, token)
+    # Dateinamen sind Zeilen, und Zeilen erreichen den Katalog nie; die Zählung
+    # in nicht_auswertbare_belege bleibt stehen.
+    befund.pop("nicht_auswertbar_einzeln", None)
     return {"invoiceinsight_rechnungen": zeilen}, befund
 
 

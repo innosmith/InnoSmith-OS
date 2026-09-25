@@ -43,6 +43,8 @@ lieferanten:
 
   - schluessel: 1password
     ordner: 1Password
+    schreibweisen: ["1Password", "1 Password"]   # aus ZUORDNUNG des Erzeugers
+    leistung: "Jahresabo"   # 3 von 3 Archivnamen seit 2024
     sollkonto: "6570"   # einstimmig, 5 Buchungen
     zahlweg: karte
     steuer:
@@ -75,6 +77,8 @@ lieferanten:
 
   - schluessel: aioseo
     ordner: AIOSEO
+    schreibweisen: ["AIOSEO"]   # aus ZUORDNUNG des Erzeugers
+    leistung: "Jahresabo"   # 2 von 2 Archivnamen seit 2024
     sollkonto: "6570"   # einstimmig, 3 Buchungen
     zahlweg: karte
     steuer:
@@ -93,6 +97,8 @@ lieferanten:
 
   - schluessel: anthropic
     ordner: Anthropic
+    schreibweisen: ["Anthropic", "Antrophic"]   # aus ZUORDNUNG des Erzeugers
+    leistung: "Claude Pro Monatsabo"   # 3 von 4 Archivnamen seit 2024
     sollkonto: "6570"   # einstimmig, 5 Buchungen
     zahlweg: karte
     steuer:
@@ -111,6 +117,7 @@ lieferanten:
 
   - schluessel: apple
     ordner: Apple
+    schreibweisen: ["Apple"]   # aus ZUORDNUNG des Erzeugers
     sollkonto_kandidaten: ["6510", "6570"]   # 6510: 1, 6570: 1
     sollkonto_entscheid: je_rechnung
     zahlweg: karte
@@ -137,6 +144,7 @@ lieferanten:
 
   - schluessel: asga
     ordner: Asga
+    schreibweisen: ["Asga"]   # aus ZUORDNUNG des Erzeugers
     nebenordner: [_DOKUMENTE]
     sollkonto: "5720"   # einstimmig, 3 Buchungen
     zahlweg: rechnung
@@ -156,6 +164,7 @@ lieferanten:
 
   - schluessel: ausgleichskasse
     ordner: Ausgleichskasse
+    schreibweisen: ["AHV akonto", "AHV Akonto", "Ausgleichskasse"]   # aus ZUORDNUNG des Erzeugers
     nebenordner: [_DOKUMENTE]
     sollkonto_kandidaten: ["5700", "8610"]   # 5700: 74, 8610: 1
     sollkonto_entscheid: je_rechnung
@@ -176,6 +185,7 @@ lieferanten:
 
   - schluessel: bazg
     ordner: BAZG
+    leistung: "E-Vignette"   # 2 von 2 Archivnamen seit 2024
     # Keine eigene Buchung im Journal seit 2019 —
     # der Ordner besteht, die Deklaration wartet auf den ersten Beleg.
     belege_bis: 2025
@@ -197,6 +207,8 @@ lieferanten:
 
   - schluessel: bexio
     ordner: Bexio
+    schreibweisen: ["Bexio"]   # aus ZUORDNUNG des Erzeugers
+    leistung: "Jahresabo"   # 3 von 3 Archivnamen seit 2024
     sollkonto_kandidaten: ["6570", "4200"]   # 6570: 6, 4200: 2
     sollkonto_entscheid: je_rechnung
     zahlweg: rechnung
@@ -237,6 +249,8 @@ lieferanten:
 
   - schluessel: calendly_llc
     ordner: Calendly LLC
+    schreibweisen: ["Calendly"]   # aus ZUORDNUNG des Erzeugers
+    leistung: "Jahresabo"   # 2 von 3 Archivnamen seit 2024
     sollkonto: "6570"   # einstimmig, 7 Buchungen
     zahlweg: karte
     steuer:
@@ -255,6 +269,7 @@ lieferanten:
 
   - schluessel: cloudflare
     ordner: Cloudflare
+    schreibweisen: ["Cloudflare"]   # aus ZUORDNUNG des Erzeugers
     sollkonto: "6512"   # einstimmig, 1 Buchungen
     zahlweg: karte
     steuer:
@@ -280,17 +295,24 @@ lieferanten:
 
   - schluessel: cursor
     ordner: Cursor
+    schreibweisen: ["Cursor"]   # aus ZUORDNUNG des Erzeugers
+    leistung: "Usage"   # 247 von 251 Archivnamen seit 2024
     sollkonto: "6570"   # einstimmig, 48 Buchungen
     zahlweg: karte
     steuer:
       - ab: 2024-10-20
         behandlung: bezugssteuer   # keine von 50 Rechnungen weist MWST aus, Sitz im Ausland
     rhythmus: monatlich   # 19 belegte Monate, 2024-10-20..2026-09-21
+    # entschieden: ein Beleg je Kalendermonat, in USD zum BAZG-Monatsmittel, am
+    # Monatsletzten; die Rechnungen werden nur abgelegt. Gutschriften gehen einzeln.
+    buchung: sammelbeleg
+    einzeln_bei_zyklus: [YEARLY, MONTHLY]   # Jahresabo 26.04.2026, Monatsabo Jan.–März 2026: einzeln gebucht
     aktiv: true
     bestaetigt: false
 
   - schluessel: decidim
     ordner: Decidim
+    schreibweisen: ["Decidim"]   # aus ZUORDNUNG des Erzeugers
     sollkonto: "6520"   # einstimmig, 1 Buchungen
     zahlweg: karte
     steuer:
@@ -316,6 +338,8 @@ lieferanten:
 
   - schluessel: digital_impact_network
     ordner: Digital Impact Network
+    schreibweisen: ["Mitgliedschaft"]   # aus ZUORDNUNG des Erzeugers
+    leistung: "DIN Mitgliedschaft"   # 2 von 3 Archivnamen seit 2024
     sollkonto: "6520"   # einstimmig, 1 Buchungen
     zahlweg: rechnung
     steuer:
@@ -327,6 +351,7 @@ lieferanten:
 
   - schluessel: digitec
     ordner: Digitec
+    schreibweisen: ["Digitec"]   # aus ZUORDNUNG des Erzeugers
     sollkonto_kandidaten: ["6571", "6500"]   # 6571: 5, 6500: 1
     sollkonto_entscheid: je_rechnung
     regel: >-
@@ -356,6 +381,8 @@ lieferanten:
 
   - schluessel: dropbox
     ordner: DropBox
+    schreibweisen: ["Dropbox", "DropBox"]   # aus ZUORDNUNG des Erzeugers
+    leistung: "Jahresabo"   # 2 von 2 Archivnamen seit 2024
     beendet: 2026-09-21   # Anthony: kein offener Dienst mehr
     sollkonto: "6570"   # einstimmig, 6 Buchungen
     zahlweg: karte
@@ -375,6 +402,8 @@ lieferanten:
 
   - schluessel: elementor
     ordner: Elementor
+    schreibweisen: ["Elementor"]   # aus ZUORDNUNG des Erzeugers
+    leistung: "Jahresabo"   # 2 von 2 Archivnamen seit 2024
     sollkonto_kandidaten: ["6570", "4200"]   # 6570: 5, 4200: 1
     sollkonto_entscheid: je_rechnung
     zahlweg: karte
@@ -408,6 +437,8 @@ lieferanten:
 
   - schluessel: euromaster
     ordner: EuroMaster
+    schreibweisen: ["Euromaster", "Eruomaster"]   # aus ZUORDNUNG des Erzeugers
+    leistung: "Radwechsel"   # 3 von 5 Archivnamen seit 2024
     sollkonto: "6200"   # einstimmig, 8 Buchungen
     zahlweg: karte
     steuer:
@@ -433,6 +464,8 @@ lieferanten:
 
   - schluessel: figma
     ordner: Figma
+    schreibweisen: ["Figma"]   # aus ZUORDNUNG des Erzeugers
+    leistung: "Monatsabo"   # 1 von 1 Archivnamen seit 2024
     sollkonto: "6570"   # einstimmig, 1 Buchungen
     zahlweg: karte
     steuer:
@@ -451,6 +484,7 @@ lieferanten:
 
   - schluessel: florian_salman_ug
     ordner: Florian Salman UG
+    schreibweisen: ["Florian Salman", "Florian SalmanUG"]   # aus ZUORDNUNG des Erzeugers
     sollkonto: "6512"   # einstimmig, 1 Buchungen
     zahlweg: karte
     steuer:
@@ -469,6 +503,8 @@ lieferanten:
 
   - schluessel: freepik
     ordner: Freepik
+    schreibweisen: ["Freepik", "freepikcompany"]   # aus ZUORDNUNG des Erzeugers
+    leistung: "Jahresabo"   # 2 von 2 Archivnamen seit 2024
     beendet: 2026-09-21   # Anthony: kein offener Dienst mehr
     sollkonto: "6570"   # einstimmig, 4 Buchungen
     zahlweg: karte
@@ -488,6 +524,7 @@ lieferanten:
 
   - schluessel: galaxus
     ordner: Galaxus
+    schreibweisen: ["Galaxus"]   # aus ZUORDNUNG des Erzeugers
     sollkonto: "6500"   # einstimmig, 1 Buchungen
     zahlweg: karte
     steuer:
@@ -499,6 +536,7 @@ lieferanten:
 
   - schluessel: gasser_bertschy_elektro
     ordner: Gasser Bertschy Elektro
+    schreibweisen: ["Installation"]   # aus ZUORDNUNG des Erzeugers
     sollkonto: "6200"   # einstimmig, 1 Buchungen
     zahlweg: rechnung
     steuer:
@@ -510,6 +548,8 @@ lieferanten:
 
   - schluessel: getabstract
     ordner: getAbstract
+    schreibweisen: ["getabstract", "get Abstract", "getAbstract"]   # aus ZUORDNUNG des Erzeugers
+    leistung: "Jahresabo"   # 2 von 2 Archivnamen seit 2024
     sollkonto: "6570"   # einstimmig, 6 Buchungen
     zahlweg: karte
     steuer:
@@ -528,6 +568,7 @@ lieferanten:
 
   - schluessel: gomo_salt
     ordner: GoMo Salt
+    schreibweisen: ["GoMo"]   # aus ZUORDNUNG des Erzeugers
     nebenordner: [Tarife GoMo+, Vertrag]
     sollkonto: "6510"   # einstimmig, 26 Buchungen
     zahlweg: karte
@@ -540,12 +581,72 @@ lieferanten:
 
   - schluessel: google
     ordner: Google
-    sollkonto: "6570"   # einstimmig, 32 Buchungen
+    # Kein Lieferant, sondern ein Absender: auf allen Google-Rechnungen steht
+    # «Google», ob Workspace, Cloud, One oder YouTube. Im Archiv entscheidet der
+    # Ordner, im Eingang nur der Absender — deshalb führt das Modul dort jede
+    # Google-Rechnung unter diesem Schlüssel (25.09.2026: Workspace 30.11.2025,
+    # Workspace 31.08.2026, Cloud 31.08.2026). Gebucht wird nie hierauf; am
+    # Beleg wird gewählt, welcher Dienst es ist.
+    # Der Ordner «Google» selbst hält nur noch «2025/Google Cloud Test 02.05.2025».
+    aufteilen: [google_workspace, google_cloud, google_one, youtube, google_gemini]
+    aktiv: true
+    bestaetigt: false
+
+  - schluessel: google_cloud
+    ordner: Google Cloud
+    schreibweisen: ["Google Cloud", "Google, Cloud"]   # Journal 2026: «Google Cloud,»
+    # Keine Leistung: die Archivnamen tragen keine («Google Cloud 31.08.2026 KK»),
+    # und was verrechnet wird, hängt am Verbrauch — am Beleg erfassen.
+    sollkonto: "6570"   # alle Google-Buchungen 2025–2026 auf 6570 gegen 2120
     zahlweg: karte
     steuer:
-      - ab: 2025-01-08
-        behandlung: inland_mwst   # 37 von 37 Rechnungen weisen MWST aus
-    rhythmus: monatlich   # 15 belegte Monate, 2025-06-25..2026-09-20
+      - ab: 2026-03-31
+        behandlung: inland_mwst   # 4 von 4 gelesenen weisen MWST aus, 2 ungelesen
+    rhythmus: monatlich   # 6 belegte Monate, 2026-03..2026-08
+    aktiv: true
+    bestaetigt: false
+
+  - schluessel: google_gemini
+    ordner: Google Gemini
+    # Prepaid-Guthaben für die Gemini-API. Eigener Ordner, damit die Aufladung
+    # nicht zwischen den Monatsrechnungen von Google Cloud untergeht.
+    # Die Monatsrechnungen, die aus dem Guthaben bezahlt werden, werden nur
+    # abgelegt, nicht gebucht (Entscheid 25.09.2026). Wie sie erkannt werden,
+    # wird festgelegt, sobald die erste kommt — bis dahin kein Takt.
+    schreibweisen: ["Google, Gemini"]   # Journal 2026: «Google, Gemini API»
+    leistung: "Prepaid"
+    sollkonto: "6570"
+    zahlweg: karte
+    steuer:
+      - ab: null
+        behandlung: unbekannt   # noch keine Rechnung im Modul gelesen
+    rhythmus: unbekannt
+    aktiv: true
+    bestaetigt: false
+
+  - schluessel: google_one
+    ordner: Google One
+    schreibweisen: ["Google One", "Google AI"]   # Journal 2025: «Google One Monatsabo», «Google AI»
+    leistung: "Abo"   # «Google AI Pro», 17.00 CHF
+    sollkonto: "6570"
+    zahlweg: karte
+    steuer:
+      - ab: 2025-06-25
+        behandlung: inland_mwst   # 2 von 2 Rechnungen weisen MWST aus
+    rhythmus: monatlich   # 2 belegte Monate, 2025-06-25..2025-07-25
+    aktiv: false   # seit 2025-07 keine Rechnung mehr
+    bestaetigt: false
+
+  - schluessel: google_workspace
+    ordner: Google Workspace
+    schreibweisen: ["Google Workspace", "Google, Workspace"]   # Journal 2026 führt beide
+    leistung: "Abo"   # Business Standard; Archivname «Google Workspace Abo 31.01.2026 KK»
+    sollkonto: "6570"
+    zahlweg: karte
+    steuer:
+      - ab: 2025-09-30
+        behandlung: inland_mwst   # 11 von 11 Rechnungen weisen MWST aus
+    rhythmus: monatlich   # am Monatsende, 30.27 CHF, ab 08.2026 42.36 CHF
     aktiv: true
     bestaetigt: false
 
@@ -558,6 +659,7 @@ lieferanten:
 
   - schluessel: handelsregisteramt_kt_bern
     ordner: Handelsregisteramt Kt. Bern
+    schreibweisen: ["Handelsregister"]   # aus ZUORDNUNG des Erzeugers
     sollkonto: "6520"   # einstimmig, 1 Buchungen
     zahlweg: rechnung
     steuer:
@@ -583,6 +685,7 @@ lieferanten:
 
   - schluessel: hostinger
     ordner: Hostinger
+    schreibweisen: ["Hostinger"]   # aus ZUORDNUNG des Erzeugers
     sollkonto: "6570"   # einstimmig, 2 Buchungen
     zahlweg: karte
     steuer:
@@ -594,6 +697,7 @@ lieferanten:
 
   - schluessel: hostpoint
     ordner: Hostpoint
+    schreibweisen: ["Hostpoint"]   # aus ZUORDNUNG des Erzeugers
     sollkonto: "6512"   # einstimmig, 2 Buchungen
     zahlweg: karte
     steuer:
@@ -605,6 +709,7 @@ lieferanten:
 
   - schluessel: hosttech
     ordner: Hosttech
+    schreibweisen: ["hosttech", "Hosttec"]   # aus ZUORDNUNG des Erzeugers
     sollkonto_kandidaten: ["4200", "6512"]   # 4200: 3, 6512: 1
     sollkonto_entscheid: je_rechnung
     regel: >-
@@ -647,6 +752,7 @@ lieferanten:
 
   - schluessel: kanzlei_berger
     ordner: Kanzlei Berger
+    schreibweisen: ["Beratung"]   # aus ZUORDNUNG des Erzeugers
     sollkonto_kandidaten: ["4200", "4400"]   # 4200: 1, 4400: 1
     sollkonto_entscheid: je_rechnung
     zahlweg: rechnung
@@ -680,6 +786,7 @@ lieferanten:
 
   - schluessel: linkedin
     ordner: LinkedIn
+    leistung: "Premium Monatsabo"   # 1 von 1 Archivnamen seit 2024
     # Keine eigene Buchung im Journal seit 2019 —
     # der Ordner besteht, die Deklaration wartet auf den ersten Beleg.
     belege_bis: 2024
@@ -722,6 +829,8 @@ lieferanten:
 
   - schluessel: meisterlabs
     ordner: MeisterLabs
+    schreibweisen: ["Meister Task", "MeisterTask"]   # aus ZUORDNUNG des Erzeugers
+    leistung: "MeisterTask Jahresabo"   # 2 von 3 Archivnamen seit 2024
     sollkonto: "6570"   # einstimmig, 8 Buchungen
     zahlweg: karte
     steuer:
@@ -733,6 +842,7 @@ lieferanten:
 
   - schluessel: metanet
     ordner: Metanet
+    schreibweisen: ["Metanet", "Domain"]   # aus ZUORDNUNG des Erzeugers
     sollkonto_kandidaten: ["6512", "4200", "6570"]   # 6512: 81, 4200: 21, 6570: 1
     sollkonto_entscheid: je_rechnung
     regel: >-
@@ -754,6 +864,7 @@ lieferanten:
 
   - schluessel: microsoft
     ordner: Microsoft
+    schreibweisen: ["Microsoft"]   # aus ZUORDNUNG des Erzeugers
     sollkonto: "6570"   # einstimmig, 16 Buchungen
     zahlweg: karte
     steuer:
@@ -779,6 +890,8 @@ lieferanten:
 
   - schluessel: miro
     ordner: Miro
+    schreibweisen: ["Miro"]   # aus ZUORDNUNG des Erzeugers
+    leistung: "Jahresabo"   # 2 von 2 Archivnamen seit 2024
     sollkonto_kandidaten: ["6570", "4200"]   # 6570: 9, 4200: 1
     sollkonto_entscheid: je_rechnung
     regel: >-
@@ -793,6 +906,7 @@ lieferanten:
 
   - schluessel: mobiliar
     ordner: Mobiliar
+    schreibweisen: ["Fahrzeugversicherung", "Betriebsversicherung", "Unfallversicherung"]   # aus ZUORDNUNG des Erzeugers
     sollkonto_kandidaten: ["5730", "6220", "6300"]   # 5730: 10, 6220: 6, 6300: 5
     sollkonto_entscheid: je_rechnung
     zahlweg: [bank_direkt, rechnung]
@@ -812,6 +926,7 @@ lieferanten:
 
   - schluessel: namecheap
     ordner: Namecheap
+    schreibweisen: ["Namecheap"]   # aus ZUORDNUNG des Erzeugers
     sollkonto: "6512"   # einstimmig, 1 Buchungen
     zahlweg: karte
     steuer:
@@ -823,6 +938,7 @@ lieferanten:
 
   - schluessel: napkin
     ordner: Napkin
+    schreibweisen: ["Napkin"]   # aus ZUORDNUNG des Erzeugers
     sollkonto: "6570"   # einstimmig, 2 Buchungen
     zahlweg: karte
     steuer:
@@ -834,6 +950,8 @@ lieferanten:
 
   - schluessel: neulandpro
     ordner: Neulandpro
+    schreibweisen: ["Neulandpro"]   # aus ZUORDNUNG des Erzeugers
+    leistung: "Monatsabo"   # 1 von 1 Archivnamen seit 2024
     sollkonto: "6570"   # einstimmig, 1 Buchungen
     zahlweg: karte
     steuer:
@@ -845,6 +963,8 @@ lieferanten:
 
   - schluessel: openai
     ordner: OpenAI
+    schreibweisen: ["OpenAI", "Open AI", "OpanAI", "ChatGPT"]   # aus ZUORDNUNG des Erzeugers
+    leistung: "Monatsabo"   # 21 von 28 Archivnamen seit 2024
     sollkonto: "6570"   # einstimmig, 29 Buchungen
     zahlweg: karte
     steuer:
@@ -863,6 +983,7 @@ lieferanten:
 
   - schluessel: orellfuessli
     ordner: Orellfüssli
+    schreibweisen: ["Orell", "Orellf"]   # aus ZUORDNUNG des Erzeugers
     sollkonto: "6503"   # einstimmig, 2 Buchungen
     zahlweg: karte
     steuer:
@@ -881,6 +1002,8 @@ lieferanten:
 
   - schluessel: perplexity
     ordner: Perplexity
+    schreibweisen: ["Perplexity"]   # aus ZUORDNUNG des Erzeugers
+    leistung: "Jahresabo"   # 2 von 2 Archivnamen seit 2024
     sollkonto: "6570"   # einstimmig, 2 Buchungen
     zahlweg: karte
     steuer:
@@ -892,6 +1015,7 @@ lieferanten:
 
   - schluessel: phantombuster
     ordner: Phantombuster
+    schreibweisen: ["PhantomBuster", "Phantom Buster", "Phantombuster"]   # aus ZUORDNUNG des Erzeugers
     sollkonto_kandidaten: ["4200", "6570"]   # 4200: 3, 6570: 2
     sollkonto_entscheid: je_rechnung
     zahlweg: karte
@@ -911,6 +1035,8 @@ lieferanten:
 
   - schluessel: pipedrive
     ordner: Pipedrive
+    schreibweisen: ["Pipedrive"]   # aus ZUORDNUNG des Erzeugers
+    leistung: "Jahresabo"   # 3 von 3 Archivnamen seit 2024
     sollkonto: "6570"   # einstimmig, 7 Buchungen
     zahlweg: karte
     steuer:
@@ -922,6 +1048,7 @@ lieferanten:
 
   - schluessel: post
     ordner: Post
+    schreibweisen: ["Post"]   # aus ZUORDNUNG des Erzeugers
     sollkonto_kandidaten: ["6513", "6940", "6570"]   # 6513: 4, 6940: 1, 6570: 1
     sollkonto_entscheid: je_rechnung
     zahlweg: [bank_direkt, karte]
@@ -941,6 +1068,7 @@ lieferanten:
 
   - schluessel: protekta
     ordner: Protekta
+    schreibweisen: ["Protekta"]   # aus ZUORDNUNG des Erzeugers
     sollkonto: "6300"   # einstimmig, 1 Buchungen
     zahlweg: rechnung
     steuer:
@@ -973,6 +1101,7 @@ lieferanten:
 
   - schluessel: quimbaya
     ordner: Quimbaya
+    schreibweisen: ["Quimbaya"]   # aus ZUORDNUNG des Erzeugers
     sollkonto: "6640"   # einstimmig, 1 Buchungen
     zahlweg: rechnung
     steuer:
@@ -991,6 +1120,8 @@ lieferanten:
 
   - schluessel: rapidapi
     ordner: RapidAPI
+    schreibweisen: ["Rapid API"]   # aus ZUORDNUNG des Erzeugers
+    leistung: "Monatsabo"   # entschieden 25.09.2026 — im Archiv nur 2 von 8 Namen mit Leistung
     sollkonto: "6570"   # einstimmig, 9 Buchungen
     zahlweg: karte
     steuer:
@@ -1016,6 +1147,8 @@ lieferanten:
 
   - schluessel: render
     ordner: Render
+    schreibweisen: ["Render"]   # aus ZUORDNUNG des Erzeugers
+    leistung: "Hosting"   # 7 von 9 Archivnamen seit 2024
     sollkonto_kandidaten: ["4200", "4400"]   # 4200: 10, 4400: 1
     sollkonto_entscheid: je_rechnung
     regel: >-
@@ -1051,6 +1184,8 @@ lieferanten:
 
   - schluessel: salt
     ordner: Salt
+    schreibweisen: ["Salt"]   # aus ZUORDNUNG des Erzeugers
+    leistung: "Monatsabo"   # 2 von 32 Archivnamen seit 2024
     sollkonto: "6510"   # einstimmig, 40 Buchungen
     zahlweg: karte
     steuer:
@@ -1076,6 +1211,8 @@ lieferanten:
 
   - schluessel: solar_communications
     ordner: Solar Communications
+    schreibweisen: ["Solar Communications"]   # aus ZUORDNUNG des Erzeugers
+    leistung: "Server Hosting Jahresabo"   # 1 von 1 Archivnamen seit 2024
     sollkonto: "4200"   # einstimmig, 1 Buchungen
     zahlweg: karte
     steuer:
@@ -1108,6 +1245,8 @@ lieferanten:
 
   - schluessel: spusu
     ordner: Spusu
+    schreibweisen: ["Spusu"]   # aus ZUORDNUNG des Erzeugers
+    leistung: "Monatsabo"   # 2 von 22 Archivnamen seit 2024
     sollkonto: "6510"   # einstimmig, 23 Buchungen
     zahlweg: karte
     steuer:
@@ -1126,6 +1265,7 @@ lieferanten:
 
   - schluessel: steuerverwaltung_kt_bern
     ordner: Steuerverwaltung Kt. Bern
+    schreibweisen: ["Kantons", "Direkte Bundessteuer"]   # aus ZUORDNUNG des Erzeugers
     nebenordner: [_DOKUMENTE]
     sollkonto_kandidaten: ["8900", "8901"]   # 8900: 17, 8901: 14
     sollkonto_entscheid: je_rechnung
@@ -1139,6 +1279,7 @@ lieferanten:
 
   - schluessel: strassenverkehrsamt
     ordner: Strassenverkehrsamt
+    schreibweisen: ["E Bike Vignette"]   # aus ZUORDNUNG des Erzeugers
     sollkonto: "6230"   # einstimmig, 1 Buchungen
     zahlweg: rechnung
     steuer:
@@ -1157,6 +1298,7 @@ lieferanten:
 
   - schluessel: t_r
     ordner: T-R
+    schreibweisen: ["Treuhand"]   # aus ZUORDNUNG des Erzeugers
     nebenordner: [Vertragliches]
     sollkonto: "6530"   # einstimmig, 14 Buchungen
     zahlweg: rechnung
@@ -1190,6 +1332,8 @@ lieferanten:
 
   - schluessel: tesla
     ordner: Tesla
+    schreibweisen: ["Tesla", "Tesal"]   # aus ZUORDNUNG des Erzeugers
+    leistung: "Connectivity"   # 21 von 25 Archivnamen seit 2024
     nebenordner: [Bestellung und Anzahlung, Betriebsdaten, Reparaturen, Strassenverkehrsamt, Unterlagen, Versicherungen]
     sollkonto: "6200"   # einstimmig, 18 Buchungen
     zahlweg: karte
@@ -1216,6 +1360,8 @@ lieferanten:
 
   - schluessel: toggl
     ordner: Toggl
+    schreibweisen: ["Toggl"]   # aus ZUORDNUNG des Erzeugers
+    leistung: "Track Jahresabo"   # 2 von 4 Archivnamen seit 2024
     sollkonto: "6570"   # einstimmig, 8 Buchungen
     zahlweg: karte
     steuer:
@@ -1262,6 +1408,8 @@ lieferanten:
 
   - schluessel: uizard
     ordner: Uizard
+    schreibweisen: ["Uizard"]   # aus ZUORDNUNG des Erzeugers
+    leistung: "Monatsabo"   # 1 von 1 Archivnamen seit 2024
     sollkonto: "6570"   # einstimmig, 1 Buchungen
     zahlweg: karte
     steuer:
@@ -1280,6 +1428,7 @@ lieferanten:
 
   - schluessel: velogfeller
     ordner: VeloGfeller
+    schreibweisen: ["veloGfeller"]   # aus ZUORDNUNG des Erzeugers
     sollkonto: "6200"   # einstimmig, 2 Buchungen
     zahlweg: karte
     steuer:
@@ -1291,6 +1440,7 @@ lieferanten:
 
   - schluessel: vz
     ordner: VZ
+    schreibweisen: ["VZ"]   # aus ZUORDNUNG des Erzeugers
     nebenordner: [_DOKUMENTE]
     sollkonto_kandidaten: ["5720", "8000"]   # 5720: 4, 8000: 1
     sollkonto_entscheid: je_rechnung
@@ -1304,6 +1454,8 @@ lieferanten:
 
   - schluessel: wispr_flow
     ordner: Wispr Flow
+    schreibweisen: ["Wispr"]   # aus ZUORDNUNG des Erzeugers
+    leistung: "Jahresabo"   # 1 von 1 Archivnamen seit 2024
     sollkonto: "6570"   # einstimmig, 1 Buchungen
     zahlweg: karte
     steuer:
@@ -1315,6 +1467,8 @@ lieferanten:
 
   - schluessel: wordfence
     ordner: Wordfence
+    schreibweisen: ["Wordfence", "Worlfence"]   # aus ZUORDNUNG des Erzeugers
+    leistung: "Jahresabo"   # 3 von 3 Archivnamen seit 2024
     sollkonto: "6570"   # einstimmig, 4 Buchungen
     zahlweg: karte
     steuer:
@@ -1341,17 +1495,22 @@ lieferanten:
 
   - schluessel: youtube
     ordner: YouTube
-    sollkonto: "6570"   # einstimmig, 1 Buchungen
+    # Die Buchungen liefen bis 2026 unter «Google YouTube» und «Google, YouTube»
+    # — deshalb zählte der Erzeuger nur eine und kannte weder Steuer noch Takt.
+    schreibweisen: ["YouTube", "Google YouTube", "Google, YouTube"]
+    leistung: "Abo"   # YouTube Premium, 33.90 CHF; Eingang «YouTube Abo 08.09.2026 KK»
+    sollkonto: "6570"   # alle Google-Buchungen 2025–2026 auf 6570 gegen 2120
     zahlweg: karte
     steuer:
-      - ab: null
-        behandlung: unbekannt   # weder Rechnung noch Buchung geben Auskunft
-    rhythmus: unbekannt   # 1 belegte Monate, 2024-12-31..2024-12-31
+      - ab: 2025-01-08
+        behandlung: inland_mwst   # 20 von 20 archivierten Rechnungen weisen MWST aus
+    rhythmus: monatlich   # jeweils am 8., seit 2025-01-08
     aktiv: true
     bestaetigt: false
 
   - schluessel: zapier
     ordner: Zapier
+    schreibweisen: ["Zapier"]   # aus ZUORDNUNG des Erzeugers
     sollkonto: "6570"   # einstimmig, 3 Buchungen
     zahlweg: karte
     steuer:
@@ -1363,6 +1522,8 @@ lieferanten:
 
   - schluessel: zoom
     ordner: Zoom
+    schreibweisen: ["Zoom"]   # aus ZUORDNUNG des Erzeugers
+    leistung: "Jahresabo"   # 1 von 1 Archivnamen seit 2024
     beendet: 2026-09-21   # Anthony: kein offener Dienst mehr
     sollkonto: "6570"   # einstimmig, 9 Buchungen
     zahlweg: karte

@@ -680,12 +680,24 @@ CREATE TABLE kreditorenbelege (
     graph_pfad              TEXT,               -- letzter bekannter Ort
     archiv_pfad             TEXT,               -- gesetzt mit abgelegt_am
     quelle                  TEXT NOT NULL CHECK (quelle IN
-                                ('autodownload', 'ablage_hand', 'postfach', 'upload')),
+                                ('autodownload', 'ablage_hand', 'postfach', 'upload', 'erzeugt')),
     belegart                TEXT NOT NULL DEFAULT 'rechnung' CHECK (belegart IN
                                 ('rechnung', 'spese', 'sammelbeleg')),
     eingang_am              TIMESTAMPTZ DEFAULT now(),
     lieferant_schluessel    TEXT,               -- aus docs/kreditorenlieferanten.yaml
     modul_dokument_id       INTEGER,            -- dort steht der Inhalt
+    rechnungsnummer         TEXT,               -- zweiter Wächter, mit dem Lieferanten
+    -- Wohin gebucht wird. Steht hier und nicht im Modul, weil es nicht die
+    -- Rechnung beschreibt, sondern was mit ihr zu tun ist. Bei 15 der 149
+    -- Lieferanten trägt die Deklaration kein Konto, sondern Kandidaten
+    -- (Hosttech 6512 gegen 4200) -- die Entscheidung braucht diese Zeile.
+    sollkonto               TEXT,
+    sollkonto_herkunft      TEXT CHECK (sollkonto_herkunft IN
+                                ('vorschlag', 'entscheid')),
+    steuerbehandlung        TEXT CHECK (steuerbehandlung IN
+                                ('bezugssteuer', 'inland_mwst', 'ohne_mwst', 'unbekannt')),
+    zahlweg                 TEXT CHECK (zahlweg IN ('karte', 'rechnung', 'bank_direkt')),
+    leistung                TEXT,               -- am Beleg entschieden, sonst Vorgabe
     zurueckgestellt         BOOLEAN NOT NULL DEFAULT false,
     grund                   TEXT,
     freigegeben_am          TIMESTAMPTZ,        -- vom Menschen bestätigt
@@ -696,13 +708,22 @@ CREATE TABLE kreditorenbelege (
     sammelbeleg_id          UUID REFERENCES kreditorenbelege(id) ON DELETE SET NULL,
     created_at              TIMESTAMPTZ DEFAULT now(),
     updated_at              TIMESTAMPTZ DEFAULT now(),
-    CONSTRAINT uq_kreditorenbeleg_hash UNIQUE (datei_hash)
+    CONSTRAINT uq_kreditorenbeleg_hash UNIQUE (datei_hash),
+    -- Freigegeben ohne Konto wäre eine Freigabe, die beim Buchen scheitert:
+    -- der Beleg sähe erledigt aus und wäre es nicht.
+    CONSTRAINT ck_kreditorenbeleg_freigabe_braucht_konto
+        CHECK (freigegeben_am IS NULL OR sollkonto IS NOT NULL)
 );
 
 -- Die Warteliste: was offen ist, steht ohne Freigabe da. Der häufigste Zugriff.
 CREATE INDEX idx_kreditorenbelege_offen ON kreditorenbelege(eingang_am)
     WHERE freigegeben_am IS NULL;
 CREATE INDEX idx_kreditorenbelege_lieferant ON kreditorenbelege(lieferant_schluessel);
+-- Der Hash erkennt dieselbe Datei, nicht dieselbe Rechnung: Cursor liefert für
+-- dieselbe Nummer bei jedem Abruf andere Bytes.
+CREATE UNIQUE INDEX uq_kreditorenbeleg_rechnung
+    ON kreditorenbelege(lieferant_schluessel, rechnungsnummer)
+    WHERE lieferant_schluessel IS NOT NULL AND rechnungsnummer IS NOT NULL;
 CREATE INDEX idx_kreditorenbelege_sammelbeleg ON kreditorenbelege(sammelbeleg_id)
     WHERE sammelbeleg_id IS NOT NULL;
 

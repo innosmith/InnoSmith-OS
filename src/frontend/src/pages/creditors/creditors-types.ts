@@ -56,6 +56,10 @@ export interface VendorRow {
 export interface InvoiceRow {
   index?: number;
   invoice_id?: number;
+  /** Datenbankkennung des Belegs. Nicht dasselbe wie `index` oder `invoice_id`:
+   *  die beiden sind Zeilennummern im Abzug und verschieben sich bei jedem
+   *  Filter. Nur diese Kennung taugt zum Schreiben. */
+  beleg_id?: number;
   vendor?: string;
   date?: string;
   amount?: number;
@@ -75,6 +79,7 @@ export interface CreditorsFilter {
 }
 
 export type CreditorsTab =
+  | 'eingang'
   | 'uebersicht'
   | 'rechnungen'
   | 'erneuerungen'
